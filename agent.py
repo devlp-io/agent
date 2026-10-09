@@ -1,4 +1,3 @@
-cat > ~/agent/agent.py <<'PYEOF'
 from openai import OpenAI
 import subprocess, warnings, time, os, re, sys, threading, itertools, json, pathlib
 import shutil, concurrent.futures, urllib.parse, html as html_mod
