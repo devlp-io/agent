@@ -703,6 +703,9 @@ def run_command(cmd, timeout=CMD_TIMEOUT):
     low = cmd.lower()
     if any(k in low for k in ("find ", "locate ", "mlocate", "grep -r")) and "/mnt" not in low and "/sdcard" not in low:
         timeout = min(timeout, 45)
+    # cap web fuzzers so huge wordlists don't hang the loop
+    if any(t in low for t in ("ffuf ", "gobuster ", "feroxbuster ", "wfuzz ", "dirb ")):
+        timeout = min(timeout, 300)   # 5 min max per fuzz run
     cmd = re.sub(r'(https?://[^\s\']*)\(([^()]*)\)', r'\1%28\2%29', cmd)
     if "curl" in low and "-m " not in low and "--max-time" not in low:
         cmd = re.sub(r"\bcurl\b(?!\s+-m\b)(?!\s+--max-time\b)",
@@ -1777,7 +1780,15 @@ RULES
     nuclei -u <url> -tags cve,exposure,misconfig,wordpress -severity medium,high,critical -silent
 18. If a debug/dev endpoint rejects all guesses, look for a JS bundle, config file, or
     source map that references the required cookie/param name — the frontend knows.
-19. The /metrics Prometheus endpoint leaks the full URL surface with request counts.
+19. FUZZING BUDGET — use these defaults, DO NOT deviate without reason:
+    ffuf -u <url>/FUZZ -w /usr/share/seclists/Discovery/Web-Content/common.txt -t 40 -mc 200,301,302,401,403,405,500 -s
+    - Start with common.txt (4.6k). Only escalate to raft-small-words.txt (8.5k) on a second pass.
+    - NEVER use raft-medium-*, directory-list-2.3-medium.txt, or anything >10k words unless the target is local.
+    - Default -t 40. NEVER use -t 5.
+    - NEVER add -p <delay> unless the target has rate-limited you (429).
+    - The wordlist path is /usr/share/seclists/ (Ubuntu). NOT /opt/SecLists (Kali).
+    - Before fuzzing, verify wordlist exists: ls /usr/share/seclists/Discovery/Web-Content/common.txt
+20. The /metrics Prometheus endpoint leaks the full URL surface with request counts.
     If it's exposed, mine it for endpoints you haven't seen yet.
 20. For mass brute-force at scale (>500 req/s), write a python asyncio/aiohttp or httpx
     script with FILE:, then run it with COMMAND:. Do not shell-loop 100k curls.
