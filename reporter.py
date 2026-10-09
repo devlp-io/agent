@@ -1,4 +1,3 @@
-cat > ~/agent/reporter.py <<'PYEOF'
 """
 reporter.py — rich report + PDF generation for the agent.
 Reads state.json + scan dir, produces:
@@ -296,6 +295,40 @@ def build_report_markdown(run_dir, state):
                 if r.get("snippet"):
                     M.append(f"   - {r['snippet'][:200]}")
             M.append("")
+
+    # ── proofs
+    proofs_dir = run_dir / "proofs"
+    if proofs_dir.exists():
+        M.append("## Proofs")
+        M.append("")
+        M.append(f"Location: `{proofs_dir}`")
+        M.append("")
+        M.append("- `commands.sh` — re-runnable script of every successful command")
+        cmds_log = proofs_dir / "commands.log"
+        if cmds_log.exists():
+            M.append(f"- `commands.log` — full log ({cmds_log.stat().st_size} bytes)")
+        leaked = proofs_dir / "leaked_data"
+        if leaked.exists():
+            for sub in sorted(leaked.iterdir()):
+                if sub.is_dir():
+                    count = sum(1 for _ in sub.iterdir())
+                    if count:
+                        M.append(f"- `leaked_data/{sub.name}/` — {count} file(s)")
+        M.append("")
+        M.append("### Leaked data samples")
+        M.append("")
+        for cat in ("users", "creds", "tokens", "hashes", "dashboards"):
+            cat_dir = leaked / cat if leaked.exists() else None
+            if not cat_dir or not cat_dir.exists(): continue
+            for f in sorted(cat_dir.iterdir())[:3]:
+                try: content = f.read_text()[:2000]
+                except Exception: continue
+                M.append(f"**{cat} / {f.name}**")
+                M.append("")
+                M.append("```")
+                M.append(_clip(content, 1500))
+                M.append("```")
+                M.append("")
 
     if notes:
         M.append("## Analyst Notes")
