@@ -1,0 +1,22 @@
+# Force LF line endings everywhere in the repo
+* text=auto eol=lf
+
+# Specific file types — always LF (bash, python)
+*.sh text eol=lf
+*.py text eol=lf
+*.md text eol=lf
+
+# Windows-only files
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary
+*.pdf binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.zip binary
+*.tar.gz binary
+*.exe binary
+*.deb binary
