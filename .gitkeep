@@ -1,0 +1,3 @@
+touch ~/agent/tools/.gitkeep
+touch ~/agent/wordlists/.gitkeep
+touch ~/agent/logs/.gitkeep
