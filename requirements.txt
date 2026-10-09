@@ -1,5 +1,15 @@
 openai>=1.30.0
 beautifulsoup4>=4.12.0
 requests>=2.31.0
-markdown>=3.5.0
-weasyprint>=60.0
+markdown>=3.5
+
+# ag v2 additions
+httpx[http2]>=0.27.0
+aiohttp>=3.9.0
+aiosqlite>=0.20.0
+rich>=13.7.0
+pyyaml>=6.0.1
+python-dotenv>=1.0.0
+
+# browser: system chromium via subprocess, no pip dep
+# pdf: optional, install weasyprint manually if you want PDF reports

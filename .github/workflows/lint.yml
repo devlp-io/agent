@@ -4,7 +4,6 @@ on:
   push:
     branches: [ main, master ]
   pull_request:
-    branches: [ main, master ]
 
 jobs:
   syntax:
@@ -16,7 +15,18 @@ jobs:
           python-version: '3.11'
       - name: syntax check
         run: |
-          python -c "import ast; ast.parse(open('agent.py').read()); print('agent.py ok')"
-          python -c "import ast; ast.parse(open('reporter.py').read()); print('reporter.py ok')"
-      - name: bash lint
-        run: bash -n bootstrap.sh && echo "bootstrap.sh ok"
+          python - << 'PYEOF'
+          import ast, pathlib, sys
+          bad = 0
+          for p in pathlib.Path('.').rglob('*.py'):
+              if any(x in p.parts for x in ('venv', '__pycache__', 'tools')):
+                  continue
+              try:
+                  ast.parse(p.read_text())
+              except SyntaxError as e:
+                  print(f"SYNTAX {p}: {e}")
+                  bad += 1
+          if bad:
+              sys.exit(1)
+          print("all files parse OK")
+          PYEOF

@@ -74,3 +74,12 @@ scans/
 *.bak
 *.orig
 *.rej
+# ag v2
+data/
+core/__pycache__/
+intel/__pycache__/
+attack/__pycache__/
+evidence/__pycache__/
+*.bak
+*.db
+.env
