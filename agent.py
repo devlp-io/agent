@@ -54,9 +54,9 @@ def _live_print(text=""):
 def _live_finding(text):
     _live_write(LIVE_FIND_LOG, text)
 
-MODEL         = os.environ.get("AG_MODEL", "dolphin3")
-BASE          = os.environ.get("AG_BASE",  "http://localhost:11434/v1")
-APIK          = os.environ.get("AG_KEY",   "ollama")
+MODEL         = os.environ.get("AG_MODEL", "deepseek-chat")
+BASE          = os.environ.get("AG_BASE",  "https://api.deepseek.com/v1")
+APIK          = os.environ.get("AG_KEY",   os.environ.get("DEEPSEEK_KEY", ""))
 MAX_TURNS     = int(os.environ.get("AG_MAX_TURNS", "300"))
 CMD_TIMEOUT   = int(os.environ.get("AG_CMD_TIMEOUT", "1800"))
 PROXY         = os.environ.get("AG_PROXY", "")
