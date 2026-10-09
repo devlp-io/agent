@@ -170,8 +170,8 @@ def extract_target(task):
     if m: return m
     cands = _regex_targets(task)
     if not cands: return None
-    cands.sort(key=lambda h: (-h.count("."), cands.index(h)))
-    return cands[0]
+    ranked = sorted(enumerate(cands), key=lambda pair: (-pair[1].count("."), pair[0]))
+    return ranked[0][1]
 
 METHODOLOGY_LIB = {
 
