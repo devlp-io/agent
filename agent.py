@@ -1635,10 +1635,22 @@ def dispatch(kind, payload, run_dir, state):
 def _drain_auto_probe(run_dir, state):
     queue = state.pop("_auto_probe_queue", [])
     seen   = set(state.get("_auto_probed", []))
+    sigs   = set()
+    # dedupe similar paths: /X, /X/, //X, /./X, /X%20 → /X
+    def _sig(u):
+        try:
+            from urllib.parse import urlparse
+            p = urlparse(u).path.lower()
+            p = re.sub(r'[/%20.\-]+', '/', p).strip('/')
+            return (urlparse(u).netloc, p)
+        except Exception:
+            return (u, "")
     fired  = 0
     for url in queue:
         if url in seen: continue
-        seen.add(url)
+        s = _sig(url)
+        if s in sigs: continue
+        sigs.add(s); seen.add(url)
         fired += 1
         print(f"  {C['mag']}[auto-PROBE] GET {url}{C['rst']}")
         _live_print(f"[auto-PROBE] GET {url}")
