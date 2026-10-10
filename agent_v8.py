@@ -12,6 +12,7 @@ Run:  python agent_v8.py "scan https://target.example.com"
 """
 import os
 import re
+import itertools
 import sys
 import time
 import json
@@ -101,6 +102,35 @@ def current_client():
 C = dict(rst="\033[0m", bold="\033[1m", dim="\033[2m", cyan="\033[36m",
          green="\033[32m", yellow="\033[33m", red="\033[31m", mag="\033[35m",
          blue="\033[34m", gray="\033[90m")
+
+class Spinner:
+    FRAMES = "|/-\\"
+    def __init__(self, label, color="yellow"):
+        self.label = label
+        self.color = color
+        self._stop = threading.Event()
+        self._t = None
+    def _spin(self):
+        for f in itertools.cycle(self.FRAMES):
+            if self._stop.is_set():
+                break
+            sys.stdout.write(
+                f"\r{C[self.color]}{f}{C['rst']} "
+                f"{C['dim']}{self.label}{C['rst']}   "
+            )
+            sys.stdout.flush()
+            self._stop.wait(0.08)
+    def __enter__(self):
+        self._t = threading.Thread(target=self._spin, daemon=True)
+        self._t.start()
+        return self
+    def __exit__(self, *a):
+        self._stop.set()
+        if self._t:
+            self._t.join(timeout=0.3)
+        sys.stdout.write("\r\033[K")
+        sys.stdout.flush()
+
 
 def hr(): print(f"{C['gray']}{'-'*70}{C['rst']}")
 def banner(t, c="cyan"): print(f"{C[c]}{C['bold']}{t}{C['rst']}")
@@ -509,11 +539,16 @@ def _run_shell(cmd, timeout=None):
 # ────────────────────────────────────────────────────────────────────
 
 def do_command(cmd):
+    cmd = re.sub(r"^\s*(COMMAND|PARALLEL):\s*", "", cmd)
     return _run_shell(cmd)
 
 
 def do_parallel(spec):
+    # strip nested COMMAND:/PARALLEL: prefixes the model sometimes emits
+    spec = re.sub(r"(?m)^\s*(COMMAND|PARALLEL):\s*", "", spec)
     cmds = [c.strip() for c in spec.split("|||") if c.strip()]
+    cmds = [re.sub(r"^\s*(COMMAND|PARALLEL):\s*", "", c).strip() for c in cmds]
+    cmds = [c for c in cmds if c]
     if not cmds:
         return "ERROR: PARALLEL needs cmd1 ||| cmd2 ||| ..."
     results = {}
@@ -1689,26 +1724,33 @@ def is_refusal(t):
 
 def generate(history):
     client, model = current_client()
-    try:
-        stream = client.chat.completions.create(
-            model=model, messages=history, stream=True, temperature=0.1)
-    except Exception as e:
-        print(f"{C['red']}[llm err] {e}{C['rst']}")
-        raise
-    full = ""
+    spinner = Spinner("thinking...", "yellow").__enter__()
     first = True
-    t0 = time.time()
-    for chunk in stream:
-        delta = chunk.choices[0].delta.content or ""
-        if not delta:
-            continue
+    full = ""
+    try:
+        try:
+            stream = client.chat.completions.create(
+                model=model, messages=history, stream=True, temperature=0.1)
+        except Exception as e:
+            spinner.__exit__(None, None, None)
+            print(f"{C['red']}[llm err] {e}{C['rst']}")
+            raise
+        t0 = time.time()
+        for chunk in stream:
+            delta = chunk.choices[0].delta.content or ""
+            if not delta:
+                continue
+            if first:
+                spinner.__exit__(None, None, None)
+                print(f"  {C['cyan']}[agent]{C['rst']} {C['gray']}(+{time.time() - t0:.1f}s){C['rst']} ", end="", flush=True)
+                first = False
+            print(delta, end="", flush=True)
+            full += delta
+        print()
+        return full
+    finally:
         if first:
-            print(f"  {C['cyan']}[agent]{C['rst']} {C['gray']}(+{time.time() - t0:.1f}s){C['rst']} ", end="", flush=True)
-            first = False
-        print(delta, end="", flush=True)
-        full += delta
-    print()
-    return full
+            spinner.__exit__(None, None, None)
 
 
 def summarize_history(history, client, model):
@@ -1885,7 +1927,8 @@ def attack_phase(target):
             results = []
             for kind, payload in actions[:2]:
                 print(f"  {C['red']}* {kind}{C['rst']} {C['dim']}{payload[:160]}{C['rst']}")
-                r = dispatch(kind, payload)
+                with Spinner(f"running {kind.lower()}...", "red"):
+                    r = dispatch(kind, payload)
                 r_str = str(r)
                 for line in r_str.splitlines()[:12]:
                     print(f"    {C['gray']}|{C['rst']} {line}")
@@ -2025,7 +2068,8 @@ def agent_loop(task, target):
         results = []
         for kind, payload in actions[:2]:
             print(f"  {C['cyan']}* {kind}{C['rst']} {C['dim']}{payload[:160]}{C['rst']}")
-            r = dispatch(kind, payload)
+            with Spinner(f"running {kind.lower()}...", "cyan"):
+                r = dispatch(kind, payload)
             r_str = str(r)
             for line in r_str.splitlines()[:30]:
                 print(f"    {C['gray']}|{C['rst']} {line}")
