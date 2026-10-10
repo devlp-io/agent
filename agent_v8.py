@@ -99,6 +99,41 @@ _ATTACK_MODE = False
 _DRY_RUN = False
 
 
+# ────────────────────────────────────────────────────────────────────
+# harness-level deny list + scope check
+# operator's line, not a moralizing check
+# ────────────────────────────────────────────────────────────────────
+
+_DENY_PATTERNS = (
+    __import__("re").compile(r"\brm\s+(-[rRf]+\s+)*/\s*(?:$|[;&|])"),
+    __import__("re").compile(r"\bmkfs(?:\.[a-z0-9]+)?\b"),
+    __import__("re").compile(r"\bdd\s+if=.*\bof=/dev/"),
+    __import__("re").compile(r"\bfind\s+/\s+(?:-\w+\s+)*-delete"),
+    __import__("re").compile(r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:"),
+    __import__("re").compile(r"\bchmod\s+-R\s+777\s+/(?:\s|$)"),
+    __import__("re").compile(r">\s*/dev/sd[a-z]\b"),
+)
+
+def _is_denied(cmd):
+    for p in _DENY_PATTERNS:
+        if p.search(cmd):
+            return True, p.pattern
+    return False, None
+
+
+_URL_IN_CMD = __import__("re").compile(r"https?://[^\s\"\'|;&<>()]+")
+
+def _scope_check_cmd(cmd):
+    """Block any command whose URLs fall outside scope.txt (if scope.txt exists)."""
+    if _scope is None:
+        return True, None
+    for u in _URL_IN_CMD.findall(cmd):
+        ok, reason = _scope.in_scope(u, RUN_DIR)
+        if not ok:
+            return False, f"{u} — {reason}"
+    return True, None
+
+
 def current_client():
     m = MODEL_STACK[model_idx]
     return OpenAI(base_url=m["base"], api_key=m["key"]), m["model"]
@@ -238,59 +273,32 @@ Content-Type flip, X-Original-URL, X-Rewrite-URL.""",
 # directive parsing
 # ────────────────────────────────────────────────────────────────────
 
+_DIRECTIVE_NAMES = [
+    "COMMAND", "PARALLEL", "INSTALL", "NEED_TOOL", "TOOLS", "FILE", "LIST",
+    "NOTE", "FINDING", "ENDPOINT", "PROBE", "PLAN", "PAYLOAD", "SECRET",
+    "CRED", "SCREENSHOT", "CVE", "METHOD", "PARAMFIND", "WALK", "APIMAP",
+    "HARVEST", "SEARCH", "FETCH", "REPORT", "PROOF", "EXPLOIT", "SHELL",
+    "LOOT", "CRACK", "PIVOT", "STATUS", "CHAIN", "BROWSER", "GRAPHQL",
+    "WS", "OOB", "MUTATE", "CHAIN_AUTO", "HAR", "BUDGET", "TUI", "WAF",
+    "STACK",
+]
+
+# line-anchored: directive must start at column 0 (after optional spaces),
+# on its own line — prevents mid-sentence and mid-code-block matches.
 PATTERNS = {
-    "COMMAND":   r"COMMAND:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "PARALLEL":  r"PARALLEL:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "INSTALL":   r"INSTALL:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "NEED_TOOL": r"NEED_TOOL:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "FILE":      r"FILE:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "LIST":      r"LIST:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "NOTE":      r"NOTE:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "FINDING":   r"FINDING:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "ENDPOINT":  r"ENDPOINT:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "PROBE":     r"PROBE:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "PLAN":      r"PLAN:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "PAYLOAD":   r"PAYLOAD:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "SECRET":    r"SECRET:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "CRED":      r"CRED:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "SCREENSHOT":r"SCREENSHOT:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "CVE":       r"CVE:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "METHOD":    r"METHOD:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "PARAMFIND": r"PARAMFIND:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "WALK":      r"WALK:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "APIMAP":    r"APIMAP:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "HARVEST":   r"HARVEST:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "SEARCH":    r"SEARCH:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "FETCH":     r"FETCH:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "REPORT":    r"REPORT:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "PROOF":     r"PROOF:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "EXPLOIT":   r"EXPLOIT:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "SHELL":     r"SHELL:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "LOOT":      r"LOOT:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "CRACK":     r"CRACK:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "PIVOT":     r"PIVOT:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "STATUS":    r"STATUS:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "CHAIN":     r"CHAIN:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "BROWSER":   r"BROWSER:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "GRAPHQL":   r"GRAPHQL:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "WS":        r"WS:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "OOB":       r"OOB:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "MUTATE":    r"MUTATE:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "CHAIN_AUTO":r"CHAIN_AUTO:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "HAR":       r"HAR:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "BUDGET":    r"BUDGET:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "TUI":       r"TUI:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "WAF":       r"WAF:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
-    "STACK":     r"STACK:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)",
+    name: rf"(?:^|\n)\s*{name}:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)"
+    for name in _DIRECTIVE_NAMES
 }
+
+# strip fenced code blocks so the model's examples don't trigger execution
+_FENCE = re.compile(r"```.*?```", re.DOTALL)
 
 
 def parse(msg):
-    """Split the model's output into (directive, payload) pairs.
-    Handles the case where the model puts multiple directives on one line
-    separated by ' ||| ' (common when it confuses PARALLEL syntax)."""
-    # first split on ' ||| ' at the top level — some models do
-    # "SEARCH: foo ||| FETCH: bar" all on one line
+    """Split model output into (directive, payload) pairs.
+    Fenced code blocks are stripped first — the model uses them for
+    examples and they must never be executed."""
+    msg = _FENCE.sub("", msg)
     msg = re.sub(r"\s+\|\|\|\s+(?=[A-Z_]+:\s)", "\n", msg)
     out = []
     for kind, pat in PATTERNS.items():
@@ -454,6 +462,14 @@ def _adaptive_timeout(cmd):
 def _run_shell(cmd, timeout=None):
     base_timeout = timeout if timeout else CMD_TIMEOUT
     low = cmd.lower()
+
+    denied, pat = _is_denied(cmd)
+    if denied:
+        return f"[DENIED] command matched pattern: {pat}"
+
+    ok, why = _scope_check_cmd(cmd)
+    if not ok:
+        return f"[SCOPE BLOCK] {why}"
 
     # inject curl timeout
     if "curl" in low and "-m " not in low and "--max-time" not in low:
@@ -2268,7 +2284,8 @@ def agent_loop(task, target, resume_dir=None, resume_history=None):
     start_turn = STATE.get("turn", 0)
     if start_turn:
         print(f"  [resume] continuing from turn {start_turn}")
-    for turn in range(start_turn, MAX_TURNS):
+    session_end = MAX_TURNS if start_turn < MAX_TURNS else start_turn + MAX_TURNS
+    for turn in range(start_turn, session_end):
         STATE["turn"] = turn + 1
         _state.save(RUN_DIR, STATE)
 
@@ -2283,7 +2300,8 @@ def agent_loop(task, target, resume_dir=None, resume_history=None):
             break
 
         if len(history) > CTX_MAX_MSGS:
-            history = summarize_history(history, current_client()[0], current_client()[1])
+            _c, _m = current_client()
+            history = summarize_history(history, _c, _m)
 
         print(f"\n{C['bold']}[turn {turn + 1}/{MAX_TURNS}]{C['rst']}")
         try:
