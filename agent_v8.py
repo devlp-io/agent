@@ -281,7 +281,7 @@ _DIRECTIVE_NAMES = [
     "HARVEST", "SEARCH", "FETCH", "REPORT", "PROOF", "EXPLOIT", "SHELL",
     "LOOT", "CRACK", "PIVOT", "STATUS", "CHAIN", "BROWSER", "GRAPHQL",
     "WS", "OOB", "MUTATE", "CHAIN_AUTO", "HAR", "BUDGET", "TUI", "WAF",
-    "STACK", "SCHEMA",
+    "STACK", "SCHEMA", "GOAL", "REPLAN",
 ]
 
 # line-anchored: directive must start at column 0 (after optional spaces),
@@ -569,6 +569,250 @@ def _run_shell(cmd, timeout=None):
 # ────────────────────────────────────────────────────────────────────
 # directive handlers
 # ────────────────────────────────────────────────────────────────────
+
+# ── inbox + pause ────────────────────────────────────────────────
+_inbox_state = {"pause": False, "stop": False}
+_last_ctrl_c = {"t": 0.0}
+
+def _drain_inbox(run_dir, state):
+    """Read inbox.jsonl, dispatch kinds, inject into history via return value.
+    Returns list of user-message strings to append to history this turn."""
+    msgs = []
+    try:
+        items = _state.read_inbox(run_dir)
+    except Exception:
+        items = []
+    for it in items:
+        kind = (it.get("kind") or "message").lower()
+        text = (it.get("text") or "").strip()
+        if kind == "pause":
+            _inbox_state["pause"] = True
+            print(f"  {C['yellow']}[inbox] pause requested{C['rst']}")
+        elif kind == "resume":
+            _inbox_state["pause"] = False
+            print(f"  {C['green']}[inbox] resume{C['rst']}")
+        elif kind == "stop":
+            _inbox_state["stop"] = True
+            print(f"  {C['red']}[inbox] stop requested{C['rst']}")
+        elif kind == "focus" and text:
+            msgs.append(
+                "[OPERATOR FOCUS — HIGH PRIORITY for the next 5 turns]\n"
+                f"{text}\n"
+                "Do not continue the broad scan until this is resolved "
+                "or you emit NOTE: focus abandoned — <reason>."
+            )
+            print(f"  {C['mag']}[inbox] focus: {text[:80]}{C['rst']}")
+        elif kind == "goal_add" and text:
+            gid = f"u{len(state.get('goals', [])) + 1}"
+            state.setdefault("goals", []).append({
+                "id": gid, "text": text, "state": "open",
+                "priority": "high", "source": "operator",
+            })
+            try: _state.save(run_dir, state)
+            except Exception: pass
+            print(f"  {C['mag']}[inbox] goal added {gid}: {text[:80]}{C['rst']}")
+        elif kind == "goal_block" and text:
+            gid, _, reason = text.partition("|")
+            for g in state.get("goals", []):
+                if g.get("id") == gid.strip():
+                    g["state"] = "blocked"
+                    g["reason"] = reason.strip() or "operator"
+                    break
+            try: _state.save(run_dir, state)
+            except Exception: pass
+            print(f"  {C['mag']}[inbox] goal blocked {gid.strip()}{C['rst']}")
+        elif kind == "message" and text:
+            msgs.append(f"[OPERATOR MESSAGE]\n{text}")
+            print(f"  {C['cyan']}[inbox] message: {text[:100]}{C['rst']}")
+    return msgs
+
+
+def pause_menu(run_dir, state):
+    """Interactive pause. Returns one of:
+      ('quit', None)          exit cleanly
+      ('continue', None)      resume as-is
+      ('inject', text)        append text to history and continue
+    """
+    hr()
+    banner("  interrupted — state saved", "yellow")
+    banner(f"  turn {state.get('turn', '?')} · "
+           f"{len(state.get('findings', []))} finding(s) · "
+           f"{len(state.get('endpoints', []))} endpoint(s)", "yellow")
+    hr()
+    print("  " + C['bold'] + "what next?" + C['rst'])
+    print("    c  continue")
+    print("    m  message <text>       inject a message, continue")
+    print("    f  focus <text>         high-priority focus for 5 turns")
+    print("    d  deeper <text>        freeform prompt, continues context")
+    print("    r  report               write report, then continue")
+    print("    a  attack               enter attack phase, then continue")
+    print("    s  status               print state summary, re-prompt")
+    print("    q  quit                 save and exit")
+    hr()
+    try:
+        line = input(C['bold'] + "> " + C['rst']).strip()
+    except (EOFError, KeyboardInterrupt):
+        return ("quit", None)
+    if not line:
+        return ("continue", None)
+    cmd, _, rest = line.partition(" ")
+    cmd = cmd.lower()
+    rest = rest.strip()
+    if cmd == "q":
+        return ("quit", None)
+    if cmd == "c":
+        return ("continue", None)
+    if cmd == "m":
+        return ("inject", f"[OPERATOR MESSAGE]\n{rest}") if rest else ("continue", None)
+    if cmd == "f":
+        return ("inject",
+                "[OPERATOR FOCUS — HIGH PRIORITY for the next 5 turns]\n"
+                f"{rest}\n"
+                "Do not continue the broad scan until this is resolved or you "
+                "emit NOTE: focus abandoned — <reason>.") if rest else ("continue", None)
+    if cmd == "d":
+        return ("inject", rest or "(continue)") if rest else ("continue", None)
+    if cmd == "r":
+        try: do_report("pause-menu")
+        except Exception as e: print(f"  report failed: {e}")
+        return ("continue", None)
+    if cmd == "a":
+        try:
+            attack_phase(state.get("target", "?"))
+        except Exception as e:
+            print(f"  attack failed: {e}")
+        return ("continue", None)
+    if cmd == "s":
+        try: print(do_status(""))
+        except Exception: pass
+        return pause_menu(run_dir, state)
+    print("  unknown command — try again")
+    return pause_menu(run_dir, state)
+
+
+# ── plan suggestion + goals ────────────────────────────────────────
+_CUSTOM_SIGNALS = (
+    "bypass", "extract", "read ", "fetch", "enumerate",
+    "dump", "leak", "pivot", "chain", "pull ", "get ",
+)
+
+def suggest_plan(task: str):
+    """Return (plan, reason). plan is 'custom' or 'system'."""
+    t = (task or "").lower()
+    has_target = bool(re.search(r"https?://|\S+\.\S+/\S+", task or ""))
+    hits = sum(1 for s in _CUSTOM_SIGNALS if s in t)
+    if hits >= 2 or (hits >= 1 and has_target):
+        reason = f"task contains {hits} goal-shaped verb(s)"
+        if has_target:
+            reason += ", concrete target"
+        return "custom", reason
+    return "system", "broad task — library methodology fits"
+
+
+def _goal_digest(state):
+    """Compact text of goals for injection before each generate()."""
+    goals = state.get("goals") or []
+    if not goals:
+        return ""
+    order = {"high": 0, "normal": 1, "low": 2}
+    state_order = {"doing": 0, "open": 1, "blocked": 2, "done": 3, "wontdo": 4}
+    goals_sorted = sorted(
+        goals,
+        key=lambda g: (order.get(g.get("priority", "normal"), 1),
+                       state_order.get(g.get("state", "open"), 9)),
+    )
+    lines = ["[GOALS]"]
+    for g in goals_sorted:
+        prio = g.get("priority", "normal")
+        st = g.get("state", "open")
+        tail = ""
+        if prio == "high":
+            tail += " (high)"
+        if st == "blocked" and g.get("reason"):
+            tail += f"  reason: {g['reason'][:80]}"
+        if g.get("source") == "operator":
+            tail += "  [operator]"
+        lines.append(f"  {g.get('id','?'):<4} {g.get('text','')[:70]:<72} {st}{tail}")
+    lines.append("pick the highest-priority open goal that is reachable now.")
+    lines.append("if blocked:   GOAL: block|gN|<reason>")
+    lines.append("if new step:  GOAL: add|<parent>|<text>")
+    lines.append("if you finish: GOAL: done|gN|<short outcome>")
+    lines.append("if you give up: GOAL: wontdo|gN|<reason>")
+    lines.append("if the whole plan is wrong: REPLAN: <json array>")
+    return "\n".join(lines)
+
+
+_PLAN_JSON_RE = re.compile(r"PLAN:\s*(\[.*?\])", re.DOTALL)
+_REPLAN_JSON_RE = re.compile(r"REPLAN:\s*(\[.*?\])", re.DOTALL)
+
+def _parse_plan_json(text):
+    """Return list of goal dicts or None. Accepts only JSON arrays."""
+    m = _PLAN_JSON_RE.search(text)
+    if not m:
+        return None
+    raw = m.group(1)
+    try:
+        arr = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(arr, list):
+        return None
+    out = []
+    for i, g in enumerate(arr[:12]):
+        if not isinstance(g, dict):
+            continue
+        gid = str(g.get("id") or f"g{i+1}")
+        txt = str(g.get("text") or "").strip()
+        if not txt:
+            continue
+        st = str(g.get("state") or "open").lower()
+        if st not in ("open", "doing", "done", "blocked", "wontdo"):
+            st = "open"
+        prio = str(g.get("priority") or "normal").lower()
+        if prio not in ("high", "normal", "low"):
+            prio = "normal"
+        out.append({
+            "id": gid, "text": txt, "state": st, "priority": prio,
+            "check": str(g.get("check") or ""),
+            "source": "agent",
+        })
+    return out or None
+
+
+def _parse_replan_json(text):
+    m = _REPLAN_JSON_RE.search(text)
+    if not m:
+        return None
+    raw = m.group(1)
+    try:
+        arr = json.loads(raw)
+    except Exception:
+        return None
+    if not isinstance(arr, list):
+        return None
+    out = []
+    for i, g in enumerate(arr[:12]):
+        if not isinstance(g, dict):
+            continue
+        gid = str(g.get("id") or f"r{i+1}")
+        txt = str(g.get("text") or "").strip()
+        if not txt:
+            continue
+        out.append({
+            "id": gid, "text": txt, "state": "open",
+            "priority": str(g.get("priority") or "normal"),
+            "check": str(g.get("check") or ""),
+            "source": "agent",
+        })
+    return out or None
+
+
+_DONE_ANYWAY_RE = re.compile(r"^\s*DONE[\s_-]ANYWAY\b", re.MULTILINE | re.IGNORECASE)
+
+def _open_goals(state):
+    return [g for g in (state.get("goals") or [])
+            if g.get("state") in ("open", "doing")]
+
 
 def do_command(cmd):
     cmd = re.sub(r"^\s*(COMMAND|PARALLEL):\s*", "", cmd)
@@ -1654,6 +1898,73 @@ def do_tools(spec):
     return "usage: TOOLS: list | TOOLS: search <q> | TOOLS: status | TOOLS: install <name>"
 
 
+def do_goal(spec):
+    """GOAL: <verb>|<id>|<payload>
+    verbs: add, done, block, wontdo, doing, focus, delete
+    For 'add': id is treated as parent (kept for trace), payload is text.
+    """
+    parts = spec.split("|", 2)
+    if len(parts) < 2:
+        return "ERROR: GOAL needs 'verb|id[|payload]'"
+    verb = parts[0].strip().lower()
+    gid = parts[1].strip()
+    payload = parts[2].strip() if len(parts) > 2 else ""
+    goals = STATE.setdefault("goals", [])
+    idx = next((i for i, g in enumerate(goals) if g.get("id") == gid), None)
+    if verb == "add":
+        new_id = f"g{len(goals) + 1}"
+        goals.append({
+            "id": new_id, "text": payload or "(unnamed)",
+            "state": "open", "priority": "normal",
+            "parent": gid if gid not in ("root", "-", "") else None,
+            "source": "agent",
+        })
+        _state.save(RUN_DIR, STATE)
+        return f"goal added {new_id}: {payload[:80]}"
+    if idx is None:
+        return f"GOAL: no such goal id {gid}"
+    if verb == "done":
+        goals[idx]["state"] = "done"
+        if payload:
+            goals[idx]["outcome"] = payload[:400]
+    elif verb in ("block", "blocked"):
+        goals[idx]["state"] = "blocked"
+        goals[idx]["reason"] = payload[:400] or "blocked"
+    elif verb in ("wontdo", "wont-do", "cancel"):
+        goals[idx]["state"] = "wontdo"
+        goals[idx]["reason"] = payload[:400] or "wontdo"
+    elif verb in ("doing", "start"):
+        goals[idx]["state"] = "doing"
+    elif verb == "focus":
+        goals[idx]["priority"] = "high"
+    elif verb == "unfocus":
+        goals[idx]["priority"] = "normal"
+    elif verb == "delete":
+        goals.pop(idx)
+    else:
+        return f"GOAL: unknown verb {verb}"
+    _state.save(RUN_DIR, STATE)
+    return f"goal {gid} → {goals[idx].get('state', '?')} (priority {goals[idx].get('priority','normal')})"
+
+
+def do_replan(spec):
+    """REPLAN: <json array> — replace open/doing goals, keep done/wontdo.
+    Rate-limited to once per 10 turns."""
+    turn = STATE.get("turn", 0)
+    last = STATE.get("last_replan_turn", -999)
+    if turn - last < 10:
+        return f"REPLAN refused — cooldown ({10 - (turn - last)} turns remaining)"
+    goals = _parse_replan_json(f"REPLAN: {spec}")
+    if not goals:
+        return "REPLAN failed — invalid json array"
+    old = STATE.get("goals") or []
+    kept = [g for g in old if g.get("state") in ("done", "wontdo")]
+    STATE["goals"] = kept + goals
+    STATE["last_replan_turn"] = turn
+    _state.save(RUN_DIR, STATE)
+    return f"replanned: kept {len(kept)} closed, added {len(goals)} new"
+
+
 def do_schema(_arg=""):
     """SCHEMA: — rebuild schema.json from current state."""
     try:
@@ -1716,6 +2027,8 @@ DISPATCH = {
     "WAF": do_waf,
     "STACK": do_stack,
     "SCHEMA": do_schema,
+    "GOAL": do_goal,
+    "REPLAN": do_replan,
 }
 
 
@@ -2272,6 +2585,39 @@ def agent_loop(task, target, resume_dir=None, resume_history=None):
     banner(f"   live:     tail -f {RUN_DIR}/live.log")
     hr()
 
+    # ── plan selection (custom vs system) ─────────────────────────
+    plan = os.environ.get("AG_PLAN", "").lower()
+    if plan not in ("system", "custom"):
+        plan = ""
+    if not plan and not resume_history:
+        suggested, reason = suggest_plan(task)
+        print()
+        print(f"  {C['bold']}plan{C['rst']}: suggested {C['cyan']}{suggested}{C['rst']}  ({reason})")
+        alt = "system" if suggested == "custom" else "custom"
+        print(f"        accept {C['dim']}[enter]{C['rst']}  ·  switch to {C['dim']}{alt} [{alt[0]}]{C['rst']}  ·  6s timeout")
+        try:
+            import select
+            r, _, _ = select.select([sys.stdin], [], [], 6.0)
+            if r:
+                line = sys.stdin.readline().strip().lower()
+                if line in (alt[0], alt):
+                    plan = alt
+                elif line == "":
+                    plan = suggested
+                else:
+                    plan = suggested
+            else:
+                plan = suggested
+                print(f"  {C['dim']}(timeout — using {plan}){C['rst']}")
+        except Exception:
+            plan = suggested
+    if not plan:
+        plan = "system"
+    STATE["plan"] = plan
+    _state.save(RUN_DIR, STATE)
+    print(f"  {C['bold']}plan mode{C['rst']}: {C['cyan']}{plan}{C['rst']}")
+    print()
+
     if resume_history:
         # pick up the previous conversation and add a continuation prompt
         history = list(resume_history)
@@ -2289,13 +2635,24 @@ def agent_loop(task, target, resume_dir=None, resume_history=None):
         print(f"  [resume] loaded {len(history)} prior messages")
     else:
         tool_ctx = _startup_tool_scan()
+        planning_instr = ""
+        if plan == "custom":
+            planning_instr = (
+                "\n\nCUSTOM PLAN MODE. First turn: emit a PLAN: <json array> directive "
+                "that decomposes the task into 3-9 concrete, checkable subgoals. "
+                "Each goal: {\"id\":\"g1\",\"text\":\"...\",\"state\":\"open\","
+                "\"priority\":\"normal\",\"check\":\"how you'll know it's done\"}. "
+                "Use ids g1, g2, ... After the PLAN, you may also emit one normal "
+                "directive in the same turn. On every subsequent turn you will receive "
+                "a [GOALS] digest — pick the highest-priority open goal and act on it."
+            )
         history = [
             {"role": "system", "content": SYSTEM},
             {"role": "user", "content":
                 f"TARGET: {target}\nRUN_DIR: {RUN_DIR}\n\nTASK: {task}\n\n"
                 f"TOOL ENVIRONMENT:\n{tool_ctx}\n\n"
                 f"Begin. Fingerprint first (WAF: and STACK: on the target URL), "
-                f"then load the matching methodology."},
+                f"then load the matching methodology.{planning_instr}"},
         ]
 
     last_critic_turn = 0
@@ -2323,8 +2680,67 @@ def agent_loop(task, target, resume_dir=None, resume_history=None):
             history = summarize_history(history, _c, _m)
 
         print(f"\n{C['bold']}[turn {turn + 1}/{MAX_TURNS}]{C['rst']}")
+
+        # inbox: drain messages/commands from operator
+        inbox_msgs = _drain_inbox(RUN_DIR, STATE)
+        for m in inbox_msgs:
+            history.append({"role": "user", "content": m})
+
+        # goals: custom mode + not-yet-planned → capture PLAN from previous response
+        if STATE.get("plan") == "custom":
+            goals = STATE.get("goals") or []
+            if not goals:
+                # last assistant message may contain PLAN: ...
+                last_asst = next(
+                    (m["content"] for m in reversed(history) if m["role"] == "assistant"),
+                    "",
+                )
+                parsed = _parse_plan_json(last_asst)
+                if parsed:
+                    STATE["goals"] = parsed
+                    STATE["last_replan_turn"] = STATE.get("turn", 0)
+                    _state.save(RUN_DIR, STATE)
+                    print(f"  {C['cyan']}[plan] captured {len(parsed)} goal(s){C['rst']}")
+                else:
+                    # nudge once; if next turn still no plan → auto-fallback
+                    misses = STATE.get("plan_misses", 0) + 1
+                    STATE["plan_misses"] = misses
+                    _state.save(RUN_DIR, STATE)
+                    if misses >= 2:
+                        print(f"  {C['yellow']}[plan] no valid PLAN after 2 tries — "
+                              f"falling back to system{C['rst']}")
+                        STATE["plan"] = "system"
+                        _state.save(RUN_DIR, STATE)
+                    else:
+                        history.append({"role": "user", "content":
+                            "[harness] custom plan mode. First response must be a "
+                            "PLAN: <json array> directive. Emit PLAN now."})
+                        continue
+
+            # inject digest before generate
+            digest = _goal_digest(STATE)
+            if digest and STATE.get("goals"):
+                history.append({"role": "user", "content": digest})
+
+        # pause sentinel
+        while _inbox_state.get("pause"):
+            print(f"  {C['yellow']}[paused — write 'resume' or 'stop' to inbox]{C['rst']}")
+            time.sleep(1.0)
+            _drain_inbox(RUN_DIR, STATE)
+        if _inbox_state.get("stop"):
+            print(f"  {C['red']}[stop — exiting loop]{C['rst']}")
+            break
+
         try:
             full = generate(history)
+        except KeyboardInterrupt:
+            action, text = pause_menu(RUN_DIR, STATE)
+            if action == "quit":
+                print(f"  {C['yellow']}[quit — saving state]{C['rst']}")
+                break
+            if action == "inject" and text:
+                history.append({"role": "user", "content": text})
+            continue
         except Exception as e:
             print(f"{C['red']}[llm err] {e}{C['rst']}")
             break
@@ -2357,7 +2773,22 @@ def agent_loop(task, target, resume_dir=None, resume_history=None):
         has_action = bool(actions)
         said_done = bool(re.search(r"^\s*DONE\b", full, re.MULTILINE))
 
+        # DONE-ANYWAY wins regardless
+        done_anyway = bool(_DONE_ANYWAY_RE.search(full))
+
         if said_done and not has_action:
+            open_goals = _open_goals(STATE) if STATE.get("plan") == "custom" else []
+            if open_goals and not done_anyway and not STATE.get("_done_pushed"):
+                STATE["_done_pushed"] = True
+                _state.save(RUN_DIR, STATE)
+                gl = ", ".join(g["id"] for g in open_goals)
+                print(f"  {C['yellow']}[harness] DONE with open goals: {gl} — "
+                      f"pushing back once{C['rst']}")
+                history.append({"role": "user", "content":
+                    f"[harness] you emitted DONE but goals {gl} are still open.\n"
+                    f"resolve them, mark them GOAL: block|gN|<reason> or "
+                    f"GOAL: wontdo|gN|<reason>, or emit DONE-ANYWAY to stop regardless."})
+                continue
             print(f"\n{C['green']}OK DONE{C['rst']}")
             break
         if said_done and has_action:
@@ -2485,6 +2916,12 @@ def main():
     if "--dry" in args:
         _DRY_RUN = True
         args.remove("--dry")
+    # --plan system|custom
+    if "--plan" in args:
+        i = args.index("--plan")
+        if i + 1 < len(args):
+            os.environ["AG_PLAN"] = args[i + 1].lower()
+            del args[i:i+2]
 
     if not args:
         print("usage: agent_v8.py [--resume] [--attack] [--dry] <task>")

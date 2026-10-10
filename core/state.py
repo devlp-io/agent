@@ -73,6 +73,52 @@ def load(run_dir):
         return base
 
 
+# ─── inbox ─────────────────────────────────────────────────────
+import json as _json
+import pathlib as _pathlib
+
+def _inbox_paths(run_dir):
+    rd = _pathlib.Path(run_dir)
+    return rd / "inbox.jsonl", rd / "inbox.history.jsonl"
+
+def append_inbox(run_dir, kind: str, text: str = "", **extra):
+    """Append a line to inbox.jsonl. Called by dashboard / external tools."""
+    p, _ = _inbox_paths(run_dir)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    rec = {"ts": _time.time() if '_time' in globals() else 0.0,
+           "kind": kind, "text": text}
+    rec.update(extra)
+    with open(p, "a") as f:
+        f.write(_json.dumps(rec) + "\n")
+
+def read_inbox(run_dir):
+    """Read + archive new inbox lines. Returns list of dicts."""
+    p, hist = _inbox_paths(run_dir)
+    if not p.exists():
+        return []
+    try:
+        lines = p.read_text().splitlines()
+    except Exception:
+        return []
+    out = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(_json.loads(line))
+        except Exception:
+            out.append({"kind": "message", "text": line, "ts": 0.0, "_raw": True})
+    try:
+        with open(hist, "a") as f:
+            for line in lines:
+                f.write(line + "\n")
+        p.write_text("")
+    except Exception:
+        pass
+    return out
+
+
 def save(run_dir, state):
     run_dir = pathlib.Path(run_dir)
     run_dir.mkdir(parents=True, exist_ok=True)

@@ -499,6 +499,23 @@ async def api_stream(target: str, ts: str, files: str = "live.log,live_findings.
     )
 
 
+class SayBody(BaseModel):
+    kind: str = "message"      # message | focus | goal_add | goal_block | pause | resume | stop
+    text: str = ""
+
+
+@app.post("/api/scan/{target}/{ts}/say")
+def api_say(target: str, ts: str, body: SayBody):
+    """Write a line into inbox.jsonl. The running agent picks it up next turn."""
+    rd = _run_dir(target, ts)
+    st_mod = state_mod()
+    try:
+        st_mod.append_inbox(rd, body.kind, body.text)
+    except Exception as e:
+        raise HTTPException(500, f"inbox write failed: {e}")
+    return {"ok": True, "kind": body.kind, "text": body.text}
+
+
 @app.get("/api/scan/{target}/{ts}/log")
 def api_log(target: str, ts: str, file: str = "live.log", tail: int = 400):
     """Simple polling endpoint for the Logs tab.
