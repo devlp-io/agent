@@ -54,6 +54,7 @@ from attack import blind as _blind
 from attack import pivot as _pivot
 
 from evidence import collector as _collector
+from evidence import schema_store as _schema_store
 from evidence import report as _report
 from evidence import graph as _graph
 from evidence import seal as _seal
@@ -280,7 +281,7 @@ _DIRECTIVE_NAMES = [
     "HARVEST", "SEARCH", "FETCH", "REPORT", "PROOF", "EXPLOIT", "SHELL",
     "LOOT", "CRACK", "PIVOT", "STATUS", "CHAIN", "BROWSER", "GRAPHQL",
     "WS", "OOB", "MUTATE", "CHAIN_AUTO", "HAR", "BUDGET", "TUI", "WAF",
-    "STACK",
+    "STACK", "SCHEMA",
 ]
 
 # line-anchored: directive must start at column 0 (after optional spaces),
@@ -1653,6 +1654,22 @@ def do_tools(spec):
     return "usage: TOOLS: list | TOOLS: search <q> | TOOLS: status | TOOLS: install <name>"
 
 
+def do_schema(_arg=""):
+    """SCHEMA: — rebuild schema.json from current state."""
+    try:
+        p = _schema_store.rebuild_and_save(RUN_DIR, STATE)
+        sch = _schema_store.load(RUN_DIR)
+        s = sch.get("summary", {})
+        return (f"schema rebuilt: {p.name}\n"
+                f"  entities={s.get('entities',0)} "
+                f"endpoints={s.get('endpoints',0)} "
+                f"denied={s.get('denied_endpoints',0)} "
+                f"sensitive={s.get('sensitive_field_total',0)} "
+                f"categories={s.get('categories',0)}")
+    except Exception as e:
+        return f"schema rebuild failed: {e}"
+
+
 DISPATCH = {
     "COMMAND": do_command,
     "PARALLEL": do_parallel,
@@ -1698,6 +1715,7 @@ DISPATCH = {
     "TUI": do_tui,
     "WAF": do_waf,
     "STACK": do_stack,
+    "SCHEMA": do_schema,
 }
 
 
@@ -1754,6 +1772,7 @@ DIRECTIVES:
   CHAIN: <from>|<to>[|note]
   WAF: <url>
   STACK: <url>
+  SCHEMA:
   BROWSER: <url>
   GRAPHQL: <url>|<query_json>
   WS: <wss_url>|<payload>
@@ -2402,6 +2421,11 @@ def _finalize():
         _state.write_summary(RUN_DIR, STATE)
     except Exception:
         pass
+    try:
+        _schema_store.rebuild_and_save(RUN_DIR, STATE)
+        print(f"  [schema] {RUN_DIR.name}/schema.json written")
+    except Exception as e:
+        print(f"  [schema] build failed: {e}")
     try:
         _report.build_all(RUN_DIR, STATE)
     except Exception as e:

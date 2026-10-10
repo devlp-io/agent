@@ -150,8 +150,16 @@ def _scan_meta(target: str, run: pathlib.Path) -> dict:
             m = p.stat().st_mtime
             if last_activity is None or m > last_activity:
                 last_activity = m
-    # a scan is "live" if its last activity was < 90 seconds ago
+    # a scan is "live" if mtime < 90s OR a spawned proc for this target is alive
     is_live = bool(last_activity and (time.time() - last_activity) < 90)
+    if not is_live:
+        for _k, _e in _running.items():
+            try:
+                if _e["proc"].poll() is None and target in (_e.get("task") or ""):
+                    is_live = True
+                    break
+            except Exception:
+                pass
     return {
         "target": target,
         "ts": run.name,
@@ -232,13 +240,21 @@ def dispatch_into(target: str, ts: str, kind: str, payload: str) -> str:
 
 _running: dict[str, dict] = {}
 
+# v4: strip ANSI before showing in UI
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[a-zA-Z]")
+
+def _strip_ansi(s: str) -> str:
+    return _ANSI_RE.sub("", s)
+
+
 def _drain(key: str, proc: subprocess.Popen):
     buf: list[str] = []
     try:
         for line in iter(proc.stdout.readline, ""):
+            line = _strip_ansi(line)
             buf.append(line)
-            if len(buf) > 2000:
-                buf = buf[-2000:]
+            if len(buf) > 4000:
+                buf = buf[-4000:]
             _running[key]["lines"] = buf[-500:]
     except Exception:
         pass
@@ -515,12 +531,17 @@ def api_kill(key: str):
 def api_running():
     out = []
     for k, e in _running.items():
+        try:
+            alive = e["proc"].poll() is None
+        except Exception:
+            alive = False
+        lines = [_strip_ansi(l) for l in (e.get("lines", [])[-300:])]
         out.append({
             "key": k, "pid": e["pid"], "task": e["task"],
             "started": e["started"], "finished": e.get("finished"),
             "exit_code": e.get("exit_code"),
-            "alive": e["proc"].poll() is None,
-            "lines": e.get("lines", [])[-200:],
+            "alive": alive,
+            "lines": lines,
         })
     return {"running": out}
 
@@ -565,7 +586,18 @@ def api_tools_install(body: InstallBody):
 def api_keys():
     raw = read_env()
     masked = {k: mask(raw.get(k, "")) for k in KEY_FIELDS}
-    return {"env": masked, "path": str(ENV_PATH), "raw_keys": sorted(raw.keys())}
+    effective = {k: bool(os.environ.get(k)) for k in KEY_FIELDS}
+    overridden = [k for k in KEY_FIELDS
+                  if os.environ.get(k) and raw.get(k) != os.environ.get(k)]
+    raw_text = ENV_PATH.read_text() if ENV_PATH.exists() else ""
+    return {
+        "env": masked,
+        "path": str(ENV_PATH),
+        "raw_keys": sorted(raw.keys()),
+        "effective": effective,
+        "overridden": overridden,
+        "raw_text": raw_text,
+    }
 
 
 class KeysBody(BaseModel):
@@ -610,6 +642,82 @@ async def api_repeater(body: RepeaterBody):
             "headers": {}, "body": f"error: {e}",
             "url_final": body.url,
         }
+
+
+# ══════════════════════════════════════════════════════════════════════
+# shell — runs through agent_v8._run_shell (deny-list + scope enforced)
+# ══════════════════════════════════════════════════════════════════════
+
+class ShellBody(BaseModel):
+    cmd: str
+    timeout: int = 0
+
+
+@app.post("/api/scan/{target}/{ts}/shell")
+async def api_shell(target: str, ts: str, body: ShellBody):
+    if not body.cmd.strip():
+        raise HTTPException(400, "cmd required")
+    rd = _run_dir(target, ts)
+    ag = agent_v8()
+    st_mod = state_mod()
+
+    def _run():
+        with _dispatch_lock:
+            ag.RUN_DIR = rd
+            ag.STATE = st_mod.load(rd)
+            try:
+                import budget as _budget
+                ag.BUD = _budget.get(rd)
+            except Exception:
+                ag.BUD = None
+            try:
+                timeout = body.timeout if body.timeout and body.timeout > 0 else None
+                out = ag._run_shell(body.cmd, timeout=timeout)
+            finally:
+                try:
+                    st_mod.save(rd, ag.STATE)
+                except Exception:
+                    pass
+        return out
+
+    try:
+        out = await asyncio.to_thread(_run)
+    except Exception as e:
+        out = f"shell error: {e}"
+    return {"cmd": body.cmd, "output": str(out)}
+
+
+# ══════════════════════════════════════════════════════════════════════
+# re-scan / resume / attack — spawn agent_v8.py for the same target
+# ══════════════════════════════════════════════════════════════════════
+
+def _spawn_for_target(target: str, mode: str) -> dict:
+    t = _safe_target(target)
+    if mode == "rescan":
+        return spawn_scan(f"assess {t}", attack=False, resume=False, dry=False)
+    if mode == "resume":
+        return spawn_scan(f"continue {t}", attack=False, resume=True, dry=False)
+    if mode == "attack":
+        return spawn_scan(f"assess {t}", attack=True, resume=False, dry=False)
+    raise HTTPException(400, f"unknown mode: {mode}")
+
+
+@app.post("/api/scan/{target}/{ts}/rescan")
+def api_rescan(target: str, ts: str):
+    _run_dir(target, ts)
+    return _spawn_for_target(target, "rescan")
+
+
+@app.post("/api/scan/{target}/{ts}/resume")
+def api_resume(target: str, ts: str):
+    _run_dir(target, ts)
+    return _spawn_for_target(target, "resume")
+
+
+@app.post("/api/scan/{target}/{ts}/attack")
+def api_attack(target: str, ts: str):
+    _run_dir(target, ts)
+    return _spawn_for_target(target, "attack")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -750,6 +858,9 @@ pre.out{background:#05080c;border:1px solid var(--border);padding:8px;border-rad
       <span class="title" id="cur-title">no scan selected</span>
       <span class="path" id="cur-path"></span>
       <span style="flex:1"></span>
+      <button id="btn-rescan" title="start a fresh scan on this target">&#8635; re-scan</button>
+      <button id="btn-resume" title="resume the latest run for this target">&#9654; resume</button>
+      <button id="btn-attack" title="jump straight to attack phase">&#9876; attack</button>
       <span id="live-dot" class="badge done">idle</span>
     </div>
     <div id="tabs">
@@ -758,6 +869,7 @@ pre.out{background:#05080c;border:1px solid var(--border);padding:8px;border-rad
       <div class="tab" data-t="findings">Findings</div>
       <div class="tab" data-t="actions">Actions</div>
       <div class="tab" data-t="repeater">Repeater</div>
+      <div class="tab" data-t="shell">Shell</div>
       <div class="tab" data-t="tools">Tools</div>
       <div class="tab" data-t="config">Config</div>
       <div class="tab" data-t="running">Running</div>
@@ -844,6 +956,23 @@ pre.out{background:#05080c;border:1px solid var(--border);padding:8px;border-rad
         <div id="rp-resp"></div>
       </div>
 
+      <!-- SHELL -->
+      <div class="tabpane" data-p="shell">
+        <div class="panel">
+          <h3>Shell — runs in this run dir</h3>
+          <div class="row">
+            <span style="color:var(--green);font-weight:bold">$</span>
+            <input id="sh-cmd" class="grow" placeholder="curl -sSILk https://target --max-time 20" autocomplete="off" spellcheck="false">
+            <button class="primary" id="sh-run">Run</button>
+            <button id="sh-clear">Clear</button>
+          </div>
+          <div class="muted mt6">
+            history: &#8593;/&#8595; &middot; deny-list + scope enforced &middot; blocking call &mdash; nmap/nuclei will take a while
+          </div>
+        </div>
+        <pre class="out" id="sh-out" style="min-height:300px;max-height:60vh">(nothing yet)</pre>
+      </div>
+
       <!-- TOOLS -->
       <div class="tabpane" data-p="tools">
         <div class="sp" style="margin-bottom:10px">
@@ -920,7 +1049,15 @@ $$(".tab").forEach(t => t.onclick = () => {
   $(`.tabpane[data-p="${t.dataset.t}"]`).classList.add("on");
   if (t.dataset.t === "tools") loadTools();
   if (t.dataset.t === "config") loadKeys();
-  if (t.dataset.t === "running") loadRunning();
+  if (t.dataset.t === "shell") setTimeout(shFocus, 40);
+  if (t.dataset.t === "running") {
+    loadRunning(true);
+    if (RUNNING_TIMER) clearInterval(RUNNING_TIMER);
+    RUNNING_TIMER = setInterval(()=>loadRunning(true), 1500);
+  } else if (RUNNING_TIMER) {
+    clearInterval(RUNNING_TIMER);
+    RUNNING_TIMER = null;
+  }
 });
 
 // ── scans list ────────────────────────────────────────────────────
@@ -966,6 +1103,16 @@ function setLiveBadge(live){
   const d = $("#live-dot");
   d.textContent = live ? "live" : "idle";
   d.className = "badge " + (live ? "live" : "done");
+}
+
+async function refreshCurrentScan(){
+  if (!S.cur) return;
+  try {
+    const j = await jget(`/api/scan/${encodeURIComponent(S.cur.target)}/${encodeURIComponent(S.cur.ts)}`);
+    renderOverview(j.state);
+    renderFindings(j.state);
+    setLiveBadge(j.meta.is_live);
+  } catch(e){ /* silent */ }
 }
 
 // ── overview ──────────────────────────────────────────────────────
@@ -1147,8 +1294,8 @@ $("#act-run").onclick = async () => {
     S.actionHist.unshift({ts:new Date().toISOString(), kind, payload, result:j.result});
     if (S.actionHist.length > 50) S.actionHist.pop();
     renderActionHist();
-    // refresh state
-    selectScan(S.cur.target, S.cur.ts);
+    await refreshCurrentScan();
+    if ($(".tab.on")?.dataset.t === "running") loadRunning(true);
   } catch(e){
     $("#act-out").textContent = "error: " + e.message;
   }
@@ -1197,6 +1344,109 @@ $("#rp-send").onclick = async () => {
     $("#rp-resp").innerHTML = `<pre class="out">${esc(e.message)}</pre>`;
   }
 };
+
+// ── shell (terminal-like) ─────────────────────────────────────────
+let SHELL_HIST = [];
+let SHELL_HIST_IDX = -1;
+
+function _loadShellHist(){
+  try { SHELL_HIST = JSON.parse(localStorage.getItem("ag_shell_hist") || "[]"); }
+  catch(e){ SHELL_HIST = []; }
+}
+function _saveShellHist(){
+  try { localStorage.setItem("ag_shell_hist", JSON.stringify(SHELL_HIST.slice(0,200))); }
+  catch(e){}
+}
+_loadShellHist();
+
+function shFocus(){
+  const e = document.getElementById("sh-cmd");
+  if (e) e.focus();
+}
+
+async function runShell(){
+  if (!S.cur){ toast("select a scan first"); return; }
+  const inp = document.getElementById("sh-cmd");
+  if (!inp) return;
+  const cmd = inp.value.trim();
+  if (!cmd) return;
+  SHELL_HIST.unshift(cmd);
+  SHELL_HIST_IDX = -1;
+  _saveShellHist();
+
+  const out = document.getElementById("sh-out");
+  const stamp = new Date().toISOString().slice(11,19);
+  out.textContent += "\n[" + stamp + "] $ " + cmd + "\n";
+  out.scrollTop = out.scrollHeight;
+  const btn = document.getElementById("sh-run");
+  btn.disabled = true;
+  btn.textContent = "...";
+  try {
+    const j = await jpost(
+      `/api/scan/${encodeURIComponent(S.cur.target)}/${encodeURIComponent(S.cur.ts)}/shell`,
+      { cmd }
+    );
+    out.textContent += (j.output || "(no output)") + "\n";
+  } catch(e){
+    out.textContent += "[error] " + e.message + "\n";
+  } finally {
+    out.scrollTop = out.scrollHeight;
+    btn.disabled = false;
+    btn.textContent = "Run";
+    inp.value = "";
+    inp.focus();
+    refreshCurrentScan();
+  }
+}
+
+(function bindShell(){
+  const inp = document.getElementById("sh-cmd");
+  if (!inp) return;
+  inp.addEventListener("keydown", (e) => {
+    if (e.key === "Enter"){ e.preventDefault(); runShell(); return; }
+    if (e.key === "ArrowUp"){
+      e.preventDefault();
+      if (!SHELL_HIST.length) return;
+      SHELL_HIST_IDX = Math.min(SHELL_HIST_IDX + 1, SHELL_HIST.length - 1);
+      inp.value = SHELL_HIST[SHELL_HIST_IDX];
+      setTimeout(()=>inp.setSelectionRange(9999,9999),0);
+    }
+    if (e.key === "ArrowDown"){
+      e.preventDefault();
+      if (SHELL_HIST_IDX <= 0){ SHELL_HIST_IDX = -1; inp.value = ""; return; }
+      SHELL_HIST_IDX -= 1;
+      inp.value = SHELL_HIST[SHELL_HIST_IDX];
+    }
+  });
+  const run = document.getElementById("sh-run");
+  if (run) run.onclick = runShell;
+  const clr = document.getElementById("sh-clear");
+  if (clr) clr.onclick = () => { document.getElementById("sh-out").textContent = "(nothing yet)"; };
+})();
+
+
+// ── top bar: re-scan / resume / attack ──────────────────────────
+async function spawnMode(mode){
+  if (!S.cur){ toast("select a scan first"); return; }
+  const t = S.cur.target;
+  const url = `/api/scan/${encodeURIComponent(t)}/${encodeURIComponent(S.cur.ts)}/${mode}`;
+  try {
+    const j = await jpost(url, {});
+    toast(`${mode} spawned (pid ${j.pid})`);
+    document.querySelector('.tab[data-t="running"]').click();
+    loadRunning(true);
+    setTimeout(()=>loadRunning(true), 600);
+  } catch(e){ toast(mode + " failed: " + e.message); }
+}
+(function bindTopBar(){
+  const br = document.getElementById("btn-rescan");
+  if (br) br.onclick = () => spawnMode("rescan");
+  const brr = document.getElementById("btn-resume");
+  if (brr) brr.onclick = () => spawnMode("resume");
+  const bra = document.getElementById("btn-attack");
+  if (bra) bra.onclick = () => spawnMode("attack");
+})();
+
 
 // ── tools ─────────────────────────────────────────────────────────
 async function loadTools(){
@@ -1257,11 +1507,37 @@ async function loadKeys(){
   const j = await jget("/api/keys");
   $("#cfg-path").textContent = "writes to: " + j.path;
   const fields = ["AG_MODEL","AG_BASE","AG_KEY","DEEPSEEK_KEY","AG_PROXY","AG_SCAN_ROOT","AG_MAX_TURNS","AG_CTX_MAX","AG_CMD_TIMEOUT","AG_CURL_TIMEOUT"];
-  $("#cfg-fields").innerHTML = fields.map(k => `
-    <div class="row">
+  const warn = (j.overridden||[]).length
+    ? `<div class="panel" style="border-color:var(--yellow);background:#2c2405">
+         <b style="color:var(--yellow)">env overrides .env for:</b> ${j.overridden.map(esc).join(", ")}
+         <div class="muted mt6">editing these in .env has no effect until you unset them in the shell.</div>
+       </div>` : "";
+  $("#cfg-fields").innerHTML = warn + fields.map(k => {
+    const eff = j.effective[k];
+    return `<div class="row">
       <label style="min-width:150px">${esc(k)}</label>
       <input data-k="${esc(k)}" value="${esc(j.env[k]||"")}" placeholder="${esc(CFG_HINTS[k]||"")}">
-    </div>`).join("");
+      <span class="muted" style="min-width:90px">${eff?'<span class="badge live">in env</span>':''}</span>
+    </div>`;
+  }).join("") + `
+  <h3 style="margin-top:16px">Raw .env</h3>
+  <div class="muted mt6" style="margin-bottom:6px">edit directly — save writes the file. applies on next scan spawn.</div>
+  <textarea id="cfg-raw" rows="8" style="font-family:var(--mono);font-size:11px">${esc(j.raw_text||"")}</textarea>
+  <div class="row mt6"><button id="cfg-raw-save">Save raw .env</button><span class="muted">overwrites entire file</span></div>`;
+  const rawBtn = document.getElementById("cfg-raw-save");
+  if (rawBtn) rawBtn.onclick = async () => {
+    const text = document.getElementById("cfg-raw").value;
+    const updates = {};
+    text.split("\n").forEach(line=>{
+      const t = line.trim();
+      if (!t || t.startsWith("#") || !t.includes("=")) return;
+      const parts = t.split("=");
+      const k = parts.shift().trim();
+      updates[k] = parts.join("=").replace(/^["']|["']$/g,"");
+    });
+    try { await jpost("/api/keys", {updates}); toast("raw .env saved"); loadKeys(); }
+    catch(e){ toast("save failed: "+e.message); }
+  };
 }
 $("#cfg-save").onclick = async () => {
   const updates = {};
@@ -1275,22 +1551,81 @@ $("#cfg-save").onclick = async () => {
 };
 
 // ── running ───────────────────────────────────────────────────────
-async function loadRunning(){
-  const j = await jget("/api/running");
-  S.running = j.running || [];
-  $("#run-list").innerHTML = S.running.length ? S.running.map(r=>`
-    <div class="panel">
+let RUNNING_TIMER = null;
+const HIDDEN_RUNS = new Set();
+
+function toggleRunHidden(key){
+  if (HIDDEN_RUNS.has(key)) HIDDEN_RUNS.delete(key);
+  else HIDDEN_RUNS.add(key);
+  renderRunningList();
+}
+
+async function copyRunLogs(key){
+  const r = (S.running||[]).find(x => x.key === key);
+  if (!r){ toast("log gone"); return; }
+  const text = (r.lines||[]).join("");
+  try {
+    await navigator.clipboard.writeText(text);
+    toast(`copied ${text.length} chars`);
+  } catch(e){
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand("copy"); toast(`copied ${text.length} chars`); }
+    catch(_) { toast("copy blocked by browser"); }
+    document.body.removeChild(ta);
+  }
+}
+
+function renderRunningList(){
+  const wrap = $("#run-list");
+  if (!wrap) return;
+  if (!S.running.length){
+    wrap.innerHTML = '<div class="muted">nothing spawned from the dashboard</div>';
+    return;
+  }
+  const sticky = {};
+  $$("#run-list pre.out").forEach((pre,i) => {
+    sticky[i] = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 60;
+  });
+  wrap.innerHTML = S.running.map(r => {
+    const hidden = HIDDEN_RUNS.has(r.key);
+    const nLines = (r.lines||[]).length;
+    const badge = r.alive
+      ? '<span class="badge live">running</span>'
+      : `<span class="badge done">exit ${r.exit_code ?? "?"}</span>`;
+    return `
+    <div class="panel" data-run-key="${esc(r.key)}">
       <div class="row">
+        <button onclick="toggleRunHidden('${esc(r.key)}')"
+                title="${hidden?'show':'hide'} output"
+                style="min-width:28px;padding:2px 8px">${hidden?'\u25B8':'\u25BE'}</button>
         <b>${esc(r.key)}</b>
-        <span class="badge ${r.alive?'live':'done'}">${r.alive?'running':'exit '+(r.exit_code??"?")}</span>
+        ${badge}
         <span class="muted">pid ${r.pid}</span>
-        <span class="muted">started ${esc((r.started||"").slice(11,19))}</span>
+        <span class="muted">${esc((r.started||"").slice(11,19))}</span>
+        <span class="muted">${nLines} lines</span>
         <span style="flex:1"></span>
-        ${r.alive?`<button class="danger" onclick="killScan('${esc(r.key)}')">kill</button>`:""}
+        <button onclick="copyRunLogs('${esc(r.key)}')" title="copy all logs">\u29C9 copy</button>
+        ${r.alive ? `<button class="danger" onclick="killScan('${esc(r.key)}')">kill</button>` : ""}
       </div>
       <div class="muted mt6">${esc(r.task||"")}</div>
-      <pre class="out mt6" style="max-height:240px">${esc((r.lines||[]).join(""))}</pre>
-    </div>`).join("") : '<div class="muted">nothing spawned from the dashboard</div>';
+      <pre class="out mt6" style="max-height:340px;display:${hidden?'none':'block'}">${esc((r.lines||[]).join(""))}</pre>
+    </div>`;
+  }).join("");
+  $$("#run-list pre.out").forEach((pre,i) => {
+    if (sticky[i]) pre.scrollTop = pre.scrollHeight;
+  });
+}
+
+async function loadRunning(quiet){
+  let j;
+  try { j = await jget("/api/running"); }
+  catch(e){ if (!quiet) toast("running fetch: "+e.message); return; }
+  S.running = j.running || [];
+  renderRunningList();
 }
 window.killScan = async (key) => {
   if (!confirm("kill scan "+key+"?")) return;
@@ -1320,7 +1655,10 @@ $("#btn-new").onclick = () => {
       $("#ns-out").style.display = "block";
       $("#ns-out").textContent = "spawned key="+j.key+" pid="+j.pid+"\noutput appears in Running tab";
       toast("scan started");
-      setTimeout(()=>{loadRunning(); document.querySelector('.tab[data-t="running"]').click();}, 800);
+      document.querySelector('.tab[data-t="running"]').click();
+      loadRunning(true);
+      setTimeout(()=>loadRunning(true), 500);
+      setTimeout(()=>loadRunning(true), 1500);
     } catch(e){ toast("start error: "+e.message); }
   };
 };
@@ -1341,6 +1679,8 @@ loadScans().then(() => {
   if (S.scans.length && !S.cur) selectScan(S.scans[0].target, S.scans[0].ts);
 });
 setInterval(loadScans, 8000);
+// background poll keeps the sidebar "live" badge fresh even off the Running tab
+setInterval(()=>{ if ((S.running||[]).some(r=>r.alive)) loadRunning(true); }, 5000);
 setInterval(() => {
   if (!S.cur) return;
   jget(`/api/scan/${encodeURIComponent(S.cur.target)}/${encodeURIComponent(S.cur.ts)}/state`)
