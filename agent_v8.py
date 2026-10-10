@@ -2686,38 +2686,8 @@ def agent_loop(task, target, resume_dir=None, resume_history=None):
         for m in inbox_msgs:
             history.append({"role": "user", "content": m})
 
-        # goals: custom mode + not-yet-planned → capture PLAN from previous response
+        # goals: custom mode → inject digest (only after PLAN has been captured)
         if STATE.get("plan") == "custom":
-            goals = STATE.get("goals") or []
-            if not goals:
-                # last assistant message may contain PLAN: ...
-                last_asst = next(
-                    (m["content"] for m in reversed(history) if m["role"] == "assistant"),
-                    "",
-                )
-                parsed = _parse_plan_json(last_asst)
-                if parsed:
-                    STATE["goals"] = parsed
-                    STATE["last_replan_turn"] = STATE.get("turn", 0)
-                    _state.save(RUN_DIR, STATE)
-                    print(f"  {C['cyan']}[plan] captured {len(parsed)} goal(s){C['rst']}")
-                else:
-                    # nudge once; if next turn still no plan → auto-fallback
-                    misses = STATE.get("plan_misses", 0) + 1
-                    STATE["plan_misses"] = misses
-                    _state.save(RUN_DIR, STATE)
-                    if misses >= 2:
-                        print(f"  {C['yellow']}[plan] no valid PLAN after 2 tries — "
-                              f"falling back to system{C['rst']}")
-                        STATE["plan"] = "system"
-                        _state.save(RUN_DIR, STATE)
-                    else:
-                        history.append({"role": "user", "content":
-                            "[harness] custom plan mode. First response must be a "
-                            "PLAN: <json array> directive. Emit PLAN now."})
-                        continue
-
-            # inject digest before generate
             digest = _goal_digest(STATE)
             if digest and STATE.get("goals"):
                 history.append({"role": "user", "content": digest})
@@ -2747,6 +2717,30 @@ def agent_loop(task, target, resume_dir=None, resume_history=None):
 
         full = full.strip()
         history.append({"role": "assistant", "content": full})
+
+        # custom plan mode — first response may contain PLAN: json
+        if STATE.get("plan") == "custom" and not (STATE.get("goals") or []):
+            parsed = _parse_plan_json(full)
+            if parsed:
+                STATE["goals"] = parsed
+                STATE["last_replan_turn"] = STATE.get("turn", 0)
+                STATE["plan_misses"] = 0
+                _state.save(RUN_DIR, STATE)
+                print(f"  {C['cyan']}[plan] captured {len(parsed)} goal(s){C['rst']}")
+            else:
+                misses = STATE.get("plan_misses", 0) + 1
+                STATE["plan_misses"] = misses
+                _state.save(RUN_DIR, STATE)
+                if misses >= 2:
+                    print(f"  {C['yellow']}[plan] no valid PLAN after 2 tries — "
+                          f"falling back to system{C['rst']}")
+                    STATE["plan"] = "system"
+                    _state.save(RUN_DIR, STATE)
+                else:
+                    history.append({"role": "user", "content":
+                        "[harness] custom plan mode. First response must be a "
+                        "PLAN: <json array> directive. Emit PLAN now."})
+                    continue
 
         if is_refusal(full):
             refusal_streak += 1
