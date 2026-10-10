@@ -2039,14 +2039,23 @@ def attack_phase(target):
             f"After 3 failed variants on this finding, respond DONE with the outcome."
         )
 
+        prior = _load_history(RUN_DIR) or []
         history = [
             {"role": "system", "content": ATTACK},
-            {"role": "user", "content":
+        ]
+        # bring over the last few turns of the prior conversation for context
+        if prior:
+            for m in prior[-8:]:
+                if m.get("role") in ("user", "assistant"):
+                    history.append({"role": m["role"], "content": m.get("content", "")[:4000]})
+        history.append({
+            "role": "user",
+            "content":
                 f"TARGET: {target}\nRUN_DIR: {RUN_DIR}\n\n{attack_task}\n\n"
                 f"Recent findings: {json.dumps(STATE.get('findings', [])[-8:], indent=2)[:3000]}\n"
                 f"Recent endpoints: {json.dumps(STATE.get('endpoints', [])[-15:], indent=2)[:2000]}\n\n"
-                f"Begin."},
-        ]
+                f"Begin.",
+        })
 
         a_streak = 0
         for turn in range(ATTACK_TURNS):
@@ -2155,14 +2164,48 @@ def _startup_tool_scan():
     except Exception as e:
         return f"(tool scan failed: {e})"
 
-def agent_loop(task, target):
+
+
+def _history_path(run_dir):
+    return pathlib.Path(run_dir) / "history.json"
+
+
+def _save_history(run_dir, history):
+    try:
+        pathlib.Path(run_dir).mkdir(parents=True, exist_ok=True)
+        # keep the last 200 messages so it doesn't balloon
+        trimmed = history[-200:]
+        _history_path(run_dir).write_text(json.dumps(trimmed, indent=2))
+    except Exception as e:
+        print(f"  [history-save] {e}")
+
+
+def _load_history(run_dir):
+    p = _history_path(run_dir)
+    if not p.exists():
+        return None
+    try:
+        return json.loads(p.read_text())
+    except Exception as e:
+        print(f"  [history-load] {e}")
+        return None
+
+
+def agent_loop(task, target, resume_dir=None, resume_history=None):
     global STATE, RUN_DIR, COLLECTOR, HB, BUD, PROXY_POOL
 
-    RUN_DIR = make_run_dir(target)
-    STATE = _state.load(RUN_DIR)
-    STATE["target"] = target
-    STATE["phase"] = "init"
-    _state.save(RUN_DIR, STATE)
+    if resume_dir:
+        # REUSE the existing run dir — do NOT create a new one
+        RUN_DIR = pathlib.Path(resume_dir)
+        STATE = _state.load(RUN_DIR)
+        STATE.setdefault("target", target)
+        print(f"  [resume] reusing {RUN_DIR}")
+    else:
+        RUN_DIR = make_run_dir(target)
+        STATE = _state.load(RUN_DIR)
+        STATE["target"] = target
+        STATE["phase"] = "init"
+        _state.save(RUN_DIR, STATE)
 
     COLLECTOR = _collector.Collector(RUN_DIR)
     HB = _state.Heartbeat(RUN_DIR)
@@ -2194,19 +2237,38 @@ def agent_loop(task, target):
     banner(f"   live:     tail -f {RUN_DIR}/live.log")
     hr()
 
-    tool_ctx = _startup_tool_scan()
-    history = [
-        {"role": "system", "content": SYSTEM},
-        {"role": "user", "content":
-            f"TARGET: {target}\nRUN_DIR: {RUN_DIR}\n\nTASK: {task}\n\n"
-            f"TOOL ENVIRONMENT:\n{tool_ctx}\n\n"
-            f"Begin. Fingerprint first (WAF: and STACK: on the target URL), "
-            f"then load the matching methodology."},
-    ]
+    if resume_history:
+        # pick up the previous conversation and add a continuation prompt
+        history = list(resume_history)
+        history.append({
+            "role": "user",
+            "content": (
+                f"[CONTINUE — do not redo work already done]\n"
+                f"TASK: {task}\n\n"
+                f"Review the prior conversation above. Resume from the last "
+                f"unfinished step. Emit a directive that makes progress toward "
+                f"completion: WALK, PROBE, EXPLOIT, CHAIN, FINDING, LOOT, "
+                f"REPORT, or DONE if truly finished."
+            ),
+        })
+        print(f"  [resume] loaded {len(history)} prior messages")
+    else:
+        tool_ctx = _startup_tool_scan()
+        history = [
+            {"role": "system", "content": SYSTEM},
+            {"role": "user", "content":
+                f"TARGET: {target}\nRUN_DIR: {RUN_DIR}\n\nTASK: {task}\n\n"
+                f"TOOL ENVIRONMENT:\n{tool_ctx}\n\n"
+                f"Begin. Fingerprint first (WAF: and STACK: on the target URL), "
+                f"then load the matching methodology."},
+        ]
 
     last_critic_turn = 0
     refusal_streak = 0
-    for turn in range(MAX_TURNS):
+    start_turn = STATE.get("turn", 0)
+    if start_turn:
+        print(f"  [resume] continuing from turn {start_turn}")
+    for turn in range(start_turn, MAX_TURNS):
         STATE["turn"] = turn + 1
         _state.save(RUN_DIR, STATE)
 
@@ -2309,6 +2371,10 @@ def agent_loop(task, target):
                         "Results:\n" + "\n".join(results)[:12000] +
                         "\n\nNext directive, or DONE."})
 
+        # persist so resume/deeper can pick up
+        _save_history(RUN_DIR, history)
+
+    _save_history(RUN_DIR, history)  # final save on exit
     _finalize()
     return RUN_DIR, STATE
 
@@ -2396,22 +2462,24 @@ def main():
         print(f"{C['red']}AG_KEY / DEEPSEEK_KEY not set (in .env or env){C['rst']}")
         sys.exit(1)
 
+    _resume_dir = None
+    _resume_hist = None
     if resume:
         base = SCAN_ROOT / target
         runs = sorted(base.iterdir()) if base.exists() else []
         if not runs:
             print(f"no prior run for {target}")
             sys.exit(1)
-        RUN_DIR = runs[-1]
-        STATE = _state.load(RUN_DIR)
-        HB = _state.Heartbeat(RUN_DIR); HB.start()
-        BUD = _budget.get(RUN_DIR)
-        COLLECTOR = _collector.Collector(RUN_DIR)
-        banner(f"resuming {RUN_DIR}", "green")
+        _resume_dir = runs[-1]
+        _resume_hist = _load_history(_resume_dir)
+        banner(f"resuming {_resume_dir}", "green")
+        if _resume_hist:
+            banner(f"  {len(_resume_hist)} prior messages loaded", "gray")
+        else:
+            banner(f"  no history.json — will restart context", "yellow")
 
     try:
-        if not resume:
-            agent_loop(task, target)
+        agent_loop(task, target, resume_dir=_resume_dir, resume_history=_resume_hist)
     except KeyboardInterrupt:
         print(f"\n{C['yellow']}[interrupted — saving state]{C['rst']}")
         _finalize()
@@ -2449,8 +2517,10 @@ def main():
             break
         if not extra:
             break
+        # load whatever we have so far so the model doesn't start over
+        prior = _load_history(RUN_DIR) or []
         try:
-            agent_loop(extra, target)
+            agent_loop(extra, target, resume_dir=RUN_DIR, resume_history=prior)
         except KeyboardInterrupt:
             print(f"\n{C['yellow']}[interrupted]{C['rst']}")
             _finalize()
