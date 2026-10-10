@@ -83,3 +83,10 @@ evidence/__pycache__/
 *.bak
 *.db
 .env
+
+# large wordlists — kept locally, not in git
+wordlists/*.txt
+wordlists/*.gz
+wordlists/*.zip
+wordlists/seclists/
+wordlists/PayloadsAllTheThings/

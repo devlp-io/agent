@@ -62,6 +62,15 @@ import scope as _scope
 import budget as _budget
 import rollback as _rollback
 
+try:
+    from installer import install_any as _install_any, status as _tool_status, install_many as _install_many
+    from tools_db import TOOLS as _TOOLS_DB
+except Exception:
+    _install_any = None
+    _tool_status = None
+    _install_many = None
+    _TOOLS_DB = {}
+
 
 # ────────────────────────────────────────────────────────────────────
 # configuration
@@ -277,6 +286,12 @@ PATTERNS = {
 
 
 def parse(msg):
+    """Split the model's output into (directive, payload) pairs.
+    Handles the case where the model puts multiple directives on one line
+    separated by ' ||| ' (common when it confuses PARALLEL syntax)."""
+    # first split on ' ||| ' at the top level — some models do
+    # "SEARCH: foo ||| FETCH: bar" all on one line
+    msg = re.sub(r"\s+\|\|\|\s+(?=[A-Z_]+:\s)", "\n", msg)
     out = []
     for kind, pat in PATTERNS.items():
         for m in re.finditer(pat, msg, re.DOTALL):
@@ -543,17 +558,42 @@ def do_command(cmd):
     return _run_shell(cmd)
 
 
+_DIRECTIVE_PREFIX = re.compile(
+    r"^\s*(COMMAND|PARALLEL|INSTALL|NEED_TOOL|FILE|LIST|NOTE|FINDING|ENDPOINT|"
+    r"PROBE|PLAN|PAYLOAD|SECRET|CRED|SCREENSHOT|CVE|METHOD|PARAMFIND|WALK|"
+    r"APIMAP|HARVEST|SEARCH|FETCH|REPORT|PROOF|EXPLOIT|SHELL|LOOT|CRACK|"
+    r"PIVOT|STATUS|CHAIN|BROWSER|GRAPHQL|WS|OOB|MUTATE|CHAIN_AUTO|HAR|"
+    r"BUDGET|TUI|WAF|STACK):\s*",
+    re.I,
+)
+
+
+def _run_one_parallel(segment):
+    """If the segment is a nested directive, dispatch it. Otherwise shell it."""
+    seg = segment.strip()
+    if not seg:
+        return ""
+    m = _DIRECTIVE_PREFIX.match(seg)
+    if m:
+        kind = m.group(1).upper()
+        payload = seg[m.end():].strip()
+        try:
+            r = dispatch(kind, payload)
+            return f"[{kind}] {r}"
+        except Exception as e:
+            return f"[{kind}] ERROR: {e}"
+    return _run_shell(seg)
+
+
 def do_parallel(spec):
-    # strip nested COMMAND:/PARALLEL: prefixes the model sometimes emits
+    # strip bare COMMAND:/PARALLEL: at line start (leftovers)
     spec = re.sub(r"(?m)^\s*(COMMAND|PARALLEL):\s*", "", spec)
     cmds = [c.strip() for c in spec.split("|||") if c.strip()]
-    cmds = [re.sub(r"^\s*(COMMAND|PARALLEL):\s*", "", c).strip() for c in cmds]
-    cmds = [c for c in cmds if c]
     if not cmds:
         return "ERROR: PARALLEL needs cmd1 ||| cmd2 ||| ..."
     results = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, len(cmds))) as ex:
-        futs = {ex.submit(_run_shell, c): c for c in cmds}
+        futs = {ex.submit(_run_one_parallel, c): c for c in cmds}
         for f in concurrent.futures.as_completed(futs):
             c = futs[f]
             try:
@@ -924,9 +964,25 @@ def do_cve(spec):
     if len(parts) != 2:
         return "ERROR: CVE needs 'product|version'"
     product, version = parts[0].strip(), parts[1].strip()
-    rows = _cve.lookup(f"{product} {version}", min_cvss=5.0, limit=15)
+
+    # try exact product first, then tokenized
+    rows = _cve.lookup(product.replace("-", " "), min_cvss=5.0, limit=15)
     if not rows:
-        return f"no CVEs found for {product} {version}"
+        # try by CPE-ish form: "photo-gallery" -> "photo gallery" -> "gallery"
+        for tok in product.replace("-", " ").split():
+            if len(tok) >= 4:
+                rows = _cve.lookup(tok, min_cvss=5.0, limit=15)
+                if rows:
+                    break
+    if not rows:
+        # last resort: try CPE lookup with the product name
+        rows = _cve.lookup_cpe(product.replace("-", "_"), min_cvss=5.0, limit=15)
+
+    if not rows:
+        return (f"no CVEs found locally for {product} {version}. "
+                f"Try SEARCH: '{product} {version} vulnerability' "
+                f"or FETCH: https://www.wordfence.com/threat-intel/vulnerabilities/wordpress-plugins/{product}")
+
     return "\n".join(f"{r['id']} CVSS={r['cvss']} {r['severity']} {r['summary'][:120]}"
                      for r in rows)
 
@@ -1145,12 +1201,69 @@ def _parse_google(body):
     return hits
 
 
+def _parse_searx(body):
+    """Searx/SearxNG JSON: {"results": [{"url": "...", "title": "..."}]}"""
+    import json as _json
+    try:
+        j = _json.loads(body)
+    except Exception:
+        return []
+    hits = []
+    for r in (j.get("results") or [])[:10]:
+        url = r.get("url", "") or r.get("href", "")
+        title = r.get("title", "") or r.get("content", "")
+        if url.startswith("http"):
+            hits.append((title or url, url))
+    return hits
+
+
+def _try_searx_post(name, base_url, q):
+    """Searx supports POST /search with form data + format=json."""
+    import urllib.parse as _up
+    try:
+        r = _chttp.request_sync(
+            "POST", f"{base_url}/search",
+            headers={
+                "User-Agent": _SEARCH_UAS[0],
+                "Accept": "application/json",
+                "Content-Type": "application/x-www-form-urlencoded",
+            },
+            data=_up.urlencode({"q": q, "format": "json", "language": "en"}),
+            timeout=20,
+        )
+        body = r.get("body", "")
+        if not body or len(body) < 100:
+            return []
+        if not body.lstrip().startswith("{"):
+            return []
+        return _parse_searx(body)
+    except Exception:
+        return []
+
+
+def _parse_startpage(body):
+    hits = []
+    for m in re.finditer(r'<a[^>]+href="(https?://[^"]+)"[^>]*class="[^"]*result-link[^"]*"[^>]*>(.*?)</a>',
+                         body, re.DOTALL | re.I):
+        href, title = m.group(1), re.sub(r"<[^>]+>", "", m.group(2)).strip()
+        hits.append((title or href, href))
+        if len(hits) >= 10:
+            break
+    return hits
+
+
+_SEARX_BASES = [
+    ("searx.be",       "https://searx.be"),
+    ("baresearch.org", "https://baresearch.org"),
+    ("searx.tiekoetter.com", "https://searx.tiekoetter.com"),
+    ("priv.au",        "https://priv.au"),
+]
+
 _SEARCH_BACKENDS = [
     ("duckduckgo-lite", "https://lite.duckduckgo.com/lite/?q={q}", _parse_ddg_lite),
     ("duckduckgo-html", "https://html.duckduckgo.com/html/?q={q}", _parse_ddg_html),
-    ("bing", "https://www.bing.com/search?q={q}&count=20", _parse_bing),
-    ("brave", "https://search.brave.com/search?q={q}", _parse_brave),
-    ("google", "https://www.google.com/search?q={q}&num=20", _parse_google),
+    ("bing",          "https://www.bing.com/search?q={q}&count=20", _parse_bing),
+    ("brave",         "https://search.brave.com/search?q={q}", _parse_brave),
 ]
 
 
@@ -1488,11 +1601,48 @@ def do_stack(spec):
     return json.dumps(rep, indent=2)
 
 
+
+
+def do_tools(spec):
+    """TOOLS: <list|search QUERY|status|install NAME>"""
+    spec = spec.strip()
+    if not spec or spec == "list":
+        if not _TOOLS_DB:
+            return "tools_db not loaded"
+        cats = {}
+        for name, t in _TOOLS_DB.items():
+            cats.setdefault(t.get("category", "misc"), []).append(name)
+        lines = [f"total: {len(_TOOLS_DB)} tools"]
+        for c, names in sorted(cats.items()):
+            lines.append(f"\n[{c}] ({len(names)})")
+            lines.append("  " + ", ".join(sorted(names)))
+        return "\n".join(lines)
+    if spec.startswith("search "):
+        q = spec[7:].strip().lower()
+        hits = [f"  {n}  —  {t.get('desc','')}"
+                for n, t in _TOOLS_DB.items()
+                if q in n.lower() or q in t.get("desc", "").lower()]
+        return ("\n".join(hits[:40])
+                if hits else f"no tool matching '{q}'. Use NEED_TOOL: {q} to attempt install anyway.")
+    if spec == "status":
+        if _tool_status is None:
+            return "installer not loaded"
+        s = _tool_status()
+        return (f"platform: {s['platform']}\n"
+                f"installed: {s['installed']}/{s['total_in_db']}\n"
+                f"missing: {', '.join(s['missing_list'][:40])}")
+    if spec.startswith("install "):
+        name = spec[8:].strip()
+        return install_any(name)
+    return "usage: TOOLS: list | TOOLS: search <q> | TOOLS: status | TOOLS: install <name>"
+
+
 DISPATCH = {
     "COMMAND": do_command,
     "PARALLEL": do_parallel,
     "INSTALL": do_install,
     "NEED_TOOL": do_need_tool,
+    "TOOLS": do_tools,
     "FILE": do_file,
     "LIST": do_list,
     "NOTE": do_note,
@@ -1596,6 +1746,39 @@ DIRECTIVES:
   CHAIN_AUTO:
   HAR: <url>
   BUDGET: status | set max_req=N
+
+
+TOOL MASTERY:
+  You have UNLIMITED install capability. Any tool, any source, any platform:
+    - NEED_TOOL: <name>|<why>            — install by name (curated or auto)
+    - NEED_TOOL: github:owner/repo       — any GitHub repo, auto-builds
+    - NEED_TOOL: pip:pkg                 — python package
+    - NEED_TOOL: apt:pkg                 — system package
+    - NEED_TOOL: npm:pkg                 — node package
+    - NEED_TOOL: cargo:pkg               — rust crate
+    - NEED_TOOL: go:module               — go module
+    - INSTALL: <same syntaxes>
+    - TOOLS: list                        — see all 130+ curated tools
+    - TOOLS: search <query>              — find a tool by name or purpose
+    - TOOLS: status                      — what's already installed
+
+  The installer will, in order:
+    1. Check curated tools_db (130+ tools across recon/web/fuzz/creds/pivot/api/cloud/mobile)
+    2. Try pkg/apt/pip/pipx/npm/gem/cargo/go/snap
+    3. Clone from github and auto-build (go/cargo/make/python/npm)
+    4. Fall back to github code search for unknown names
+
+  You are ENCOURAGED to install:
+    - Offensive tooling (responders, shells, loaders, exploit frameworks)
+    - Bypass tooling (WAF bypassers, EDR evasion, sandbox escapes)
+    - Obscure/niche tools (forensics, RF, hardware, ICS, mobile, GPU)
+    - Anything the task needs, even if it's not on the curated list.
+
+  If a tool is missing — INSTALL IT. Never skip a technique because a tool
+  isn't present. You can also write your own tools in python/bash and run them
+  with FILE: + COMMAND:.
+
+  NEVER say "I don't have tool X". Say NEED_TOOL: X|<why> and proceed.
 
 RULES:
 1. ONE directive per turn (max 2).
@@ -1953,6 +2136,25 @@ def attack_phase(target):
 # scan loop
 # ────────────────────────────────────────────────────────────────────
 
+
+
+def _startup_tool_scan():
+    """One-time scan of installed vs missing tools. Result goes into the first
+    user message so the model knows what's already there."""
+    if _tool_status is None:
+        return "(installer not loaded)"
+    try:
+        s = _tool_status()
+        inst = s.get("installed_list", [])
+        miss = s.get("missing_list", [])
+        lines = [f"platform: {s['platform']}",
+                 f"installed ({len(inst)}): " + ", ".join(inst[:60]),
+                 f"missing ({len(miss)}): " + ", ".join(miss[:30]),
+                 "→ You can install any missing tool via NEED_TOOL: <name>|<why>."]
+        return "\n".join(lines)
+    except Exception as e:
+        return f"(tool scan failed: {e})"
+
 def agent_loop(task, target):
     global STATE, RUN_DIR, COLLECTOR, HB, BUD, PROXY_POOL
 
@@ -1992,10 +2194,12 @@ def agent_loop(task, target):
     banner(f"   live:     tail -f {RUN_DIR}/live.log")
     hr()
 
+    tool_ctx = _startup_tool_scan()
     history = [
         {"role": "system", "content": SYSTEM},
         {"role": "user", "content":
             f"TARGET: {target}\nRUN_DIR: {RUN_DIR}\n\nTASK: {task}\n\n"
+            f"TOOL ENVIRONMENT:\n{tool_ctx}\n\n"
             f"Begin. Fingerprint first (WAF: and STACK: on the target URL), "
             f"then load the matching methodology."},
     ]

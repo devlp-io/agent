@@ -1,0 +1,10 @@
+[
+  {
+    "ts": 1791640233.370435,
+    "name": "rg",
+    "method": "apt",
+    "ok": false,
+    "platform": "ubuntu",
+    "extra": "\nWARNING: apt does not have a stable CLI interface. Use with caution in scripts.\n\nError: Could not open lock file /var/lib/dpkg/lock-frontend - open (13: Permission denied)\nError: Unable to acquire the dpkg frontend lock (/var/lib/dpkg/lock-frontend), are you root?\n/bin/sh: 1: pkg: not found\n"
+  }
+]
