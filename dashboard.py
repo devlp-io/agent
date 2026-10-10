@@ -150,16 +150,8 @@ def _scan_meta(target: str, run: pathlib.Path) -> dict:
             m = p.stat().st_mtime
             if last_activity is None or m > last_activity:
                 last_activity = m
-    # a scan is "live" if mtime < 90s OR a spawned proc for this target is alive
+    # a scan is "live" only if its log files were touched in the last 90s
     is_live = bool(last_activity and (time.time() - last_activity) < 90)
-    if not is_live:
-        for _k, _e in _running.items():
-            try:
-                if _e["proc"].poll() is None and target in (_e.get("task") or ""):
-                    is_live = True
-                    break
-            except Exception:
-                pass
     return {
         "target": target,
         "ts": run.name,
@@ -507,6 +499,23 @@ async def api_stream(target: str, ts: str, files: str = "live.log,live_findings.
     )
 
 
+@app.get("/api/scan/{target}/{ts}/log")
+def api_log(target: str, ts: str, file: str = "live.log", tail: int = 400):
+    """Simple polling endpoint for the Logs tab.
+    Returns the last N lines of one of the three live logs."""
+    rd = _run_dir(target, ts)
+    allowed = {"live.log", "live_findings.log", "live_commands.log"}
+    if file not in allowed:
+        raise HTTPException(400, f"unknown log file: {file}")
+    p = rd / file
+    lines = tail_file(p, min(max(tail, 1), 2000))
+    try:
+        size = p.stat().st_size if p.exists() else 0
+    except Exception:
+        size = 0
+    return {"file": file, "size": size, "lines": lines}
+
+
 @app.post("/api/scan/{target}/{ts}/action")
 def api_action(target: str, ts: str, body: ActionBody):
     if not body.kind:
@@ -530,18 +539,58 @@ def api_kill(key: str):
 @app.get("/api/running")
 def api_running():
     out = []
+    seen_scans = set()
+
+    # 1) spawned-from-dashboard processes
     for k, e in _running.items():
         try:
             alive = e["proc"].poll() is None
         except Exception:
             alive = False
         lines = [_strip_ansi(l) for l in (e.get("lines", [])[-300:])]
+        # try to tag with the run dir the child opened (best-effort)
+        target = None
+        ts = None
+        m = __import__("re").search(r"/scans/([^/]+)/(\d{8}_\d{6})", " ".join(lines[:5]))
+        if m:
+            target, ts = m.group(1), m.group(2)
+            seen_scans.add((target, ts))
         out.append({
+            "kind": "spawn",
             "key": k, "pid": e["pid"], "task": e["task"],
             "started": e["started"], "finished": e.get("finished"),
             "exit_code": e.get("exit_code"),
             "alive": alive,
+            "target": target, "ts": ts,
             "lines": lines,
+        })
+
+    # 2) live-on-disk scans (spawned externally — CLI, cron, ssh)
+    for s in list_scans():
+        if not s.get("is_live"):
+            continue
+        if (s["target"], s["ts"]) in seen_scans:
+            continue
+        rd = SCAN_ROOT / s["target"] / s["ts"]
+        lines = []
+        for f in ("live.log", "live_findings.log"):
+            try:
+                for l in tail_file(rd / f, 200):
+                    lines.append(_strip_ansi(l))
+                lines.append("")
+            except Exception:
+                pass
+        out.append({
+            "kind": "disk",
+            "key": f"disk:{s['target']}:{s['ts']}",
+            "pid": None,
+            "task": f"external scan · {s['target']} (turn {s['turn']})",
+            "started": s.get("started_at") or "",
+            "finished": None,
+            "exit_code": None,
+            "alive": True,
+            "target": s["target"], "ts": s["ts"],
+            "lines": lines[-400:],
         })
     return {"running": out}
 
@@ -607,6 +656,25 @@ class KeysBody(BaseModel):
 def api_keys_save(body: KeysBody):
     saved = write_env(body.updates or {})
     return {"saved": sorted(saved.keys()), "path": str(ENV_PATH)}
+
+
+@app.get("/api/running/{key}/lines")
+def api_running_lines(key: str, tail: int = 400):
+    """For disk-kind keys, return fresh tail from the run dir.
+    For spawn-kind keys, return in-memory buffer."""
+    if key.startswith("disk:"):
+        _, target, ts = key.split(":", 2)
+        rd = _run_dir(target, ts)
+        lines = []
+        for f in ("live.log", "live_findings.log"):
+            for l in tail_file(rd / f, tail // 2):
+                lines.append(_strip_ansi(l))
+            lines.append("")
+        return {"key": key, "lines": lines[-tail:]}
+    e = _running.get(key)
+    if not e:
+        raise HTTPException(404, f"unknown key: {key}")
+    return {"key": key, "lines": [_strip_ansi(l) for l in (e.get("lines", [])[-tail:])]}
 
 
 @app.post("/api/repeater")
@@ -1050,6 +1118,8 @@ $$(".tab").forEach(t => t.onclick = () => {
   if (t.dataset.t === "tools") loadTools();
   if (t.dataset.t === "config") loadKeys();
   if (t.dataset.t === "shell") setTimeout(shFocus, 40);
+  if (t.dataset.t === "logs") startLogPolling();
+  else stopLogPolling();
   if (t.dataset.t === "running") {
     loadRunning(true);
     if (RUNNING_TIMER) clearInterval(RUNNING_TIMER);
@@ -1095,7 +1165,7 @@ async function selectScan(target, ts){
     renderOverview(j.state);
     renderFindings(j.state);
     setLiveBadge(j.meta.is_live);
-    attachStream(target, ts);
+    if ($(".tab.on")?.dataset.t === "logs") startLogPolling();
   } catch(e){ toast("load failed: "+e.message); }
 }
 
@@ -1104,6 +1174,11 @@ function setLiveBadge(live){
   d.textContent = live ? "live" : "idle";
   d.className = "badge " + (live ? "live" : "done");
 }
+
+window.viewScan = function(target, ts){
+  document.querySelector('.tab[data-t="overview"]').click();
+  selectScan(target, ts);
+};
 
 async function refreshCurrentScan(){
   if (!S.cur) return;
@@ -1199,28 +1274,51 @@ $("#find-q").oninput = () => renderFindings(FIND_STATE);
 $("#find-sev").onchange = () => renderFindings(FIND_STATE);
 
 // ── live stream (SSE) ─────────────────────────────────────────────
-function attachStream(target, ts){
-  if (S.es){ try{S.es.close();}catch(_){}; S.es = null; }
-  const url = `/api/scan/${encodeURIComponent(target)}/${encodeURIComponent(ts)}/stream`;
-  const es = new EventSource(url);
-  S.es = es;
-  es.addEventListener("init", ev => {
-    const d = JSON.parse(ev.data);
-    const box = logboxFor(d.file);
+// v5: polling replaces SSE (SSE silently failed behind WSL port proxy)
+let LOG_TIMER = null;
+
+async function _fetchLog(file){
+  if (!S.cur) return;
+  try {
+    const url = `/api/scan/${encodeURIComponent(S.cur.target)}/${encodeURIComponent(S.cur.ts)}/log?file=${encodeURIComponent(file)}&tail=400`;
+    const r = await fetch(url);
+    if (!r.ok) return;
+    const j = await r.json();
+    const box = logboxFor(file);
     if (!box) return;
+    const wasNearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+    // replace whole box (simpler than diffing; 400 lines is cheap)
     box.innerHTML = "";
-    (d.lines||[]).forEach(ln => appendLog(box, ln));
-    scrollBottom(box);
-  });
-  es.addEventListener("log", ev => {
-    const d = JSON.parse(ev.data);
-    const box = logboxFor(d.file);
-    if (!box) return;
-    appendLog(box, d.line);
-    scrollBottom(box);
-  });
-  es.onerror = () => { /* browser will auto-reconnect */ };
-  es.onopen = () => toast("live log stream attached");
+    (j.lines||[]).forEach(ln => {
+      const div = document.createElement("div");
+      div.className = "ln";
+      div.textContent = ln;
+      box.appendChild(div);
+    });
+    if (wasNearBottom) box.scrollTop = box.scrollHeight;
+  } catch(e){ /* silent */ }
+}
+
+async function refreshLogsNow(){
+  await Promise.all([
+    _fetchLog("live.log"),
+    _fetchLog("live_findings.log"),
+    _fetchLog("live_commands.log"),
+  ]);
+}
+
+function startLogPolling(){
+  stopLogPolling();
+  refreshLogsNow();
+  LOG_TIMER = setInterval(refreshLogsNow, 1200);
+}
+function stopLogPolling(){
+  if (LOG_TIMER){ clearInterval(LOG_TIMER); LOG_TIMER = null; }
+}
+
+// keep a stub so the existing call site in selectScan doesn't error
+function attachStream(target, ts){
+  if ($(".tab.on")?.dataset.t === "logs") startLogPolling();
 }
 function logboxFor(file){
   if (file === "live.log") return $("#l1");
@@ -1563,7 +1661,14 @@ function toggleRunHidden(key){
 async function copyRunLogs(key){
   const r = (S.running||[]).find(x => x.key === key);
   if (!r){ toast("log gone"); return; }
-  const text = (r.lines||[]).join("");
+  let lines = r.lines || [];
+  if (r.kind === "disk"){
+    try {
+      const j = await jget(`/api/running/${encodeURIComponent(key)}/lines?tail=2000`);
+      lines = j.lines || lines;
+    } catch(e){ /* fall back to cached */ }
+  }
+  const text = lines.join("");
   try {
     await navigator.clipboard.writeText(text);
     toast(`copied ${text.length} chars`);
@@ -1593,23 +1698,33 @@ function renderRunningList(){
   wrap.innerHTML = S.running.map(r => {
     const hidden = HIDDEN_RUNS.has(r.key);
     const nLines = (r.lines||[]).length;
+    const isDisk = r.kind === "disk";
     const badge = r.alive
       ? '<span class="badge live">running</span>'
       : `<span class="badge done">exit ${r.exit_code ?? "?"}</span>`;
+    const pidCell = r.pid ? `<span class="muted">pid ${r.pid}</span>` : '';
+    const kindCell = isDisk
+      ? '<span class="badge" style="background:#232830;border-color:#3b424d;color:#9ba7b3">external</span>'
+      : '<span class="badge" style="background:#132e1a;border-color:#2c7a3d;color:#8ee8a2">dash</span>';
+    const viewBtn = isDisk && r.target && r.ts
+      ? `<button onclick="viewScan('${esc(r.target)}','${esc(r.ts)}')" title="open this scan">\u2197 view</button>`
+      : '';
     return `
     <div class="panel" data-run-key="${esc(r.key)}">
       <div class="row">
         <button onclick="toggleRunHidden('${esc(r.key)}')"
                 title="${hidden?'show':'hide'} output"
                 style="min-width:28px;padding:2px 8px">${hidden?'\u25B8':'\u25BE'}</button>
-        <b>${esc(r.key)}</b>
+        ${kindCell}
+        <b>${esc((r.target||r.key)+(r.ts?('/'+r.ts):''))}</b>
         ${badge}
-        <span class="muted">pid ${r.pid}</span>
+        ${pidCell}
         <span class="muted">${esc((r.started||"").slice(11,19))}</span>
         <span class="muted">${nLines} lines</span>
         <span style="flex:1"></span>
+        ${viewBtn}
         <button onclick="copyRunLogs('${esc(r.key)}')" title="copy all logs">\u29C9 copy</button>
-        ${r.alive ? `<button class="danger" onclick="killScan('${esc(r.key)}')">kill</button>` : ""}
+        ${r.alive && !isDisk ? `<button class="danger" onclick="killScan('${esc(r.key)}')">kill</button>` : ""}
       </div>
       <div class="muted mt6">${esc(r.task||"")}</div>
       <pre class="out mt6" style="max-height:340px;display:${hidden?'none':'block'}">${esc((r.lines||[]).join(""))}</pre>
@@ -1624,7 +1739,22 @@ async function loadRunning(quiet){
   let j;
   try { j = await jget("/api/running"); }
   catch(e){ if (!quiet) toast("running fetch: "+e.message); return; }
+  const prev = S.running || [];
   S.running = j.running || [];
+  // for disk-kind entries, pull fresh tails
+  const diskKeys = S.running.filter(r=>r.kind==="disk").map(r=>r.key);
+  if (diskKeys.length){
+    const tails = await Promise.all(diskKeys.map(k =>
+      jget(`/api/running/${encodeURIComponent(k)}/lines?tail=400`).catch(()=>null)
+    ));
+    diskKeys.forEach((k,i)=>{
+      const t = tails[i];
+      if (t && t.lines){
+        const row = S.running.find(r=>r.key===k);
+        if (row) row.lines = t.lines;
+      }
+    });
+  }
   renderRunningList();
 }
 window.killScan = async (key) => {
@@ -1681,6 +1811,10 @@ loadScans().then(() => {
 setInterval(loadScans, 8000);
 // background poll keeps the sidebar "live" badge fresh even off the Running tab
 setInterval(()=>{ if ((S.running||[]).some(r=>r.alive)) loadRunning(true); }, 5000);
+window.addEventListener("visibilitychange", () => {
+  if (document.hidden) stopLogPolling();
+  else if ($(".tab.on")?.dataset.t === "logs") startLogPolling();
+});
 setInterval(() => {
   if (!S.cur) return;
   jget(`/api/scan/${encodeURIComponent(S.cur.target)}/${encodeURIComponent(S.cur.ts)}/state`)
