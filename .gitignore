@@ -90,3 +90,4 @@ wordlists/*.gz
 wordlists/*.zip
 wordlists/seclists/
 wordlists/PayloadsAllTheThings/
+installs.json
