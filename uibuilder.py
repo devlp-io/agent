@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import ast
 import os, re, sys, json, time, hashlib, pathlib, argparse, subprocess
 
 HERE = pathlib.Path(__file__).resolve().parent
@@ -238,6 +239,53 @@ def _force_intel_path(app_path):
     return True
 
 
+_REQUIRED_ROUTES = [
+    "/api/state", "/api/schema", "/api/recorder", "/api/logs",
+    "/api/shell", "/api/directive", "/api/scan", "/api/attack",
+    "/api/resume",
+]
+
+
+def _route_stub_text():
+    try:
+        p = pathlib.Path(__file__).with_name("uibuilder_routes.txt")
+        return p.read_text(encoding="utf-8")
+    except Exception:
+        return ""
+
+
+def _ensure_routes(app_path):
+    try:
+        src = app_path.read_text(encoding="utf-8")
+    except Exception:
+        return False, []
+    missing = [r for r in _REQUIRED_ROUTES if r not in src]
+    if not missing:
+        return True, []
+    stub = _route_stub_text()
+    if not stub:
+        return False, missing
+    anchor = 'if __name__ == "__main__":'
+    if anchor not in src:
+        return False, missing
+    if "from fastapi import" in src and "Request" not in src.split("from fastapi import", 1)[1].split(chr(10), 1)[0]:
+        src = src.replace("from fastapi import FastAPI",
+                          "from fastapi import FastAPI, Request", 1)
+    if "import subprocess" not in src:
+        src = src.replace("import uvicorn",
+                          "import uvicorn\nimport subprocess", 1)
+    if "import sys" not in src:
+        src = src.replace("import subprocess",
+                          "import subprocess\nimport sys", 1)
+    src = src.replace(anchor, stub.strip() + "\n\n\n" + anchor, 1)
+    try:
+        ast.parse(src)
+    except SyntaxError:
+        return False, missing
+    app_path.write_text(src, encoding="utf-8")
+    return True, missing
+
+
 def _validate(app_path, html_path):
     import ast as _ast
     if not html_path.exists() or html_path.stat().st_size < 200:
@@ -286,6 +334,12 @@ def build(t, update=False, chat=""):
         print("[ui-builder] enforced ~/agent/intel on sys.path")
     except Exception as _e:
         print(f"[ui-builder] path force failed: {_e}")
+    try:
+        _ok_r, _miss = _ensure_routes(app)
+        if _miss:
+            print(f"[ui-builder] appended stubs for: {', '.join(_miss)}")
+    except Exception as _e:
+        print(f"[ui-builder] route ensure failed: {_e}")
     if not _validate(app, html):
         print("[ui-builder] validation failed - not starting")
         return {"ok": False, "reason": "validation_failed",
