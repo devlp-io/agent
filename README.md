@@ -56,6 +56,10 @@ exploitation → reporting, and writes live logs the whole time so you can
   directive), raw HTTP repeater, interactive shell, tools installer,
   `.env` editor, per-target spawn (re-scan / resume / attack), and a live
   running-scans monitor.
+- **Per-target operator console** — `agui <target>` builds a bespoke
+  localhost webapp from that target's own data: sidebar of exposed
+  entities, action panel, live logs, terminal, repeater. Iterate with
+  `agui chat <target> "..."`.
 - **Reports** — `REPORT.md` (comprehensive), `report.html` (styled),
   `report.pdf` (final). Auto-generated at scan end, also callable
   mid-scan with `REPORT:`.
@@ -484,6 +488,134 @@ python reporter.py ~/scans/<target>/<timestamp>/
 
 `PROJECT.md` is the source of truth for design decisions and invariants.
 Read it before touching anything.
+
+---
+
+## Per-target operator console
+
+Every scanned target gets its own bespoke webapp on localhost. Not one
+dashboard for all targets — a console generated from THAT target's actual
+recon, findings, leaks, and successful actions, with a category sidebar,
+action panel, live logs, and a terminal.
+
+    agui example.com
+
+Output:
+
+    [ui-builder] target=example.com  mode=initial
+    [ui-builder] generating index.html + app.py ...
+    [ui-builder] generated in 22.7s (html=18467B py=8580B)
+    [ui-builder] ready at http://127.0.0.1:8803/
+    [ui-builder] pid=12345  log=/home/user/scans/example.com/uiapp/app.log
+
+The browser opens automatically.
+
+### Commands
+
+| command                    | what it does                                  |
+| -------------------------- | --------------------------------------------- |
+| `agui <target>`            | build + run the console for that target       |
+| `agui update <target>`     | rebuild against the newest scan state         |
+| `agui chat <target> "..."` | ask the UI agent for a change, rebuild        |
+| `agui stop <target>`       | kill the server                               |
+| `agui status <target>`     | port, pid, alive, last build time             |
+
+### What gets built
+
+The UI-builder is an LLM loop. It receives a JSON context containing:
+
+- **recorder** — every command / finding / probe / walk / secret / cred /
+  loot / endpoint the agent ever produced against this target, appended
+  across all runs
+- **state** — the newest run's `state.json`
+- **schema** — the deduced target model (entities, capabilities, sensitive
+  fields, recommendations)
+
+It then emits TWO files into `~/scans/<target>/uiapp/`:
+
+    index.html   self-contained page — inline CSS+JS, dark, monospace
+    app.py       single-file FastAPI server (stdlib + fastapi + httpx only)
+
+The sidebar categories, entity cards, and available actions are derived
+from what the target actually exposes. A wallet target gets PAYMENTS /
+KYC / USERS panels. A blog gets POSTS / COMMENTS / USERS. Nothing is
+assumed — everything is read from the target's own data.
+
+### The generated app exposes
+
+| route                 | what it does                                        |
+| --------------------- | --------------------------------------------------- |
+| `GET  /`              | the console HTML                                    |
+| `GET  /api/state`     | newest run's state.json                             |
+| `GET  /api/schema`    | schema.json                                         |
+| `GET  /api/recorder`  | last N recorder events                              |
+| `GET  /api/logs`      | live.log / live_commands.log / live_findings.log    |
+| `POST /api/shell`     | `{cmd}` → `agent_v8._run_shell` (deny-list + scope) |
+| `POST /api/directive` | `{kind, payload}` → `agent_v8.dispatch()`           |
+| `POST /api/scan`      | spawn a fresh `agent_v8` run for this target        |
+| `POST /api/attack`    | spawn with `--attack`                               |
+| `POST /api/resume`    | spawn with `--resume`                               |
+
+### The recorder
+
+`core/recorder.py` appends every action to
+`~/scans/<target>/recorder.jsonl` — one JSON event per line. It survives
+across scans: if you scan the same target tomorrow, the console still
+knows what happened today.
+
+Recorded kinds:
+
+    command    cmd + output + ok/fail
+    finding    sev + title + evidence
+    probe      method + url + unauth_2xx
+    walk       method + url + param + hits + sample rows
+    secret     kind + value + source path
+    cred       user + pass-len + where
+    loot       kind + value
+    endpoint   method + url + note
+    result     explicit read/write outcome
+
+Hooked automatically inside `agent_v8.dispatch()` — no per-directive code.
+
+### Iterating on a console
+
+    agui chat nuunipay.com "add a repeater panel with method swap"
+    agui chat nuunipay.com "widen the sidebar, group entities by schema category"
+    agui chat nuunipay.com "add a button that fires PROBE on every 401 URL"
+
+Each call sends the full prior context plus your message to the UI-builder
+agent, which rewrites `index.html` and `app.py` from scratch. The old
+server is killed, the new one takes its port.
+
+### Ports
+
+Per-target ports are deterministic — `SHA256(target) % 200 + 8801`. Same
+target always binds the same port. Different targets never collide.
+
+### Files
+
+    ~/scans/<target>/
+      recorder.jsonl          append-only action log (across all runs)
+      uiapp/
+        index.html            generated UI
+        app.py                generated FastAPI server
+        app.log               server stdout + tracebacks
+        app.pid               current pid
+        .meta.json            port, started_at, last build info
+
+### Notes
+
+- Uses the same model as `agent_v8` — reads `AG_MODEL` / `AG_BASE` / `AG_KEY`
+  from `.env` or your shell env. Switch providers with `agm <profile>` before
+  invoking `agui` if you want a different model for the UI builder.
+- The generated `app.py` MUST NOT embed HTML in a Python string — that's
+  the whole point of the two-file structure. If a build fails validation
+  with "unterminated triple-quoted string", rerun `agui <target>`.
+- `max_tokens=12000` on the LLM call. HTML capped at ~400 lines, Python at
+  ~250. Large targets may truncate — rerun, or use `agui chat` to nudge.
+- Generated apps are validated for FastAPI + required routes before
+  starting. If validation fails, the app is NOT spawned and the old
+  version keeps running.
 
 ---
 
