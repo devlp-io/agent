@@ -265,6 +265,46 @@ Content-Type flip, X-Original-URL, X-Rewrite-URL.""",
 
 "evidence-packaging": """LAYOUT: 01_raw/ 02_parsed/ 03_extracts/ 04_screenshots/ leak/ loot/.""",
 
+"recon-pivot": """DECISION TREE — when the obvious path returns nothing, pivot.
+Each pivot is grounded in a specific observed signal. Do not chase every
+branch — read the signal and take the matching branch.
+
+SIGNAL: subfinder/amass/assetfinder returned 0 (or only the apex)
+  → crt.sh:   curl -s 'https://crt.sh/?q=%.target&output=json' | jq -r '.[].name_value' | sort -u
+  → ASN enum: whois -h whois.radb.net -- '-i origin AS<asn>'  (find ASN via bgp.he.net/<target>)
+  → PTR sweep: for i in 1..254: dig -x <cidr>.<i>
+  → Bucket hunt: grep target tokens in cloud_enum, S3Scanner, aws s3 ls
+  → GitHub code search: "target.com" in:file  (leaks subdomains in configs)
+
+SIGNAL: ports filtered / no live web ports
+  → TLS SANs: openssl s_client -connect target:443 -servername target </dev/null | openssl x509 -text | grep DNS
+  → favicon hash: curl -s target/favicon.ico | python3 -c "import sys,hashlib,codecs; print(hashlib.md5(codecs.encode(sys.stdin.buffer.read(),'base64')).hexdigest())"
+  → CDN origin leak: check X-Forwarded-For reflection, historical DNS (viewdns.info), SecurityTrails
+  → CDN detection: curl -sI target | grep -i 'cf-ray\|x-sucuri\|x-akamai\|x-cache'
+  → Censys / Shodan by cert hash (fuzzy on origin)
+
+SIGNAL: WAF blocking every request (same fixed body)
+  → fingerprint: wafw00f -a target
+  → TLS JA3: openssl s_client ... | grep -i 'ja3'
+  → header order: probe with curl -H 'X-Forwarded-For' etc — some WAFs skip on internal IPs
+  → slow probe (2 rps) + rotate UA + rotate path casing + trailing dots
+  → if Cloudflare: try direct origin IP from historical DNS / favicon hash
+  → see METHOD: waf-bypass for the full playbook
+
+SIGNAL: same 404 body across all paths (SPA / API gateway)
+  → check /robots.txt, /sitemap.xml, /manifest.json, /.well-known/security.txt
+  → parse JS bundles: /main.dart.js, /_next/static/*.js, /static/js/*.js
+    curl -s target/main.dart.js | grep -oE 'https?://[^"\s]+' | sort -u
+  → look for /api/, /api/v1/, /graphql, /openapi.json, /swagger.json
+  → check for framework markers: X-Powered-By, Server, Set-Cookie names
+
+SIGNAL: all paths return challenge page ("One moment, please...")
+  → METHOD: wsidchk-solver
+
+RULE: after each pivot, record what you learned with NOTE: or FINDING:.
+The point is to change your belief about the target, not to fire more
+requests at the wall.""",
+
 "stop-heuristics": """- No working param → don't WALK.
 - WALK range is unlimited — stop only when model decides.
 - Same deny body from >3 paths = WAF → rotate paths.
