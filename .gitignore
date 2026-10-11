@@ -102,3 +102,19 @@ dashboard.log
 go*.linux-amd64.tar.gz
 uibuilder.py.bak.*
 *.deb
+
+# runtime / local state
+.proxy_pool.json
+pocs/
+README.md.bak.*
+agent_v8.py.bak.*
+agent_v8.py.pre-*.bak
+uibuilder.py.bak.*
+uibuilder.py.before-rewrite.bak
+core/*.py.bak.*
+core/*.py.pre-*.bak
+intel/*.py.bak.*
+intel/*.py.pre-*.bak
+evidence/*.py.bak.*
+evidence/*.py.pre-*.bak
+scans/
