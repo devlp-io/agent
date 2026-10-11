@@ -2615,6 +2615,57 @@ def _detect_dead_end(results):
     return hits >= 2
 
 
+# ── productivity tracker: STUCK vs DONE ────────────────────────────
+
+def _productivity_snapshot():
+    if not isinstance(STATE, dict):
+        return (0, 0, 0, 0)
+    return (
+        len(STATE.get("findings", []) or []),
+        len(STATE.get("endpoints", []) or []),
+        len(STATE.get("secrets", []) or []),
+        len(STATE.get("creds", []) or []),
+    )
+
+
+def _record_productivity(turn):
+    snap = _productivity_snapshot()
+    last = STATE.setdefault("_last_prod_snap", list(snap))
+    stalled = STATE.setdefault("_stalled_turns", 0)
+    progressed = any(snap[i] > (last[i] if i < len(last) else 0)
+                     for i in range(4))
+    if progressed:
+        STATE["_stalled_turns"] = 0
+        STATE["_last_prod_snap"] = list(snap)
+        STATE["_last_prod_turn"] = turn
+        return 0, True
+    stalled += 1
+    STATE["_stalled_turns"] = stalled
+    return stalled, False
+
+
+def _stuck_threshold():
+    try:
+        return int(os.environ.get("AG_STUCK_TURNS", "6"))
+    except Exception:
+        return 6
+
+
+def _inject_pivot_reason(reason):
+    playbook = METHODOLOGY_LIB.get("recon-pivot", "")
+    return (
+        "=== STALLED - NO NEW SIGNAL IN "
+        + str(STATE.get("_stalled_turns", 0))
+        + " TURNS ===\n"
+        + reason + "\n\n"
+        + "Pick a DIFFERENT technique. The decision tree below has "
+        + "branches keyed to observed signal. Read it, choose the branch "
+        + "that fits, and emit a directive that tests a NEW hypothesis:\n\n"
+        + playbook
+    )
+
+
+
 def _update_beliefs(kind, payload, result):
     """Feed directive outcomes into the per-target belief store."""
     tgt = (STATE.get("target") if isinstance(STATE, dict) else None) or "unknown"
@@ -2828,6 +2879,27 @@ RULES:
 7. Prefer PARALLEL: for independent recon.
 8. Prefer WALK: over hand-rolling loops.
 9. Prefer APIMAP: over manual endpoint guessing.
+
+
+=== LOOPING IS A DIRECTIVE ===
+When you notice yourself about to repeat a technique, endpoint, or
+payload, that observation is a HARD signal — act on it immediately.
+
+  "I'm looping" → emit a DIFFERENT directive this turn. Not the same
+  probe with a different header. Not the same URL with a different
+  case. A structurally different technique.
+
+  "I keep re-probing the same file" → that file is EXHAUSTED. Move on.
+  Use METHOD: recon-pivot, switch host, switch tool, or ask for scope.
+
+  Same response body from 2+ URLs → those URLs share a gate. Do not
+  probe the third. Instead, work the gate: METHOD: waf-bypass,
+  METHOD: auth-bypass, or try a custom header.
+
+Never write "I'm looping" and then emit another loop iteration. The
+observation is the pivot instruction.
+
+=== END LOOPING IS A DIRECTIVE ===
 
 === RESPONSE-BODY-FIRST CLASSIFICATION ===
 Status codes lie. Read the BODY before you act on the CODE.
