@@ -210,6 +210,34 @@ def _generate(t, mode, chat=""):
     return html, py
 
 
+def _force_intel_path(app_path):
+    """Inject ~/agent + ~/agent/core + ~/agent/intel into the generated
+    app.py's sys.path. LLM keeps forgetting this line."""
+    try:
+        src = app_path.read_text(encoding="utf-8")
+    except Exception:
+        return False
+    if 'AGENT_ROOT / "intel"' in src:
+        return True
+    import re as _re
+    pat = _re.compile(
+        r'(sys\.path\.insert\(0,\s*str\(AGENT_ROOT\s*/\s*"core"\)\)\s*\n)'
+    )
+    m = pat.search(src)
+    if m:
+        src = (src[:m.end(1)] +
+               'sys.path.insert(0, str(AGENT_ROOT / "intel"))\n' +
+               src[m.end(1):])
+    else:
+        return False
+    try:
+        ast.parse(src)
+    except SyntaxError:
+        return False
+    app_path.write_text(src, encoding="utf-8")
+    return True
+
+
 def _validate(app_path, html_path):
     import ast as _ast
     if not html_path.exists() or html_path.stat().st_size < 200:
@@ -253,6 +281,11 @@ def build(t, update=False, chat=""):
     print(f"[ui-builder] generated in {el:.1f}s (html={len(html_code)}B py={len(py_code)}B)")
     html.write_text(html_code, encoding="utf-8")
     app.write_text(py_code, encoding="utf-8")
+    try:
+        _force_intel_path(app)
+        print("[ui-builder] enforced ~/agent/intel on sys.path")
+    except Exception as _e:
+        print(f"[ui-builder] path force failed: {_e}")
     if not _validate(app, html):
         print("[ui-builder] validation failed - not starting")
         return {"ok": False, "reason": "validation_failed",
@@ -263,6 +296,7 @@ def build(t, update=False, chat=""):
     meta = _read_meta(t)
     meta.update({"target": t, "port": port, "pid": pid,
                  "uiapp_dir": str(d), "app_path": str(app), "html_path": str(html),
+                 "url": f"http://127.0.0.1:{port}/",
                  "started_at": time.time(), "last_build_mode": mode,
                  "last_build_ts": time.time(), "last_build_secs": round(el, 1)})
     _write_meta(t, meta)
