@@ -298,17 +298,61 @@ PATTERNS = {
 _FENCE = re.compile(r"```.*?```", re.DOTALL)
 
 
+_ANY_DIRECTIVE_LIKE = re.compile(
+    r"(?:^|\n)[ \t]*([A-Z][A-Z0-9_]{1,40}):\s*(.*?)(?=\n[A-Z][A-Z0-9_]{1,40}:\s|\Z)",
+    re.DOTALL,
+)
+
+
 def parse(msg):
-    """Split model output into (directive, payload) pairs.
-    Fenced code blocks are stripped first — the model uses them for
-    examples and they must never be executed."""
-    msg = _FENCE.sub("", msg)
-    msg = re.sub(r"\s+\|\|\|\s+(?=[A-Z_]+:\s)", "\n", msg)
-    out = []
+    """Return (actions, errors).
+
+    actions: list of (kind, payload) tuples
+    errors:  human-readable diagnostics for turns that failed to parse.
+             These are fed back to the model next turn so it self-corrects
+             instead of silently losing turns.
+    """
+    errors = []
+    raw = msg or ""
+    stripped = _FENCE.sub("", raw)
+    stripped = re.sub(r"\s+\|\|\|\s+(?=[A-Z_]+:\s)", "\n", stripped)
+
+    actions = []
     for kind, pat in PATTERNS.items():
-        for m in re.finditer(pat, msg, re.DOTALL):
-            out.append((kind, m.group(1).strip()))
-    return out
+        for m in re.finditer(pat, stripped, re.DOTALL):
+            payload = (m.group(1) or "").strip()
+            if not payload:
+                errors.append(f"{kind}: directive present but payload is empty")
+                continue
+            actions.append((kind, payload))
+
+    if not actions:
+        seen = set()
+        for m in _ANY_DIRECTIVE_LIKE.finditer(stripped):
+            name = m.group(1)
+            if name in _DIRECTIVE_NAMES:
+                continue
+            if name in seen:
+                continue
+            seen.add(name)
+            errors.append(
+                "unknown directive " + repr(name) +
+                " — valid names include: " + ", ".join(_DIRECTIVE_NAMES[:20])
+            )
+        if not seen:
+            preview = stripped.strip()[:300].replace("\n", " | ")
+            if preview:
+                errors.append(
+                    "no directive found at column 0. Your output started: "
+                    + repr(preview)
+                )
+            else:
+                errors.append(
+                    "no directive found — output was empty after stripping "
+                    "code fences. Emit one directive (e.g. COMMAND: ...) or DONE."
+                )
+
+    return actions, errors
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -2613,7 +2657,7 @@ def attack_phase(target):
                 continue
             a_streak = 0
 
-            actions = parse(full)
+            actions, parse_errors = parse(full)
             has_action = bool(actions)
             said_done = bool(re.search(r"^\s*DONE\b", full, re.MULTILINE))
 
@@ -2624,9 +2668,12 @@ def attack_phase(target):
                 print(f"  {C['yellow']}[DONE ignored — ran directive first]{C['rst']}")
 
             if not actions:
+                blob = "\n".join("- " + e for e in (parse_errors or ["no diagnostic"]))
                 history.append({"role": "user", "content":
-                                "No directive. Emit EXPLOIT:/PROBE:/WALK:/MUTATE:/"
-                                "OOB:/SEARCH:/COMMAND:, or DONE."})
+                                "Parser rejected your last turn:\n" + blob +
+                                "\n\nEmit ONE valid directive at column 0, "
+                                "outside any code fence (COMMAND/PROBE/WALK/"
+                                "EXPLOIT/FINDING/...), or DONE on its own line."})
                 continue
 
             results = []
@@ -2928,7 +2975,7 @@ def agent_loop(task, target, resume_dir=None, resume_history=None):
             continue
         refusal_streak = 0
 
-        actions = parse(full)
+        actions, parse_errors = parse(full)
         has_action = bool(actions)
         said_done = bool(re.search(r"^\s*DONE\b", full, re.MULTILINE))
 
@@ -2954,8 +3001,11 @@ def agent_loop(task, target, resume_dir=None, resume_history=None):
             print(f"  {C['yellow']}[DONE ignored — ran directive first]{C['rst']}")
 
         if not actions:
+            blob = "\n".join("- " + e for e in (parse_errors or ["no diagnostic"]))
             history.append({"role": "user", "content":
-                            "No directive. Emit ONE, or DONE."})
+                            "Parser rejected your last turn:\n" + blob +
+                            "\n\nEmit ONE valid directive at column 0, "
+                            "outside any code fence. Or emit DONE on its own line."})
             continue
 
         results = []
