@@ -41,6 +41,7 @@ sys.path.insert(0, str(HERE))
 
 from core import state as _state
 from core import recorder as _recorder
+from core import beliefs as _beliefs
 from core import http as _chttp
 from core import proxy as _cproxy
 from core import async_engine as _engine
@@ -2093,6 +2094,22 @@ def do_replan(spec):
     return f"replanned: kept {len(kept)} closed, added {len(goals)} new"
 
 
+def do_belief(spec):
+    """BELIEF: kind|path|confidence|rationale"""
+    parts = [p.strip() for p in (spec or "").split("|", 3)]
+    if len(parts) < 3:
+        return "ERROR: BELIEF needs 'kind|path|confidence[|rationale]'"
+    kind, path = parts[0], parts[1]
+    try:
+        conf = float(parts[2])
+    except Exception:
+        return "ERROR: confidence must be 0.0-1.0"
+    rationale = parts[3] if len(parts) > 3 else ""
+    tgt = (STATE.get("target") if isinstance(STATE, dict) else None) or "unknown"
+    _beliefs.from_explicit(tgt, kind, path, conf, rationale)
+    return f"belief recorded: {kind} on {path} (confidence {conf:.2f})"
+
+
 def do_schema(_arg=""):
     """SCHEMA: — rebuild schema.json from current state."""
     try:
@@ -2181,6 +2198,7 @@ DISPATCH = {
     "WAF": do_waf,
     "STACK": do_stack,
     "SCHEMA": do_schema,
+    "BELIEF": do_belief,
     "GOAL": do_goal,
     "REPLAN": do_replan,
 }
@@ -2275,6 +2293,33 @@ def _record_dispatch(kind, payload, result):
         pass
 
 
+def _update_beliefs(kind, payload, result):
+    """Feed directive outcomes into the per-target belief store."""
+    tgt = (STATE.get("target") if isinstance(STATE, dict) else None) or "unknown"
+    if kind == "PROBE":
+        # payload: METHOD|URL; result is json blob of variants
+        parts = payload.split("|", 1)
+        if len(parts) < 2:
+            return
+        method, url = parts[0].strip(), parts[1].strip()
+        try:
+            import json as _json
+            parsed = _json.loads(result) if isinstance(result, str) else {}
+            results = parsed.get("results") or []
+        except Exception:
+            results = []
+        if results:
+            _beliefs.from_probe(tgt, url, method, results)
+    elif kind in ("COMMAND", "EXPLOIT"):
+        cmd = payload
+        out = str(result or "")
+        ok = bool(out) and not any(
+            s in out.lower()[:200] for s in
+            ("denied", "failed", "error", "refused")
+        )
+        _beliefs.from_command(tgt, cmd, out, ok)
+
+
 def dispatch(kind, payload):
     fn = DISPATCH.get(kind)
     if not fn:
@@ -2285,6 +2330,11 @@ def dispatch(kind, payload):
         result = f"ERROR in {kind}: {e}"
     try:
         _record_dispatch(kind, payload, result)
+    except Exception:
+        pass
+    # update beliefs from directive outcomes
+    try:
+        _update_beliefs(kind, payload, result)
     except Exception:
         pass
     return result
@@ -2460,6 +2510,12 @@ TACTICS — apply these before giving up on any finding:
 RULES:
 1. ONE directive per turn.
 2. On failure: try ONE variant, then move on. Max 3 variants per finding.
+2a. Before PROBE/EXPLOIT, check the TARGET BELIEFS block. If a probe is
+    listed in dead_ends, do NOT re-fire it — pick a DIFFERENT hypothesis.
+2b. Every probe/exploit updates beliefs automatically. If you learn a
+    new defense signature, emit BELIEF: <kind>|<path>|<confidence>|<why>.
+    Valid kinds: auth_gate, role_gate, path_gate, waf_gate, csrf_gate,
+    rate_limit, validation_gate, feature_gate.
 3. URLs with (default) → %28/%29 encode them.
 4. Do not perform denial-of-service. Read + pivot only.
 5. Do not loop the same payload. Each attempt must differ.
@@ -2645,11 +2701,16 @@ def attack_phase(target):
             for m in prior[-8:]:
                 if m.get("role") in ("user", "assistant"):
                     history.append({"role": m["role"], "content": m.get("content", "")[:4000]})
+        try:
+            belief_ctx = _beliefs.inject_context(target)
+        except Exception:
+            belief_ctx = ""
         history.append({
             "role": "user",
             "content":
                 f"TARGET: {target}\nRUN_DIR: {RUN_DIR}\n\n{attack_task}\n\n"
-                f"Recent findings: {json.dumps(STATE.get('findings', [])[-8:], indent=2)[:3000]}\n"
+                + (belief_ctx + "\n\n" if belief_ctx else "")
+                + f"Recent findings: {json.dumps(STATE.get('findings', [])[-8:], indent=2)[:3000]}\n"
                 f"Recent endpoints: {json.dumps(STATE.get('endpoints', [])[-15:], indent=2)[:2000]}\n\n"
                 f"Begin.",
         })
