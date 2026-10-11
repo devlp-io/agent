@@ -75,6 +75,72 @@ Buttons per row:
 Reconstruct args by joining: -X METHOD, each header as -H "k: v",
 cookies as -b "...", body as -d "...".
 
+=== SIDEBAR GROUPS (canonical) ===
+Build the sidebar in this order, showing only groups that have data:
+
+  OVERVIEW   dashboard, findings, endpoints, services, replay
+  DATA       one item per section from recorder.leaks_by_section
+             (users, orders, payments, ...)
+  LEARNING   timeline, beliefs
+  OPS        shell, live log, running scans, auth, proxy
+  CONFIG     credentials, cves, archive, raw state, schema
+  ACTIONS    login, repeater, directive runner, proof runner
+
+Group labels are 9px uppercase with a bottom hairline. Counts on the
+right of each nav item. Severity dot on Findings when there is any
+critical/high.
+
+=== OPS PAGES (MANDATORY) ===
+
+**Auth** — GET /api/auth. Shows:
+  - mode (cookie / bearer / basic / none)
+  - ok: green pill or red pill
+  - login_url (if set)
+  - set_at (relative time)
+  - a "Clear" button that POSTs /api/directive {kind:"AUTH", payload:"clear"}
+  - a manual login form: URL + email + password → POST /api/directive
+    {kind:"AUTH", payload:"login|<url>|<email>|<password>"}
+
+**Proxy** — GET /api/proxy. Shows:
+  - direct_ok / direct_fail / needs_proxy as status pills
+  - best_proxy URL if set
+  - pool_size and pool_fresh counts
+  - a table of recent_attempts (proxy, ok?, error, ts)
+  - buttons: "Refresh Pool" → POST /api/directive {kind:"PROXY-REFRESH"}
+             "Clear" → POST /api/directive {kind:"PROXY-CLEAR"}
+
+=== CONFIG PAGES (MANDATORY) ===
+
+**CVEs** — GET /api/pocs. One card per CVE with:
+  - CVE id + severity chip (from findings)
+  - source (nomi-sec / github / exploitdb)
+  - stars, language
+  - local_path if cloned
+  - a collapsible <details> showing the PoC README excerpt
+  - a "Run PoC" button that POSTs /api/directive
+    {kind:"COMMAND", payload:"cd <local_path> && ls -la && cat README.md"}
+
+**Archive** — GET /api/archive. Shows:
+  - counts: http transcripts, tool outputs
+  - a scrollable table of the index: ts, kind, path, tool/method
+  - each row clickable → opens the file content via
+    GET /api/archive/file?path=<path> (add a route that reads under
+    the run's archive/ directory only, path-traversal-safe)
+
+Add /api/archive/file to app.py:
+  @app.get("/api/archive/file")
+  def api_archive_file(path: str):
+      rd = newest_run()
+      if rd is None: return {"error": "no run"}
+      base = pathlib.Path(rd) / "archive"
+      try:
+          p = (base / path).resolve()
+          if base.resolve() not in p.parents:
+              return {"error": "outside archive"}
+          return {"path": str(p), "text": p.read_text(errors="ignore")[:200000]}
+      except Exception as e:
+          return {"error": str(e)}
+
 === TIMELINE + BELIEFS PAGES (MANDATORY) ===
 Add two pages to the sidebar under a new group "LEARNING" (above ACTIONS):
 
@@ -231,6 +297,9 @@ def api_recorder(limit: int = 500):
 
 import beliefs as _beliefs_mod
 import decisions as _decisions_mod
+import auth_ctx as _auth_mod
+import proxy_rotate as _proxy_mod
+import poc_fetch as _poc_mod
 
 @app.get("/api/beliefs")
 def api_beliefs():
@@ -251,6 +320,74 @@ def api_decisions(limit: int = 300):
                 "summary": _decisions_mod.summary(str(rd))}
     except Exception as e:
         return {"error": str(e), "timeline": [], "summary": {"turns": 0}}
+
+@app.get("/api/auth")
+def api_auth():
+    try:
+        return _auth_mod.status(TARGET)
+    except Exception as e:
+        return {"error": str(e), "mode": "none", "ok": False}
+
+@app.get("/api/proxy")
+def api_proxy():
+    try:
+        return _proxy_mod.status(TARGET)
+    except Exception as e:
+        return {"error": str(e), "pool_size": 0, "needs_proxy": False}
+
+@app.get("/api/pocs")
+def api_pocs():
+    """Scan state.json for CVE ids and report saved PoCs for each."""
+    rd = newest_run()
+    out = []
+    if rd is None:
+        return {"pocs": []}
+    try:
+        st = _state_mod.load(str(rd)) or {}
+        import re as _re
+        seen = set()
+        for f in st.get("findings", []) or []:
+            blob = (f.get("title") or "") + " " + (f.get("evidence") or "")
+            for m in _re.finditer(r"CVE-\d{4}-\d{4,7}", blob, _re.I):
+                cve = m.group(0).upper()
+                if cve in seen:
+                    continue
+                seen.add(cve)
+                try:
+                    meta = _poc_mod.lookup(cve)
+                    out.append({"cve": cve, "ok": meta.get("ok"),
+                                "url": meta.get("url"),
+                                "source": meta.get("source"),
+                                "stars": meta.get("stars"),
+                                "local_path": meta.get("local_path"),
+                                "readme": (meta.get("readme") or "")[:1000]})
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return {"pocs": out}
+
+@app.get("/api/archive")
+def api_archive():
+    """List evidence archive files for the newest run."""
+    rd = newest_run()
+    if rd is None:
+        return {"counts": {"http": 0, "tool": 0}, "index": []}
+    try:
+        from evidence import archive as _arch
+        s = _arch.summary(str(rd))
+    except Exception:
+        s = {"http": 0, "tool": 0}
+    idx = []
+    ip = pathlib.Path(rd) / "archive" / "index.jsonl"
+    if ip.exists():
+        try:
+            for line in ip.read_text(errors="ignore").splitlines()[-200:]:
+                import json as _j
+                idx.append(_j.loads(line))
+        except Exception:
+            pass
+    return {"counts": s, "index": idx[-100:]}
 
 # /api/schema /api/logs /api/shell /api/directive /api/scan /api/attack
 # /api/resume — wrap each in try/except -> JSONResponse({"error":str(e)}, 500)
