@@ -43,6 +43,7 @@ from core import state as _state
 from core import recorder as _recorder
 from core import beliefs as _beliefs
 from core import decisions as _decisions
+from core import auth_ctx as _auth
 from evidence import archive as _archive
 from core import http as _chttp
 from core import proxy as _cproxy
@@ -565,6 +566,15 @@ def _run_shell(cmd, timeout=None):
     ok, why = _scope_check_cmd(cmd)
     if not ok:
         return f"[SCOPE BLOCK] {why}"
+
+    # inject persistent auth (cookie jar / bearer / basic) if this cmd
+    # targets a scope URL and hasn't set its own
+    try:
+        tgt = (STATE.get("target") if isinstance(STATE, dict) else None) or None
+        if tgt:
+            cmd = _auth.inject_curl(cmd, tgt)
+    except Exception:
+        pass
 
     # inject curl timeout
     if "curl" in low and "-m " not in low and "--max-time" not in low:
@@ -2100,6 +2110,57 @@ def do_replan(spec):
     return f"replanned: kept {len(kept)} closed, added {len(goals)} new"
 
 
+def do_auth(spec):
+    """AUTH: login|<email>|<password>
+       AUTH: cookie|<name>=<value>
+       AUTH: bearer|<token>
+       AUTH: basic|<user:pass>
+       AUTH: clear"""
+    parts = spec.split("|", 2)
+    if not parts:
+        return "ERROR: AUTH needs a mode"
+    mode = parts[0].strip().lower()
+    tgt = (STATE.get("target") if isinstance(STATE, dict) else None) or "unknown"
+
+    if mode == "clear":
+        _auth.clear(tgt)
+        return "auth cleared for " + tgt
+
+    if mode == "cookie":
+        if len(parts) < 2:
+            return "ERROR: AUTH: cookie needs 'name=value'"
+        _auth.set_cookie(tgt, parts[1].strip())
+        return "cookie auth set for " + tgt
+
+    if mode == "bearer":
+        if len(parts) < 2:
+            return "ERROR: AUTH: bearer needs a token"
+        _auth.set_bearer(tgt, parts[1].strip())
+        return "bearer auth set for " + tgt
+
+    if mode == "basic":
+        if len(parts) < 2:
+            return "ERROR: AUTH: basic needs 'user:pass'"
+        _auth.set_basic(tgt, parts[1].strip())
+        return "basic auth set for " + tgt
+
+    if mode == "login":
+        if len(parts) < 3:
+            return "ERROR: AUTH: login needs 'login_url|email|password'"
+        url = parts[1].strip()
+        rest = parts[2].split("|", 1)
+        if len(rest) < 2:
+            return "ERROR: AUTH: login needs 'login_url|email|password'"
+        email, password = rest[0].strip(), rest[1].strip()
+        r = _auth.set_login(tgt, url, email, password)
+        if r.get("ok"):
+            return ("login OK — cookies captured for " + tgt +
+                    "\nsample: " + (r.get("sample") or "")[:200])
+        return "login FAILED: " + str(r.get("error") or r.get("sample", "")[:200])
+
+    return "ERROR: unknown AUTH mode " + mode
+
+
 def do_belief(spec):
     """BELIEF: kind|path|confidence|rationale"""
     parts = [p.strip() for p in (spec or "").split("|", 3)]
@@ -2205,6 +2266,7 @@ DISPATCH = {
     "STACK": do_stack,
     "SCHEMA": do_schema,
     "BELIEF": do_belief,
+    "AUTH": do_auth,
     "GOAL": do_goal,
     "REPLAN": do_replan,
 }
