@@ -558,7 +558,15 @@ def _adaptive_timeout(cmd):
     return None  # use caller default (CMD_TIMEOUT)
 
 
-def _run_shell(cmd, timeout=None):
+# start the proxy health watchdog once at module import
+try:
+    import atexit as _atexit
+    _proxyrot.start_watchdog(interval=300)
+except Exception:
+    pass
+
+
+def _run_shell(cmd, timeout=None, _proxy_retry=0, _proxy_exclude=None):
     base_timeout = timeout if timeout else CMD_TIMEOUT
     low = cmd.lower()
 
@@ -613,7 +621,8 @@ def _run_shell(cmd, timeout=None):
         try:
             _tgt = (STATE.get("target") if isinstance(STATE, dict) else None) or None
             if _tgt:
-                p_env = _proxyrot.env_for(_tgt)
+                p_env = _proxyrot.env_for(
+                    _tgt, exclude=_proxy_exclude or [])
                 if p_env:
                     _proxy_used = p_env.pop("_proxy_used", None)
                     env.update(p_env)
@@ -706,7 +715,7 @@ def _run_shell(cmd, timeout=None):
             pass
         return f"[TIMEOUT after {base_timeout}s, no output]"
 
-    # record proxy outcome for future routing decisions
+    # record proxy outcome + retry with a different proxy if we failed
     try:
         _tgt3 = (STATE.get("target") if isinstance(STATE, dict) else None) or None
         if _tgt3:
@@ -721,6 +730,19 @@ def _run_shell(cmd, timeout=None):
                     _proxyrot.mark_direct_fail(_tgt3, "net-fail")
                 else:
                     _proxyrot.mark_direct_ok(_tgt3)
+
+            # AUTO-RETRY: if a proxy failed and we have budget, try a fresh one
+            if _proxy_used and failed and _proxy_retry < 2:
+                excl = list(_proxy_exclude or [])
+                if _proxy_used not in excl:
+                    excl.append(_proxy_used)
+                nxt = _proxyrot.pick_valid_proxy(_tgt3, exclude=excl)
+                if nxt:
+                    print(f"  [proxy-retry {_proxy_retry+1}/2] {_proxy_used} failed, "
+                          f"switching to {nxt}")
+                    return _run_shell(cmd, timeout=timeout,
+                                      _proxy_retry=_proxy_retry + 1,
+                                      _proxy_exclude=excl)
     except Exception:
         pass
 
