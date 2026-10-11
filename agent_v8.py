@@ -2767,6 +2767,12 @@ def agent_loop(task, target, resume_dir=None, resume_history=None):
         STATE["phase"] = "init"
         _state.save(RUN_DIR, STATE)
 
+    # tell scope the target so auto-scope can derive exact + wildcard
+    try:
+        _scope.set_target(target)
+    except Exception:
+        pass
+
     COLLECTOR = _collector.Collector(RUN_DIR)
     HB = _state.Heartbeat(RUN_DIR)
     HB.start()
@@ -3125,6 +3131,9 @@ def main():
     if "--dry" in args:
         _DRY_RUN = True
         args.remove("--dry")
+    if "--no-scope" in args:
+        os.environ["AG_SCOPE_OPEN"] = "1"
+        args.remove("--no-scope")
     # --plan system|custom
     if "--plan" in args:
         i = args.index("--plan")
