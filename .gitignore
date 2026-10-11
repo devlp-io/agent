@@ -100,3 +100,5 @@ dashboard.pid
 dashboard.log
 *.tar.gz
 go*.linux-amd64.tar.gz
+uibuilder.py.bak.*
+*.deb

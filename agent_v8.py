@@ -40,6 +40,7 @@ HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
 from core import state as _state
+from core import recorder as _recorder
 from core import http as _chttp
 from core import proxy as _cproxy
 from core import async_engine as _engine
@@ -2101,14 +2102,108 @@ DISPATCH = {
 }
 
 
+# map directive kind → recorder kind, for the ones worth logging
+_REC_KIND = {
+    "COMMAND":    "command",
+    "PARALLEL":   "command",
+    "FINDING":    "finding",
+    "PROBE":      "probe",
+    "WALK":       "walk",
+    "SECRET":     "secret",
+    "CRED":       "cred",
+    "LOOT":       "loot",
+    "ENDPOINT":   "endpoint",
+    "APIMAP":     "endpoint",
+    "EXPLOIT":    "command",
+    "SCHEMA":     "schema",
+    "NOTE":       "note",
+}
+
+
+def _record_dispatch(kind, payload, result):
+    rec_kind = _REC_KIND.get(kind)
+    if not rec_kind:
+        return
+    try:
+        tgt = (STATE.get("target") if isinstance(STATE, dict) else None) or "unknown"
+        if rec_kind == "command":
+            out = str(result or "")
+            ok = bool(out) and not any(
+                s in out.lower()[:200] for s in
+                ("denied", "failed", "error", "refused", "not found")
+            )
+            _recorder.record(tgt, "command", {
+                "cmd": payload[:1000], "output": out[:4000], "ok": ok,
+            }, run_dir=RUN_DIR)
+        elif rec_kind == "finding":
+            parts = payload.split("|", 2)
+            _recorder.record(tgt, "finding", {
+                "sev": parts[0].strip() if len(parts) > 0 else "info",
+                "title": parts[1].strip() if len(parts) > 1 else "",
+                "evidence": parts[2].strip() if len(parts) > 2 else "",
+            }, run_dir=RUN_DIR)
+        elif rec_kind == "probe":
+            parts = payload.split("|", 1)
+            _recorder.record(tgt, "probe", {
+                "method": parts[0].strip() if len(parts) > 0 else "GET",
+                "url": parts[1].strip() if len(parts) > 1 else "",
+            }, run_dir=RUN_DIR)
+        elif rec_kind == "walk":
+            parts = payload.split("|")
+            _recorder.record(tgt, "walk", {
+                "method": parts[0].strip() if len(parts) > 0 else "GET",
+                "url": parts[1].strip() if len(parts) > 1 else "",
+                "param": parts[2].strip() if len(parts) > 2 else "",
+                "hits": None,
+                "sample": str(result)[:400],
+            }, run_dir=RUN_DIR)
+        elif rec_kind == "secret":
+            _recorder.record(tgt, "secret", {
+                "kind_name": "secret", "value": payload[:400], "path": "",
+            }, run_dir=RUN_DIR)
+        elif rec_kind == "cred":
+            parts = payload.split("|")
+            _recorder.record(tgt, "cred", {
+                "user": parts[0].strip() if len(parts) > 0 else "",
+                "pass": parts[1].strip() if len(parts) > 1 else "",
+                "where": parts[2].strip() if len(parts) > 2 else "",
+            }, run_dir=RUN_DIR)
+        elif rec_kind == "loot":
+            parts = payload.split("|", 1)
+            _recorder.record(tgt, "loot", {
+                "kind_name": parts[0].strip() if len(parts) > 0 else "data",
+                "value": parts[1].strip() if len(parts) > 1 else "",
+            }, run_dir=RUN_DIR)
+        elif rec_kind == "endpoint":
+            parts = payload.split("|")
+            _recorder.record(tgt, "endpoint", {
+                "method": parts[0].strip() if len(parts) > 0 else "GET",
+                "url": parts[1].strip() if len(parts) > 1 else "",
+                "note": parts[2].strip() if len(parts) > 2 else "",
+            }, run_dir=RUN_DIR)
+        elif rec_kind == "schema":
+            _recorder.record(tgt, "schema", {"note": str(result)[:400]},
+                             run_dir=RUN_DIR)
+        elif rec_kind == "note":
+            _recorder.record(tgt, "note", {"text": payload[:1000]},
+                             run_dir=RUN_DIR)
+    except Exception:
+        pass
+
+
 def dispatch(kind, payload):
     fn = DISPATCH.get(kind)
     if not fn:
         return f"unknown directive: {kind}"
     try:
-        return fn(payload)
+        result = fn(payload)
     except Exception as e:
-        return f"ERROR in {kind}: {e}"
+        result = f"ERROR in {kind}: {e}"
+    try:
+        _record_dispatch(kind, payload, result)
+    except Exception:
+        pass
+    return result
 
 
 # ────────────────────────────────────────────────────────────────────
