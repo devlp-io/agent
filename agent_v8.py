@@ -567,6 +567,20 @@ except Exception:
     pass
 
 
+
+def _browser_safe_enabled():
+    """intel.browser_session may or may not have an `enabled` fn.
+    The old core.browser did; the new module doesn't. Return False if
+    the attribute is absent so the FINDING pipeline never crashes."""
+    try:
+        fn = getattr(_browser, "enabled", None)
+        if callable(fn):
+            return bool(fn())
+        return bool(fn) if fn is not None else False
+    except Exception:
+        return False
+
+
 def _run_shell(cmd, timeout=None, _proxy_retry=0, _proxy_exclude=None):
     base_timeout = timeout if timeout else CMD_TIMEOUT
     low = cmd.lower()
@@ -1293,7 +1307,7 @@ def do_finding(spec):
     item = {"sev": sev, "title": title, "evidence": ev}
     STATE.setdefault("findings", []).append(item)
     _state.save(RUN_DIR, STATE)
-    if _browser.enabled() and COLLECTOR:
+    if _browser_safe_enabled() and COLLECTOR:
         for m in re.finditer(r"https?://[^\s\"'<>]+", ev):
             try:
                 COLLECTOR.screenshot(m.group(0), label=f"finding_{len(STATE['findings'])}")
@@ -2628,6 +2642,54 @@ def _update_beliefs(kind, payload, result):
         _beliefs.from_command(tgt, cmd, out, ok)
 
 
+# ── probe deduplication ───────────────────────────────────────────
+import hashlib as _hashlib
+
+_DEDUP_KINDS = {"COMMAND", "PARALLEL", "PROBE", "WALK", "ENDPOINT"}
+_PROBE_CACHE = {}   # key -> {turn, result, urls}
+
+
+def _probe_cache_key(kind, payload):
+    """Exact-hash of kind + payload. Same string = same key."""
+    raw = f"{kind}|{(payload or '').strip()}"
+    return _hashlib.sha256(raw.encode("utf-8", "ignore")).hexdigest()[:16]
+
+
+def _remember_probe(kind, payload, result, turn):
+    if kind not in _DEDUP_KINDS:
+        return
+    key = _probe_cache_key(kind, payload)
+    _PROBE_CACHE[key] = {
+        "kind": kind,
+        "turn": turn,
+        "payload": (payload or "")[:300],
+        "result": str(result or "")[:800],
+    }
+    # persist into STATE for resume
+    try:
+        if isinstance(STATE, dict):
+            STATE.setdefault("probe_cache", {})[key] = _PROBE_CACHE[key]
+    except Exception:
+        pass
+
+
+def _cached_probe(kind, payload):
+    if kind not in _DEDUP_KINDS:
+        return None
+    key = _probe_cache_key(kind, payload)
+    entry = _PROBE_CACHE.get(key)
+    if not entry and isinstance(STATE, dict):
+        entry = (STATE.get("probe_cache") or {}).get(key)
+    if not entry:
+        return None
+    return (
+        f"[CACHED — this exact {kind} already ran at turn {entry.get('turn','?')}. "
+        f"Response unchanged. DO NOT RE-FIRE. Pick a DIFFERENT technique, "
+        f"endpoint, or hypothesis.]\n"
+        f"cached result preview:\n{entry.get('result','')[:600]}"
+    )
+
+
 def dispatch(kind, payload):
     fn = DISPATCH.get(kind)
     if not fn:
@@ -2640,10 +2702,23 @@ def dispatch(kind, payload):
                     f"Choose another approach or switch modes with --mode.")
     except Exception:
         pass
+    # probe dedup — return cached before executing
+    try:
+        cached = _cached_probe(kind, payload)
+        if cached:
+            return cached
+    except Exception:
+        pass
     try:
         result = fn(payload)
     except Exception as e:
         result = f"ERROR in {kind}: {e}"
+    # remember for future turns
+    try:
+        turn = int((STATE.get("turn") if isinstance(STATE, dict) else 0) or 0)
+        _remember_probe(kind, payload, result, turn)
+    except Exception:
+        pass
     try:
         _record_dispatch(kind, payload, result)
     except Exception:
@@ -2753,6 +2828,60 @@ RULES:
 7. Prefer PARALLEL: for independent recon.
 8. Prefer WALK: over hand-rolling loops.
 9. Prefer APIMAP: over manual endpoint guessing.
+
+=== RESPONSE-BODY-FIRST CLASSIFICATION ===
+Status codes lie. Read the BODY before you act on the CODE.
+
+  400 + body contains "unrecognized username" / "invalid credentials" /
+       "bad credentials" / "incorrect password" / "authentication fail"
+       → AUTH FAILURE, not format failure. Try different creds, not
+         different content-types.
+  400 + body contains "invalid JSON" / "malformed" / "syntax error" /
+       "unexpected token"
+       → FORMAT failure. Fix the request shape.
+  400 + body mentions a specific field as required/missing
+       → VALIDATION failure. Add the field.
+  401 → auth required, no session
+  403 → authenticated but forbidden, or WAF block
+       Check for body markers: "cloudflare" / "cf-chl" / "attention required"
+       means WAF, not authz.
+  404 with consistent byte size across paths → SPA catch-all, not real 404s
+  405 → method wrong; try method swap before giving up
+
+Never re-send the same request with a different Content-Type when the body
+says "unrecognized username". That wastes turns.
+
+=== FINDING DISCIPLINE ===
+Before emitting FINDING:, ask internally: "would a real pentester write
+this up?" If the answer is no, emit NOTE: instead.
+
+Real findings (FINDING:):
+  - Exposed secrets with actual values (API keys, tokens, password hashes)
+  - Unauthenticated access to sensitive data (users, orders, admin actions)
+  - Exploitable misconfigurations with impact (open S3 with data, RCE)
+  - Version with a KNOWN working public exploit for THIS deployment
+
+Not findings (NOTE: or skip):
+  - Public-by-design files in a known stack:
+      Drupal /core/*, /README.txt, /core/CHANGELOG.txt
+      WordPress /readme.html, /wp-json/
+      Next.js /_next/static/*, /_buildManifest.js
+      Django /admin/ being reachable
+  - Login pages existing at all
+  - A version banner without an accompanying working exploit path
+  - Directory 403s
+  - Robots.txt, sitemap.xml
+
+SEVERITY ANCHOR:
+  critical  → unauthenticated data dump, RCE, ATO on admin
+  high      → authenticated data dump, privilege escalation, default creds
+  medium    → IDOR, SSRF, exposed-but-not-sensitive secrets
+  low       → info leak with no exploitation path
+  info      → fingerprints, endpoints, version banners
+
+If you can't articulate the impact in one sentence, the severity is
+wrong. Downgrade it.
+
 10. When complete: emit `DONE <one-line summary>` alone.
 """
 
@@ -3225,6 +3354,16 @@ def agent_loop(task, target, resume_dir=None, resume_history=None):
     # tell scope the target so auto-scope can derive exact + wildcard
     try:
         _scope.set_target(target)
+    except Exception:
+        pass
+
+    # hydrate probe cache from resumed state
+    try:
+        pc = STATE.get("probe_cache") or {}
+        if pc:
+            _PROBE_CACHE.clear()
+            _PROBE_CACHE.update(pc)
+            print(f"  [dedup] loaded {len(pc)} cached probes from state.json")
     except Exception:
         pass
 
