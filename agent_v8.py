@@ -42,6 +42,8 @@ sys.path.insert(0, str(HERE))
 from core import state as _state
 from core import recorder as _recorder
 from core import beliefs as _beliefs
+from core import decisions as _decisions
+from evidence import archive as _archive
 from core import http as _chttp
 from core import proxy as _cproxy
 from core import async_engine as _engine
@@ -487,6 +489,10 @@ def make_run_dir(target):
                 "leak", "web", "attacks", "proofs", "pocs"):
         (d / sub).mkdir(parents=True, exist_ok=True)
     (d / "live.log").write_text("")
+    try:
+        _archive.write_readme(d)
+    except Exception:
+        pass
     return d
 
 
@@ -2790,6 +2796,20 @@ def attack_phase(target):
                 BUD.record(len(r_str))
                 results.append(f"{kind} -> {r_str[:1500]}")
 
+            try:
+                for (kind, payload), res in zip(actions[:2], results):
+                    if kind in ("COMMAND", "PARALLEL", "EXPLOIT"):
+                        _archive.http(RUN_DIR, turn + 1, payload, str(res))
+                        _archive.live_tool(RUN_DIR, turn + 1, payload, str(res))
+                _decisions.log(
+                    RUN_DIR, turn + 1,
+                    model_text=full,
+                    directives=actions,
+                    results=list(zip([a[0] for a in actions[:2]], results)),
+                )
+            except Exception:
+                pass
+
             history.append({"role": "user", "content":
                             "Results:\n" + "\n".join(results) +
                             "\n\nNext directive, or DONE."})
@@ -3150,6 +3170,26 @@ def agent_loop(task, target, resume_dir=None, resume_history=None):
                 last_critic_turn = turn
             except Exception:
                 pass
+
+        # archive full evidence for this turn
+        try:
+            for (kind, payload), res in zip(actions[:2], results):
+                if kind in ("COMMAND", "PARALLEL", "EXPLOIT"):
+                    _archive.http(RUN_DIR, turn + 1, payload, str(res))
+                    _archive.live_tool(RUN_DIR, turn + 1, payload, str(res))
+        except Exception:
+            pass
+
+        # timeline entry
+        try:
+            _decisions.log(
+                RUN_DIR, turn + 1,
+                model_text=full,
+                directives=actions,
+                results=list(zip([a[0] for a in actions[:2]], results)),
+            )
+        except Exception:
+            pass
 
         history.append({"role": "user", "content":
                         "Results:\n" + "\n".join(results)[:12000] +

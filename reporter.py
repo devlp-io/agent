@@ -353,6 +353,60 @@ def build_report_markdown(run_dir, state):
         M.append("```")
         M.append("")
 
+    # ── decision timeline
+    try:
+        import json as _json
+        from core import decisions as _decisions
+        _entries = _decisions.read(run_dir, limit=500)
+    except Exception:
+        _entries = []
+    if _entries:
+        M.append("## Decision Timeline")
+        M.append("")
+        M.append("Every turn the agent took, what it decided, and the "
+                 "reasoning that drove the decision.")
+        M.append("")
+        M.append("| Turn | Time | Reasoning | Directives | First result |")
+        M.append("|---|---|---|---|---|")
+        for e in _entries[-150:]:
+            ts = (e.get("ts") or "")[11:19]
+            rn = (e.get("reasoning") or "").replace("|", "\\|")[:120]
+            kinds = ", ".join(d.get("kind", "?") for d in e.get("directives", []))
+            first = ""
+            for r in e.get("results", []):
+                ls = (r.get("output") or "").splitlines()
+                if ls:
+                    first = ls[0][:100].replace("|", "\\|")
+                    break
+            M.append(f"| {e.get('turn','')} | {ts} | {rn} | {kinds} | {first} |")
+        M.append("")
+
+    # ── evidence archive
+    try:
+        from evidence import archive as _archive
+        _as = _archive.summary(run_dir)
+    except Exception:
+        _as = {"http": 0, "tool": 0}
+    if _as.get("http") or _as.get("tool"):
+        M.append("## Evidence Archive")
+        M.append("")
+        M.append(f"- HTTP transcripts: **{_as.get('http',0)}** (see `archive/http/`)")
+        M.append(f"- Full tool outputs: **{_as.get('tool',0)}** (see `archive/tool/`)")
+        M.append(f"- Index: `archive/index.jsonl`")
+        M.append("")
+        idx = pathlib.Path(run_dir) / "archive" / "index.jsonl"
+        if idx.exists():
+            try:
+                lines = idx.read_text(errors="ignore").splitlines()[-20:]
+                M.append("### Recent archived artifacts")
+                M.append("")
+                M.append("```")
+                M.append("\n".join(lines))
+                M.append("```")
+                M.append("")
+            except Exception:
+                pass
+
     M.append("## File Inventory")
     M.append("")
     M.append("| Path | Size |")
