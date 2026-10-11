@@ -45,6 +45,7 @@ from core import beliefs as _beliefs
 from core import decisions as _decisions
 from core import auth_ctx as _auth
 from core import proxy_rotate as _proxyrot
+from core import modes as _modes
 from evidence import archive as _archive
 from core import http as _chttp
 from core import proxy as _cproxy
@@ -2593,6 +2594,14 @@ def dispatch(kind, payload):
     fn = DISPATCH.get(kind)
     if not fn:
         return f"unknown directive: {kind}"
+    # mode gate
+    try:
+        mode_name = os.environ.get("AG_MODE", "default")
+        if not _modes.is_allowed(mode_name, kind):
+            return (f"[MODE BLOCK] {kind} is blocked in {mode_name} mode. "
+                    f"Choose another approach or switch modes with --mode.")
+    except Exception:
+        pass
     try:
         result = fn(payload)
     except Exception as e:
@@ -2796,7 +2805,31 @@ RULES:
 
 
 def build_system_prompt():
-    parts = [BASE_SYSTEM]
+    # apply mode overrides
+    mode_name = os.environ.get("AG_MODE", "default").strip().lower()
+    _modes.apply_env(mode_name)
+    m = _modes.get(mode_name)
+
+    # start with base; replace intro paragraph if mode provides one
+    base = BASE_SYSTEM
+    if m.get("system_prompt_intro"):
+        # replace the first paragraph (up to first blank line)
+        first_nl = base.find("\n\n")
+        if first_nl > 0:
+            base = m["system_prompt_intro"] + base[first_nl:]
+
+    parts = [base]
+
+    # append mode notes + preferred tools
+    extras = []
+    if m.get("notes"):
+        extras.append("=== MODE NOTES (" + mode_name + ") ===\n" + m["notes"])
+    if m.get("tools_preferred"):
+        extras.append("preferred tools for this mode: " +
+                      ", ".join(m["tools_preferred"]))
+    if extras:
+        parts.append("\n\n".join(extras))
+
     if JB:
         parts.insert(0, JB)
     return "\n\n".join(parts)
@@ -3183,6 +3216,10 @@ def agent_loop(task, target, resume_dir=None, resume_history=None):
     banner(f"   target: {target}")
     banner(f"   run dir: {RUN_DIR}")
     banner(f"   model: {MODEL_STACK[model_idx]['model']}")
+    _mode = os.environ.get("AG_MODE", "default")
+    if _mode and _mode != "default":
+        for _l in _modes.banner(_mode).splitlines():
+            banner(f"   {_l}")
     banner(f"   findings: tail -f {RUN_DIR}/findings.md")
     banner(f"   live:     tail -f {RUN_DIR}/live.log")
     hr()
@@ -3560,6 +3597,12 @@ def main():
     if "--no-scope" in args:
         os.environ["AG_SCOPE_OPEN"] = "1"
         args.remove("--no-scope")
+    # --mode <name>
+    if "--mode" in args:
+        i = args.index("--mode")
+        if i + 1 < len(args):
+            os.environ["AG_MODE"] = args[i + 1]
+            del args[i:i+2]
     # --plan system|custom
     if "--plan" in args:
         i = args.index("--plan")
