@@ -54,6 +54,7 @@ from intel import cve_db as _cve
 from intel import waf_matrix as _waf
 from intel import stack_router as _stack
 from intel import critic as _critic
+from intel import poc_fetch as _pocfetch
 
 from attack import chains as _chains
 from attack import mutate as _mutate
@@ -1389,8 +1390,29 @@ def do_cve(spec):
                 f"Try SEARCH: '{product} {version} vulnerability' "
                 f"or FETCH: https://www.wordfence.com/threat-intel/vulnerabilities/wordpress-plugins/{product}")
 
-    return "\n".join(f"{r['id']} CVSS={r['cvss']} {r['severity']} {r['summary'][:120]}"
-                     for r in rows)
+    lines = []
+    for r in rows:
+        lines.append(f"{r['id']} CVSS={r['cvss']} {r['severity']} {r['summary'][:120]}")
+
+    # try to auto-fetch a public PoC for the top-scoring CVE
+    try:
+        top = max(rows, key=lambda r: float(r.get('cvss') or 0))
+        poc = _pocfetch.lookup(top['id'])
+        if poc.get('ok'):
+            lines.append("")
+            lines.append(f"[POC] {top['id']}: {poc.get('source')} — {poc.get('url')}")
+            lines.append(f"      stars={poc.get('stars')}  lang={poc.get('lang')}  "
+                         f"local={poc.get('local_path', '-')}")
+            if poc.get('readme'):
+                lines.append("      README excerpt: " + poc['readme'][:200].replace("\n", " "))
+        else:
+            lines.append("")
+            lines.append(f"[POC] {top['id']}: no public PoC found in nomi-sec / github / exploitdb")
+    except Exception as e:
+        lines.append("")
+        lines.append(f"[POC] auto-fetch error: {e}")
+
+    return "\n".join(lines)
 
 
 def do_paramfind(spec):
@@ -2161,6 +2183,51 @@ def do_auth(spec):
     return "ERROR: unknown AUTH mode " + mode
 
 
+def do_poc(spec):
+    """POC: <CVE-id>  → fetch public PoC, save to ~/agent/pocs/<cve>/"""
+    cve = (spec or "").strip().upper()
+    if not cve.startswith("CVE-"):
+        return "ERROR: POC needs a CVE id like CVE-2023-6505"
+    m = _pocfetch.lookup(cve)
+    if not m.get("ok"):
+        return f"{cve}: no public PoC found"
+    lines = [f"{cve}: {m.get('source')} — {m.get('url')}",
+             f"  stars={m.get('stars')}  lang={m.get('lang')}",
+             f"  local={m.get('local_path', '-')}"]
+    if m.get("readme"):
+        lines.append("  README (first 500 chars):")
+        lines.append("  " + m["readme"][:500].replace("\n", "\n  "))
+    # record as a finding so the console surfaces it
+    STATE.setdefault("findings", []).append({
+        "sev": "info",
+        "title": f"Public PoC available for {cve}",
+        "evidence": f"{m.get('url')}  ({m.get('source')}, "
+                    f"stars={m.get('stars')}, lang={m.get('lang')})\n"
+                    f"local clone: {m.get('local_path', '-')}",
+    })
+    _state.save(RUN_DIR, STATE)
+    return "\n".join(lines)
+
+
+def do_auto_poc(_arg=""):
+    """AUTO-POC: — scan state findings for CVE ids and fetch PoCs for all."""
+    import re as _re
+    seen = set()
+    out = []
+    for f in STATE.get("findings", []) or []:
+        blob = (f.get("title") or "") + " " + (f.get("evidence") or "")
+        for m in _re.finditer(r"CVE-\d{4}-\d{4,7}", blob, _re.I):
+            cve = m.group(0).upper()
+            if cve in seen:
+                continue
+            seen.add(cve)
+            r = _pocfetch.summary(cve)
+            out.append(r)
+    if not out:
+        return "no CVE ids found in findings"
+    return "\n".join(out)
+
+
 def do_belief(spec):
     """BELIEF: kind|path|confidence|rationale"""
     parts = [p.strip() for p in (spec or "").split("|", 3)]
@@ -2266,6 +2333,8 @@ DISPATCH = {
     "STACK": do_stack,
     "SCHEMA": do_schema,
     "BELIEF": do_belief,
+    "POC": do_poc,
+    "AUTO-POC": do_auto_poc,
     "AUTH": do_auth,
     "GOAL": do_goal,
     "REPLAN": do_replan,
