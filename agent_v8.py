@@ -26,10 +26,12 @@ from datetime import datetime
 
 from openai import OpenAI
 
-# load .env if present
+# load .env if present — but do NOT override values already exported
+# in the shell. this lets `agm gemini` (which exports AG_MODEL/AG_BASE/AG_KEY)
+# beat the .env defaults.
 try:
     from dotenv import load_dotenv
-    load_dotenv(pathlib.Path(__file__).resolve().parent / ".env", override=True)
+    load_dotenv(pathlib.Path(__file__).resolve().parent / ".env", override=False)
 except Exception:
     pass
 

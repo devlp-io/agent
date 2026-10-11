@@ -59,6 +59,18 @@ PKG_MGR = {
 
 # ── helpers ──────────────────────────────────────────────────────────
 
+# Data-only repos — clone, don't build.
+_DATA_REPOS = {
+    "seclists", "payloadsallthethings", "nuclei-templates",
+    "payloads", "fuzzdb", "wordlists", "exploitdb",
+    "awesome-bugbounty-tools", "bugbountydork", "gf-patterns",
+}
+
+def _is_data_repo(name):
+    n = (name or "").lower().replace("_", "-")
+    return n in _DATA_REPOS or "seclists" in n or "payloadsallthethings" in n
+
+
 def _which(binary):
     return shutil.which(binary) is not None
 
@@ -138,6 +150,9 @@ def install_github(url):
     rc, out = _run(f"git clone --depth 1 {url} {dest}", timeout=600)
     if rc != 0:
         return False, f"{name}: clone failed\n{out[-500:]}"
+    if _is_data_repo(name):
+        _log_install(name, "github-data", True, url)
+        return True, f"{name}: cloned as data repo to {dest} (no build)"
 
     # try every plausible build system, in order
     builds = [
