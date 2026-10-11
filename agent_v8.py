@@ -716,22 +716,6 @@ def _run_shell(cmd, timeout=None, _proxy_retry=0, _proxy_exclude=None):
             out += f"If you need it, emit NEED_TOOL: {missing}|<why>."
             out += " Otherwise pick a different technique."
 
-    if out:
-        m = re.search(r"(?:command not found|not found|: command not found|No such file or directory)\s*:?\s*([a-zA-Z0-9_-]{2,40})", out)
-        m2 = re.search(r"^([a-zA-Z0-9_-]{2,40}): (?:command not found|not found)", out, re.M)
-        missing = None
-        if m2:
-            missing = m2.group(1)
-        elif m:
-            missing = m.group(1)
-        if missing and missing not in ("curl", "bash", "sh", "env"):
-            print(f"  {C['yellow']}[auto-install] {missing} missing, installing...{C['rst']}")
-            inst = install_any(missing)
-            if "installed" in inst.lower() and "failed" not in inst.lower():
-                # retry original command once
-                retry = _run_shell(cmd, timeout=base_timeout) if False else None
-                out += f"\n[auto-install] {inst[:200]}\nRetry the command if you need the result."
-
     if not out and timed_out:
         # try marking a proxy/direct failure
         try:
