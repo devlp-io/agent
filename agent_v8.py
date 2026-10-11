@@ -280,7 +280,7 @@ SIGNAL: ports filtered / no live web ports
   → TLS SANs: openssl s_client -connect target:443 -servername target </dev/null | openssl x509 -text | grep DNS
   → favicon hash: curl -s target/favicon.ico | python3 -c "import sys,hashlib,codecs; print(hashlib.md5(codecs.encode(sys.stdin.buffer.read(),'base64')).hexdigest())"
   → CDN origin leak: check X-Forwarded-For reflection, historical DNS (viewdns.info), SecurityTrails
-  → CDN detection: curl -sI target | grep -i 'cf-ray\|x-sucuri\|x-akamai\|x-cache'
+  → CDN detection: curl -sI target | grep -iE 'cf-ray|x-sucuri|x-akamai|x-cache'
   → Censys / Shodan by cert hash (fuzzy on origin)
 
 SIGNAL: WAF blocking every request (same fixed body)
@@ -294,7 +294,7 @@ SIGNAL: WAF blocking every request (same fixed body)
 SIGNAL: same 404 body across all paths (SPA / API gateway)
   → check /robots.txt, /sitemap.xml, /manifest.json, /.well-known/security.txt
   → parse JS bundles: /main.dart.js, /_next/static/*.js, /static/js/*.js
-    curl -s target/main.dart.js | grep -oE 'https?://[^"\s]+' | sort -u
+    curl -s target/main.dart.js | grep -oE 'https?://[^"[:space:]]+' | sort -u
   → look for /api/, /api/v1/, /graphql, /openapi.json, /swagger.json
   → check for framework markers: X-Powered-By, Server, Set-Cookie names
 
