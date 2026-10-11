@@ -700,7 +700,22 @@ def _run_shell(cmd, timeout=None, _proxy_retry=0, _proxy_exclude=None):
 
     out = "".join(accumulated).strip()[:16000]
 
-    # auto-install missing tools
+    # missing-tool hint - no auto-install. Return a clear marker so the
+    # model decides whether to explicitly invoke NEED_TOOL: instead of
+    # the harness hanging on a sudo prompt from a misparsed shell loop.
+    if out:
+        _mt2 = re.search(
+            r"^([a-zA-Z0-9_-]{2,40}): (?:command not found|not found)",
+            out, re.M)
+        missing = _mt2.group(1) if _mt2 else None
+        if missing and missing not in (
+            "curl", "bash", "sh", "env",
+            "node", "python", "python3",
+        ):
+            out += f"\n[TOOL-MISSING] {missing} is not installed. "
+            out += f"If you need it, emit NEED_TOOL: {missing}|<why>."
+            out += " Otherwise pick a different technique."
+
     if out:
         m = re.search(r"(?:command not found|not found|: command not found|No such file or directory)\s*:?\s*([a-zA-Z0-9_-]{2,40})", out)
         m2 = re.search(r"^([a-zA-Z0-9_-]{2,40}): (?:command not found|not found)", out, re.M)
