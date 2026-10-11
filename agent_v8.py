@@ -273,6 +273,110 @@ Content-Type flip, X-Original-URL, X-Rewrite-URL.""",
 
 "evidence-packaging": """LAYOUT: 01_raw/ 02_parsed/ 03_extracts/ 04_screenshots/ leak/ loot/.""",
 
+"origin-ip-exploit": """SIGNAL: a Host-header test returned the real site
+from an origin IP (e.g. curl https://IP/ -H "Host: target.com" gave 200
+with the CF-protected content). That IP is the origin. Exploit it hard.
+
+NEXT THREE MOVES (in order):
+
+  1. PORT SCAN THE ORIGIN IP.
+     nmap -Pn -p 80,443,8080,8443,3000,5000,8000,9000,9443,10000 <ip>
+     Also try 22, 3306, 5432, 6379, 9200, 27017 for exposed services.
+     Origin boxes often run the app on a high port behind CF.
+
+  2. REPLAY EVERY HOSTNAME.
+     For each in-scope hostname (www, api, backend, admin, app, cdn,
+     static, and any subdomain from crt.sh), try:
+       curl https://<ip>/ -H "Host: <hostname>" -k
+     CF-protected hostnames all live on the origin. One of them
+     probably has admin, ssh, or debug enabled without CF in front.
+
+  3. SCAN THE /24 FOR NEIGHBORS.
+     whois <ip> and the ASN tell you the block. Cloud providers cluster.
+     for i in 1..254: ping/nmap <block>.<i> — new origins, staging,
+     and admin infra often sit next door.
+
+NEVER stop at "the site loads, I'm done." The origin IS the target.
+
+Record the IP as a FINDING: with severity high or critical —
+bypassing a WAF means bypassing every rate-limit, bot protection, and
+geo restriction in front of it.""",
+
+"user-enum-batch": """SIGNAL: a login or user-lookup endpoint exists, and its
+404 body differs from its 401 body (user not found vs wrong password).
+
+THIS DIFFERENTIATION IS THE WHOLE GAME. A 401 for user "foo" means foo
+exists. A 404 means it doesn't. That turns a login into an enumeration
+primitive — but only if you don't trip the rate limiter first.
+
+METHOD:
+
+  1. BUILD THE CANDIDATE LIST BEFORE YOU FIRE ANYTHING.
+     Pull from every artifact you've collected this run:
+       - emails from security.txt, robots.txt, sitemap.xml
+       - usernames from JS bundles, HTML comments, git config
+       - schema.org names, author meta tags
+       - leaked creds / prior findings in STATE
+       - admin/root/support/info/sales@<domain> pattern guesses
+     Deduplicate. Sort by likelihood (real artifacts before guesses).
+
+  2. TIER THE LIST. Fire in batches:
+       tier1: top 5-10 (real artifacts first)
+       tier2: next 20 (format guesses)
+       tier3: next 50 (broad wordlist)
+     Never fire more than 30 in a batch.
+
+  3. JITTER EVERY REQUEST. 2-3 second random delay between requests
+     inside a batch. 5-10 second pause between batches.
+
+  4. WATCH FOR RATE-LIMIT SIGNALS IN THE RESPONSE:
+       429 → hard stop, wait 60s, halve batch size for the rest
+       "Connection reset" → same
+       a fresh 403 in a previously-200 stream → same
+     Re-firing through a 429 gets you IP-banned. Back off.
+
+  5. LOG THE HITS, NOT JUST THE COUNT. Every username that returned
+     401 (or a body without "not found") is a valid account. Emit
+     one ENDPOINT: or NOTE: per hit so the operator sees them.
+
+Training: spray-and-pray burns your cover. Tiered enumeration preserves
+access to the endpoint for the interesting guesses.""",
+
+"version-fingerprint": """SIGNAL: you're staring at a generic version banner
+("Drupal 10", "WordPress", "Next.js") and you need the exact patch level
+to pick a CVE. Do NOT spend 30 turns reading version files.
+
+STOP TRYING TO READ THE VERSION. TEST THE VULNERABILITY INSTEAD.
+
+Three techniques that actually work:
+
+  1. ASSET HASH FINGERPRINT.
+     Fetch /core/misc/drupal.js (or equivalent static asset) and hash
+     the bytes:
+       curl -s https://target/core/misc/drupal.js | sha256sum
+     Compare against a local lookup table of known-release hashes.
+     This is exact and offline. For Drupal, checksums are published.
+     For WordPress, /wp-includes/js/*.js hashes distinguish releases.
+
+  2. SYMFONY/FRAMEWORK CONSTRAINT FROM composer.json.
+     /core/composer.json shows "symfony/dependency-injection": "^6.4",
+     "twig/twig": "^3.22" — that narrows to a release range without
+     needing the patch number. Match the range to known CVE windows.
+
+  3. CVE-SIGNATURE PROBE.
+     Pick 2-3 CVEs with distinguishable server responses. Fire the
+     specific request that separates vulnerable from patched:
+       - CVE-2024-45440: POST /user/register with crafted payload
+         → 500 = vulnerable, 403 = patched, 200 = altered
+     You learn the answer in ONE request per CVE. That's how real
+     pentesters pick which exploit to try.
+
+If all three fail, install wappalyzer-cli or whatweb and let the tool
+fingerprint. Do NOT write another bash loop that greps for "VERSION".
+
+Training: version-hunting without a fingerprint source is a time sink.
+Test the vuln. Get the answer. Move on.""",
+
 "recon-pivot": """DECISION TREE — when the obvious path returns nothing, pivot.
 Each pivot is grounded in a specific observed signal. Do not chase every
 branch — read the signal and take the matching branch.
@@ -757,6 +861,26 @@ def _run_shell(cmd, timeout=None, _proxy_retry=0, _proxy_exclude=None):
                     return _run_shell(cmd, timeout=timeout,
                                       _proxy_retry=_proxy_retry + 1,
                                       _proxy_exclude=excl)
+    except Exception:
+        pass
+
+    # proxy-fail tagging — the model needs to know if a failure was the
+    # proxy dying vs the target blocking
+    try:
+        _used_proxy = _proxy_used  # from the env setup above
+        if _used_proxy and out:
+            _fail_sig = (
+                "curl: (28)", "curl: (56)", "curl: (7)", "curl: (35)",
+                "connection reset", "tunnel connection failed",
+                "connect timeout", "unable to connect to proxy",
+                "no route to host",
+            )
+            _low_out = out.lower()
+            if any(sig in _low_out for sig in _fail_sig):
+                out = (f"[PROXY-FAIL] routed via {_used_proxy} — this is a "
+                       f"PROXY failure, not a target failure. Do NOT back off "
+                       f"the target; the harness will retry with a fresh "
+                       f"proxy.\n") + out
     except Exception:
         pass
 
