@@ -3213,6 +3213,23 @@ def _finalize():
         print(f"  [schema] {RUN_DIR.name}/schema.json written")
     except Exception as e:
         print(f"  [schema] build failed: {e}")
+
+    # auto-rebuild the per-target console (opt-out: AG_AUTO_UI=0)
+    if os.environ.get("AG_AUTO_UI", "1") != "0":
+        try:
+            target = (STATE.get("target") if isinstance(STATE, dict) else None) or None
+            if target:
+                print(f"  [ui-builder] auto-rebuilding console for {target}...")
+                import uibuilder as _uib
+                # the console reads the newest run; --update mode
+                res = _uib.build(target, update=True)
+                if res.get("ok"):
+                    print(f"  [ui-builder] ready at {res.get('url','?')}  "
+                          f"pid={res.get('pid','?')}")
+                else:
+                    print(f"  [ui-builder] build skipped: {res.get('reason','?')}")
+        except Exception as e:
+            print(f"  [ui-builder] auto-build failed: {e}")
     try:
         _report.build_all(RUN_DIR, STATE)
     except Exception as e:
