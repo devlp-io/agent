@@ -485,6 +485,16 @@ def _run_shell(cmd, timeout=None):
         base_timeout = min(base_timeout, adaptive)
 
     env = dict(os.environ)
+    # _PD_TOOLS_PATH_PREPENDED — ProjectDiscovery binaries should win over
+    # pip-installed ones with the same name (httpx, etc).
+    _pd_dirs = [
+        str(pathlib.Path.home() / "go" / "bin"),
+        str(pathlib.Path.home() / "agent" / "tools"),
+        str(pathlib.Path.home() / ".local" / "bin"),
+    ]
+    _existing_pd = [d for d in _pd_dirs if pathlib.Path(d).exists()]
+    if _existing_pd:
+        env["PATH"] = ":".join(_existing_pd) + ":" + env.get("PATH", "")
     if PROXY:
         env["ALL_PROXY"] = PROXY
         env["HTTP_PROXY"] = PROXY
@@ -565,6 +575,37 @@ def _run_shell(cmd, timeout=None):
 
     if not out and timed_out:
         return f"[TIMEOUT after {base_timeout}s, no output]"
+
+    # tool-hygiene hints the model can act on
+    if out:
+        # python httpx collision — the agent keeps hitting this
+        if re.search(r"httpx.*No such option '-[a-zA-Z]'", out) or \
+           re.search(r"Usage: httpx \[OPTIONS\] URL", out):
+            out += (
+                "\n[HINT] the `httpx` on PATH is the python client, not "
+                "ProjectDiscovery. Prefer /home/*/go/bin/httpx or "
+                "/home/*/agent/tools/httpx. Install the right one with "
+                "NEED_TOOL: github:projectdiscovery/httpx or "
+                "COMMAND: go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest"
+            )
+        # apt lock — no sudo
+        if "Could not open lock file /var/lib/dpkg/lock" in out or \
+           "are you root?" in out:
+            out += (
+                "\n[HINT] apt needs root, this shell has no sudo. Install "
+                "user-local tools instead: prefer pip/pipx/neovim-style "
+                "user installs, or fetch a release tarball into "
+                "~/agent/tools and add to PATH."
+            )
+        # go missing
+        if re.search(r"\bgo: (command )?not found\b", out) or \
+           re.search(r"/bin/sh: 1: go:", out):
+            out += (
+                "\n[HINT] Go toolchain missing. Run "
+                "NEED_TOOL: go|<why> — the installer will fetch the Go "
+                "tarball into ~/.local/go without needing sudo."
+            )
+
     return out or "(no output)"
 
 
@@ -1983,6 +2024,32 @@ def do_schema(_arg=""):
         return f"schema rebuild failed: {e}"
 
 
+def do_toolfix(spec):
+    """TOOLFIX: <name> — force-install a tool from the correct source.
+    Handles known name collisions (httpx → ProjectDiscovery)."""
+    spec = (spec or "").strip()
+    if not spec:
+        return "ERROR: TOOLFIX needs a tool name"
+    # normalize
+    low = spec.lower()
+    # httpx is a special case — python client shadows the PD binary
+    if low == "httpx":
+        from installer import install_any
+        r = install_any("github:projectdiscovery/httpx")
+        return f"TOOLFIX httpx:\n{r}\n\nRetry your command using `$HOME/go/bin/httpx` or the full path returned above."
+    if low == "subfinder":
+        from installer import install_any
+        r = install_any("github:projectdiscovery/subfinder")
+        return f"TOOLFIX subfinder:\n{r}"
+    if low == "go":
+        from installer import _bootstrap_go
+        ok, msg = _bootstrap_go()
+        return f"TOOLFIX go: {msg}"
+    # generic
+    from installer import install_any
+    return f"TOOLFIX {spec}:\n{install_any(spec)}"
+
+
 DISPATCH = {
     "COMMAND": do_command,
     "PARALLEL": do_parallel,
@@ -2088,6 +2155,7 @@ DIRECTIVES:
   WAF: <url>
   STACK: <url>
   SCHEMA:
+  TOOLFIX: <name>                       # force reinstall a broken tool
   BROWSER: <url>
   GRAPHQL: <url>|<query_json>
   WS: <wss_url>|<payload>

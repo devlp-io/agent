@@ -72,6 +72,7 @@ def _is_data_repo(name):
 
 
 def _which(binary):
+    _ensure_path()
     return shutil.which(binary) is not None
 
 
@@ -219,6 +220,54 @@ def search_install(term):
 
 # ── generic multi-method install ─────────────────────────────────────
 
+# ── self-bootstrap: Go from tarball (no sudo needed) ───────────────
+_GO_TARBALL = "https://go.dev/dl/go1.22.4.linux-amd64.tar.gz"
+
+def _bootstrap_go():
+    """Install Go to ~/.local/go and expose ~/go/bin + ~/.local/go/bin.
+    Runs without sudo — writes under $HOME. Idempotent."""
+    import os, shutil, subprocess, urllib.request, tarfile
+    home = pathlib.Path.home()
+    go_root = home / ".local" / "go"
+    go_bin  = go_root / "bin" / "go"
+    if go_bin.exists():
+        return True, f"go already at {go_bin}"
+    tarball = home / "go1.22.4.linux-amd64.tar.gz"
+    if not tarball.exists():
+        try:
+            print("  [bootstrap] downloading Go toolchain...")
+            urllib.request.urlretrieve(_GO_TARBALL, tarball)
+        except Exception as e:
+            return False, f"download failed: {e}"
+    try:
+        (home / ".local").mkdir(exist_ok=True)
+        # remove any partial
+        if go_root.exists():
+            shutil.rmtree(go_root, ignore_errors=True)
+        with tarfile.open(tarball, "r:gz") as t:
+            t.extractall(home / ".local")
+        # normalize: tarball ships "go/" → ~/.local/go/
+        if (home / ".local" / "go").exists() and not go_bin.exists():
+            # tarball layout is already ~/.local/go/bin/go
+            pass
+        # add to PATH for this process
+        os.environ["PATH"] = f"{home/'go'/'bin'}:{go_root/'bin'}:{os.environ.get('PATH','')}"
+        return True, f"go installed at {go_bin}"
+    except Exception as e:
+        return False, f"extract failed: {e}"
+
+
+def _ensure_path():
+    """Prepend user-local bin dirs so newly installed tools win over
+    distro/pip versions. Call before every _which() check."""
+    import os
+    home = pathlib.Path.home()
+    for p in (home / "agent" / "tools", home / "go" / "bin", home / ".local" / "bin"):
+        s = str(p)
+        if p.exists() and s not in os.environ.get("PATH", "").split(":"):
+            os.environ["PATH"] = s + ":" + os.environ.get("PATH", "")
+
+
 def install_any(name):
     name = name.strip()
     if not name:
@@ -268,6 +317,12 @@ def install_any(name):
         ok, msg = result
         if ok:
             return msg
+
+    # 1.5) ensure go is available before any go install runs
+    if not _which("go"):
+        ok, msg = _bootstrap_go()
+        if ok:
+            print(f"  [bootstrap] {msg}")
 
     # 2) generic multi-method ladder
     methods = [
