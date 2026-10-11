@@ -44,6 +44,7 @@ from core import recorder as _recorder
 from core import beliefs as _beliefs
 from core import decisions as _decisions
 from core import auth_ctx as _auth
+from core import proxy_rotate as _proxyrot
 from evidence import archive as _archive
 from core import http as _chttp
 from core import proxy as _cproxy
@@ -55,6 +56,7 @@ from intel import waf_matrix as _waf
 from intel import stack_router as _stack
 from intel import critic as _critic
 from intel import poc_fetch as _pocfetch
+from intel import browser_session as _browser
 
 from attack import chains as _chains
 from attack import mutate as _mutate
@@ -598,10 +600,25 @@ def _run_shell(cmd, timeout=None):
     _existing_pd = [d for d in _pd_dirs if pathlib.Path(d).exists()]
     if _existing_pd:
         env["PATH"] = ":".join(_existing_pd) + ":" + env.get("PATH", "")
+
+    # explicit single proxy wins
+    _proxy_used = None
     if PROXY:
         env["ALL_PROXY"] = PROXY
         env["HTTP_PROXY"] = PROXY
         env["HTTPS_PROXY"] = PROXY
+        _proxy_used = PROXY
+    else:
+        # proxy rotation: direct first, proxy if target previously failed
+        try:
+            _tgt = (STATE.get("target") if isinstance(STATE, dict) else None) or None
+            if _tgt:
+                p_env = _proxyrot.env_for(_tgt)
+                if p_env:
+                    _proxy_used = p_env.pop("_proxy_used", None)
+                    env.update(p_env)
+        except Exception:
+            pass
 
     try:
         proc = subprocess.Popen(
@@ -677,7 +694,35 @@ def _run_shell(cmd, timeout=None):
                 out += f"\n[auto-install] {inst[:200]}\nRetry the command if you need the result."
 
     if not out and timed_out:
+        # try marking a proxy/direct failure
+        try:
+            _tgt2 = (STATE.get("target") if isinstance(STATE, dict) else None) or None
+            if _tgt2:
+                if _proxy_used:
+                    _proxyrot.mark_proxy_fail(_tgt2, _proxy_used, "timeout")
+                else:
+                    _proxyrot.mark_direct_fail(_tgt2, "timeout")
+        except Exception:
+            pass
         return f"[TIMEOUT after {base_timeout}s, no output]"
+
+    # record proxy outcome for future routing decisions
+    try:
+        _tgt3 = (STATE.get("target") if isinstance(STATE, dict) else None) or None
+        if _tgt3:
+            failed = _proxyrot.detect_proxy_failure(out)
+            if _proxy_used:
+                if failed:
+                    _proxyrot.mark_proxy_fail(_tgt3, _proxy_used, "net-fail")
+                else:
+                    _proxyrot.mark_proxy_ok(_tgt3, _proxy_used)
+            else:
+                if failed:
+                    _proxyrot.mark_direct_fail(_tgt3, "net-fail")
+                else:
+                    _proxyrot.mark_direct_ok(_tgt3)
+    except Exception:
+        pass
 
     # tool-hygiene hints the model can act on
     if out:
@@ -2228,6 +2273,65 @@ def do_auto_poc(_arg=""):
     return "\n".join(out)
 
 
+def do_proxy_status(_arg=""):
+    tgt = (STATE.get("target") if isinstance(STATE, dict) else None) or "unknown"
+    import json as _j
+    return _j.dumps(_proxyrot.status(tgt), indent=2)
+
+
+def do_proxy_refresh(_arg=""):
+    pool = _proxyrot.refresh_pool(force=True)
+    return f"pool refreshed: {pool.get('count', 0)} live proxies (fetched {pool.get('fetched_at')})"
+
+
+def do_proxy_clear(_arg=""):
+    tgt = (STATE.get("target") if isinstance(STATE, dict) else None) or "unknown"
+    st = _proxyrot.load_target(tgt)
+    st["needs_proxy"] = False
+    st["best_proxy"] = None
+    _proxyrot.save_target(tgt, st)
+    return f"cleared proxy state for {tgt} — direct will be tried again"
+
+
+def do_browser_solve(spec):
+    """BROWSER-SOLVE: <url>  — headless chromium solves the anti-bot gate,
+    captures cookies, hands them to auth_ctx for subsequent curl."""
+    url = (spec or "").strip()
+    tgt = (STATE.get("target") if isinstance(STATE, dict) else None) or "unknown"
+    if not url:
+        url = "https://" + tgt + "/"
+    r = _browser.solve(tgt, url)
+    if not r.get("ok"):
+        return "browser solve FAILED: " + str(r.get("error") or r.get("title") or "unknown")
+    if r.get("cookie_header"):
+        _auth.set_cookie(tgt, r["cookie_header"])
+    return (f"browser solved {tgt}: {r.get('status')} {r.get('title')!r}\n"
+            f"  final URL: {r.get('url_final')}\n"
+            f"  {r.get('cookie_count')} cookies captured -> {r.get('jar')}\n"
+            f"  cookies piped into auth_ctx - subsequent curl calls are authenticated")
+
+
+def do_browser_fetch(spec):
+    """BROWSER-FETCH: <url>  — navigate inside the existing session."""
+    url = (spec or "").strip()
+    if not url:
+        return "ERROR: BROWSER-FETCH needs a URL"
+    tgt = (STATE.get("target") if isinstance(STATE, dict) else None) or "unknown"
+    r = _browser.fetch_url(tgt, url)
+    if not r.get("ok"):
+        return "browser fetch FAILED: " + str(r.get("error"))
+    html = r.get("html", "")
+    return (f"browser fetch {url}: {r.get('status')} {r.get('title')!r}\n"
+            f"  url_final: {r.get('url_final')}\n"
+            f"  --- HTML ({len(html)} bytes, first 4000) ---\n" + html[:4000])
+
+
+def do_browser_clear(_arg=""):
+    tgt = (STATE.get("target") if isinstance(STATE, dict) else None) or "unknown"
+    r = _browser.clear(tgt)
+    return f"browser session cleared: {r}"
+
+
 def do_belief(spec):
     """BELIEF: kind|path|confidence|rationale"""
     parts = [p.strip() for p in (spec or "").split("|", 3)]
@@ -2335,6 +2439,12 @@ DISPATCH = {
     "BELIEF": do_belief,
     "POC": do_poc,
     "AUTO-POC": do_auto_poc,
+    "BROWSER-SOLVE": do_browser_solve,
+    "BROWSER-FETCH": do_browser_fetch,
+    "BROWSER-CLEAR": do_browser_clear,
+    "PROXY-STATUS": do_proxy_status,
+    "PROXY-REFRESH": do_proxy_refresh,
+    "PROXY-CLEAR": do_proxy_clear,
     "AUTH": do_auth,
     "GOAL": do_goal,
     "REPLAN": do_replan,
@@ -3346,7 +3456,12 @@ def _finalize():
         print(f"  [schema] build failed: {e}")
 
     # auto-rebuild the per-target console (opt-out: AG_AUTO_UI=0)
-    if os.environ.get("AG_AUTO_UI", "1") != "0":
+    # skip if the scan is too thin to make a useful console
+    _turns_done = int(STATE.get("turn", 0) if isinstance(STATE, dict) else 0)
+    _findings_done = len(STATE.get("findings", []) if isinstance(STATE, dict) else [])
+    _min_turns = int(os.environ.get("AG_AUTO_UI_MIN_TURNS", "5"))
+    if (_turns_done >= _min_turns or _findings_done > 0) and \
+       os.environ.get("AG_AUTO_UI", "1") != "0":
         try:
             target = (STATE.get("target") if isinstance(STATE, dict) else None) or None
             if target:
