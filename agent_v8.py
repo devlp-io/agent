@@ -2563,6 +2563,44 @@ def _record_dispatch(kind, payload, result):
         pass
 
 
+def _detect_dead_end(results):
+    """Return True if the last turn's results look like the agent is stuck:
+       - all outputs empty / identical
+       - timeouts / connection failures
+       - WAF challenge pages on 2+ paths
+       - same fixed body repeated
+    """
+    if not results:
+        return False
+    hits = 0
+    sigs = []
+    for r in results:
+        s = str(r or "")
+        low = s.lower()
+        if not s or s in ("(no output)", "(empty)", "(no output)"):
+            hits += 1
+            continue
+        if "[timeout" in low or "curl: (28)" in low or "curl: (7)" in low:
+            hits += 1
+            continue
+        if ("one moment, please" in low or "checking your browser" in low
+                or "just a moment" in low or "cf-chl-" in low
+                or "__cf_chl" in low or "attention required" in low
+                or "wsidchk" in low):
+            hits += 1
+            continue
+        if "syntaxerror" in low or "traceback (most recent call last)" in low[:400]:
+            # parser-level failures on repeated turns also count
+            hits += 1
+            continue
+        # fingerprint for identical-body detection
+        sigs.append(s[:300].strip())
+    # identical bodies → strong signal (dead-end equivalent to 2 fails)
+    if len(sigs) >= 2 and len(set(sigs)) == 1:
+        hits += 2
+    return hits >= 2
+
+
 def _update_beliefs(kind, payload, result):
     """Feed directive outcomes into the per-target belief store."""
     tgt = (STATE.get("target") if isinstance(STATE, dict) else None) or "unknown"
@@ -3488,6 +3526,29 @@ def agent_loop(task, target, resume_dir=None, resume_history=None):
                 directives=actions,
                 results=list(zip([a[0] for a in actions[:2]], results)),
             )
+        except Exception:
+            pass
+
+        # recon-pivot auto-attach
+        try:
+            rp = STATE.setdefault("recon_pivot",
+                                  {"strikes": 0, "loaded": False})
+            if _detect_dead_end(results):
+                rp["strikes"] = rp.get("strikes", 0) + 1
+            else:
+                rp["strikes"] = 0
+
+            if rp.get("strikes", 0) >= 2 and not rp.get("loaded"):
+                playbook = METHODOLOGY_LIB.get("recon-pivot", "")
+                if playbook:
+                    results.append(
+                        "[AUTO-METHODOLOGY: recon-pivot]\n"
+                        "Two consecutive turns returned no useful signal. "
+                        "Load the following decision tree and choose a branch "
+                        "based on what you've observed:\n\n" + playbook
+                    )
+                    rp["loaded"] = True
+                    print("  [recon-pivot] auto-loaded — 2 dead-end strikes")
         except Exception:
             pass
 
