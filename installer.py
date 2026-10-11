@@ -285,8 +285,16 @@ def install_any(name):
         return msg
     if name.startswith("pip:"):
         pkg = name[4:]
-        rc, out = _run(f"pip install {pkg} 2>&1")
-        return f"{pkg}: {'installed' if rc==0 else 'failed'}\n{out[-400:]}"
+        for cmd in (f"pip3 install {pkg} 2>&1",
+                    f"pip3 install --user {pkg} 2>&1",
+                    f"pip install --user {pkg} 2>&1",
+                    f"pip install {pkg} 2>&1"):
+            rc, out = _run(cmd)
+            if rc == 0 and _which(pkg):
+                return f"{pkg}: installed via {cmd.split()[0]}"
+        return f"{pkg}: pip install failed\n{out[-400:]}"
+    if name.startswith("pip3:"):
+        return install_any("pip:" + name[5:])
     if name.startswith("apt:"):
         pkg = name[4:]
         rc, out = _run(f"{PKG_MGR} install -y {pkg} 2>&1")
@@ -326,15 +334,21 @@ def install_any(name):
 
     # 2) generic multi-method ladder
     methods = [
-        ("pkg",    f"pkg install -y {name} 2>&1"),
-        ("apt",    f"sudo apt install -y {name} 2>&1 || apt install -y {name} 2>&1"),
-        ("pipx",   f"pipx install {name} 2>&1"),
-        ("pip",    f"pip install --user {name} 2>&1 || pip install {name} 2>&1"),
-        ("npm",    f"npm install -g {name} 2>&1"),
-        ("gem",    f"gem install {name} 2>&1"),
-        ("cargo",  f"cargo install {name} 2>&1"),
-        ("go",     f"go install {name}@latest 2>&1"),
-        ("snap",   f"snap install {name} 2>&1"),
+        # pip first — python packages are the most common ask
+        ("pip3-user", f"pip3 install --user {name} 2>&1"),
+        ("pip3",      f"pip3 install {name} 2>&1"),
+        ("pip-user",  f"pip install --user {name} 2>&1"),
+        ("pip",       f"pip install {name} 2>&1"),
+        ("pipx",      f"pipx install {name} 2>&1"),
+        # system
+        ("pkg",       f"pkg install -y {name} 2>&1"),
+        ("apt",       f"sudo apt install -y {name} 2>&1 || apt install -y {name} 2>&1"),
+        # other lang ecosystems
+        ("npm",       f"npm install -g {name} 2>&1"),
+        ("gem",       f"gem install {name} 2>&1"),
+        ("cargo",     f"cargo install {name} 2>&1"),
+        ("go",        f"go install {name}@latest 2>&1"),
+        ("snap",      f"snap install {name} 2>&1"),
     ]
     tried = []
     for label, cmd in methods:

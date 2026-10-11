@@ -1074,12 +1074,47 @@ def _run_one_parallel(segment):
     return _run_shell(seg)
 
 
+# ── PARALLEL dedup + cap ──────────────────────────────────────────
+
+_PARALLEL_MAX = 15
+
+
+def _dedup_parallel(cmds):
+    """Deduplicate a PARALLEL command list by exact string, cap at
+    _PARALLEL_MAX. Returns (kept, dropped, capped)."""
+    seen = set()
+    kept = []
+    dropped = 0
+    capped = 0
+    for c in cmds:
+        c = (c or "").strip()
+        if not c:
+            continue
+        if c in seen:
+            dropped += 1
+            continue
+        if len(kept) >= _PARALLEL_MAX:
+            capped += 1
+            continue
+        seen.add(c)
+        kept.append(c)
+    return kept, dropped, capped
+
+
 def do_parallel(spec):
     # strip bare COMMAND:/PARALLEL: at line start (leftovers)
     spec = re.sub(r"(?m)^\s*(COMMAND|PARALLEL):\s*", "", spec)
     cmds = [c.strip() for c in spec.split("|||") if c.strip()]
     if not cmds:
         return "ERROR: PARALLEL needs cmd1 ||| cmd2 ||| ..."
+    cmds, _dropped, _capped = _dedup_parallel(cmds)
+    _notes = []
+    if _dropped:
+        _notes.append(f"[DEDUP] dropped {_dropped} duplicate command(s)")
+    if _capped:
+        _notes.append(f"[CAP] dropped {_capped} command(s) beyond max={_PARALLEL_MAX}")
+    if not cmds:
+        return "ERROR: PARALLEL had no unique commands after dedup"
     results = {}
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, len(cmds))) as ex:
         futs = {ex.submit(_run_one_parallel, c): c for c in cmds}
@@ -1089,7 +1124,10 @@ def do_parallel(spec):
                 results[c] = f.result()
             except Exception as e:
                 results[c] = f"ERROR: {e}"
-    return "\n\n".join(f"$ {c}\n{o}" for c, o in results.items())
+    body = "\n\n".join(f"$ {c}\n{o}" for c, o in results.items())
+    if _notes:
+        body = "\n".join(_notes) + "\n\n" + body
+    return body
 
 
 # curated install recipes: check_cmd | install_cmd
