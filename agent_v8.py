@@ -50,14 +50,14 @@ from evidence import archive as _archive
 from core import http as _chttp
 from core import proxy as _cproxy
 from core import async_engine as _engine
-from core import browser as _browser
+from core import browser as _browser_core
 
 from intel import cve_db as _cve
 from intel import waf_matrix as _waf
 from intel import stack_router as _stack
 from intel import critic as _critic
 from intel import poc_fetch as _pocfetch
-from intel import browser_session as _browser
+from intel import browser_session as _browser_session
 
 from attack import chains as _chains
 from attack import mutate as _mutate
@@ -673,16 +673,24 @@ except Exception:
 
 
 def _browser_safe_enabled():
-    """intel.browser_session may or may not have an `enabled` fn.
-    The old core.browser did; the new module doesn't. Return False if
-    the attribute is absent so the FINDING pipeline never crashes."""
+    """True if EITHER the playwright session OR the core chromium wrapper
+    is usable. Tries browser_session first (playwright-based, no AG_BROWSER
+    flag needed), falls back to core.browser.enabled()."""
+    # playwright session — preferred
     try:
-        fn = getattr(_browser, "enabled", None)
-        if callable(fn):
-            return bool(fn())
-        return bool(fn) if fn is not None else False
+        fn = getattr(_browser_session, "enabled", None)
+        if callable(fn) and fn():
+            return True
     except Exception:
-        return False
+        pass
+    # legacy core.browser — gated by AG_BROWSER=1 + chromium on PATH
+    try:
+        fn = getattr(_browser_core, "enabled", None)
+        if callable(fn) and fn():
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _run_shell(cmd, timeout=None, _proxy_retry=0, _proxy_exclude=None):
@@ -728,20 +736,32 @@ def _run_shell(cmd, timeout=None, _proxy_retry=0, _proxy_exclude=None):
     if _existing_pd:
         env["PATH"] = ":".join(_existing_pd) + ":" + env.get("PATH", "")
 
-    # explicit single proxy wins
+    # explicit single proxy wins, but ONLY if the operator opted in.
+    # The last run lost 8 turns to a honeypot proxy silently injecting
+    # itself into every curl. Default: no proxy.
     _proxy_used = None
-    if PROXY:
+    _proxy_enabled = os.environ.get("AG_PROXY_ENABLED", "0") == "1"
+    if PROXY and _proxy_enabled:
         env["ALL_PROXY"] = PROXY
         env["HTTP_PROXY"] = PROXY
         env["HTTPS_PROXY"] = PROXY
         _proxy_used = PROXY
+    elif PROXY and not _proxy_enabled:
+        # strip any proxy env that leaked in from the shell
+        for _k in ("ALL_PROXY", "HTTP_PROXY", "HTTPS_PROXY",
+                   "all_proxy", "http_proxy", "https_proxy"):
+            env.pop(_k, None)
+        # ensure curl defaults to noproxy for target-bound calls
+        env["NO_PROXY"] = "*"
+        env["no_proxy"] = "*"
     else:
         # proxy rotation: direct first, proxy if target previously failed
         try:
             _tgt = (STATE.get("target") if isinstance(STATE, dict) else None) or None
             if _tgt:
-                p_env = _proxyrot.env_for(
-                    _tgt, exclude=_proxy_exclude or [])
+                if os.environ.get('AG_PROXY_ROTATE', '0') == '1':
+                    p_env = _proxyrot.env_for(
+                        _tgt, exclude=_proxy_exclude or [])
                 if p_env:
                     _proxy_used = p_env.pop("_proxy_used", None)
                     env.update(p_env)
@@ -832,6 +852,38 @@ def _run_shell(cmd, timeout=None, _proxy_retry=0, _proxy_exclude=None):
         except Exception:
             pass
         return f"[TIMEOUT after {base_timeout}s, no output]"
+
+    # TLS-fail retry WITHOUT proxy — a verify error is almost always the
+    # MITM proxy, not the target. One clean retry.
+    try:
+        if (_proxy_used and out and
+                ("SSL certificate problem" in out
+                 or "certificate verify failed" in out
+                 or "unable to get local issuer certificate" in out)):
+            print(f"  [proxy-tls-fail] retrying without {_proxy_used}")
+            # strip proxy env and retry once
+            _saved_proxy = _proxy_used
+            _proxy_used = None
+            try:
+                env2 = dict(os.environ)
+                for _k in ("ALL_PROXY", "HTTP_PROXY", "HTTPS_PROXY",
+                           "all_proxy", "http_proxy", "https_proxy"):
+                    env2.pop(_k, None)
+                env2["NO_PROXY"] = "*"
+                env2["no_proxy"] = "*"
+                # short-circuit: shell the same cmd without proxy
+                import subprocess as _sp
+                r2 = _sp.run(cmd, shell=True, capture_output=True, text=True,
+                             timeout=base_timeout, env=env2,
+                             preexec_fn=os.setsid)
+                retry_out = (r2.stdout or "") + (r2.stderr or "")
+                if retry_out and "certificate" not in retry_out.lower()[:400]:
+                    return retry_out.strip()[:16000]
+            except Exception:
+                pass
+            _proxy_used = _saved_proxy
+    except Exception:
+        pass
 
     # record proxy outcome + retry with a different proxy if we failed
     try:
@@ -1195,6 +1247,14 @@ def _open_goals(state):
 
 def do_command(cmd):
     cmd = re.sub(r"^\s*(COMMAND|PARALLEL):\s*", "", cmd)
+    # reject hand-rolled parallelism — the agent must use PARALLEL:
+    if "|||" in cmd:
+        parts = [c.strip() for c in cmd.split("|||") if c.strip()]
+        return (
+            f"[PIPESPLIT] COMMAND: contained {len(parts)} '|||' separated "
+            f"segments. That token is reserved for the PARALLEL: directive.\n"
+            f"Re-emit as: PARALLEL: " + " ||| ".join(parts)
+        )
     return _run_shell(cmd)
 
 
@@ -2164,19 +2224,68 @@ def do_chain(spec):
 
 
 def do_browser(url):
-    if not _browser.enabled():
-        return "chromium missing. Prefer BROWSER-SOLVE: https://<host>/ (harness headless chromium). Only install chromium locally for the legacy BROWSER: directive."
-    label = re.sub(r"[^a-zA-Z0-9]+", "_", url)[:60]
-    out_html = RUN_DIR / "dom" / f"{label}.html"
-    out_html.parent.mkdir(exist_ok=True)
-    r = _browser.render(url, out_html=str(out_html), wait_ms=3000)
-    xhr = _browser.sniff_xhr(url, wait_ms=3000)
-    return json.dumps({
-        "rc": r.get("rc"),
-        "size": r.get("size"),
-        "html_path": str(out_html) if out_html.exists() else None,
-        "xhr_urls": xhr.get("xhr_urls", [])[:30],
-    }, indent=2)
+    """BROWSER: <url> — headless chromium fetch.
+    Primary: browser_session.solve() (playwright, exports cookies for auth_ctx).
+    Fallback: core.browser.render() (subprocess chromium, no extra deps)."""
+    url = (url or "").strip()
+    if not url:
+        return "ERROR: BROWSER needs a URL"
+
+    # 1. playwright session — gets cookies we can reuse for later curls
+    try:
+        tgt = (STATE.get("target") if isinstance(STATE, dict) else None) or None
+        if _browser_session.enabled():
+            res = _browser_session.solve(tgt or url, url)
+            if res.get("ok"):
+                # pipe cookies into auth_ctx for subsequent curls
+                try:
+                    if res.get("cookie_header") and tgt:
+                        _auth.set_cookie(tgt, res["cookie_header"])
+                except Exception:
+                    pass
+                html = res.get("html", "") or ""
+                return (f"browser_session solved {url}: {res.get('status')} "
+                        f"{res.get('title')!r}\n"
+                        f"  final URL: {res.get('url_final')}\n"
+                        f"  {res.get('cookie_count', 0)} cookies captured "
+                        f"-> {res.get('jar')}\n"
+                        f"  --- HTML ({len(html)} bytes, first 4000) ---\n"
+                        + html[:4000])
+    except Exception as e:
+        _session_err = str(e)[:200]
+    else:
+        _session_err = ""
+
+    # 2. legacy core.browser subprocess path
+    try:
+        if _browser_core.enabled():
+            import pathlib as _pl
+            label = re.sub(r"[^a-zA-Z0-9]+", "_", url)[:60]
+            out_html = RUN_DIR / "dom" / f"{label}.html"
+            out_html.parent.mkdir(parents=True, exist_ok=True)
+            r = _browser_core.render(url, out_html=str(out_html), wait_ms=3000)
+            xhr = _browser_core.sniff_xhr(url, wait_ms=3000)
+            return json.dumps({
+                "rc": r.get("rc"),
+                "size": r.get("size"),
+                "html_path": str(out_html) if out_html.exists() else None,
+                "xhr_urls": xhr.get("xhr_urls", [])[:30],
+            }, indent=2)
+    except Exception as e:
+        _core_err = str(e)[:200]
+    else:
+        _core_err = ""
+
+    # 3. both dead — tell the agent what to do
+    return (
+        "browser unavailable. "
+        f"browser_session: {_session_err or 'disabled or playwright missing'}; "
+        f"core.browser: {_core_err or 'AG_BROWSER!=1 or chromium not on PATH'}.\n"
+        "Next options: (a) emit BROWSER-SOLVE: <url> — same as BROWSER but "
+        "uses browser_session directly; (b) route through a reader lens: "
+        "curl -H 'X-Return-Format: html' 'https://r.jina.ai/https://<host>/<path>'; "
+        "(c) METHOD: recon-pivot."
+    )
 
 
 def do_graphql(spec):
@@ -2526,7 +2635,7 @@ def do_browser_solve(spec):
     tgt = (STATE.get("target") if isinstance(STATE, dict) else None) or "unknown"
     if not url:
         url = "https://" + tgt + "/"
-    r = _browser.solve(tgt, url)
+    r = _browser_session.solve(tgt, url)
     if not r.get("ok"):
         return "browser solve FAILED: " + str(r.get("error") or r.get("title") or "unknown")
     if r.get("cookie_header"):
@@ -2543,7 +2652,7 @@ def do_browser_fetch(spec):
     if not url:
         return "ERROR: BROWSER-FETCH needs a URL"
     tgt = (STATE.get("target") if isinstance(STATE, dict) else None) or "unknown"
-    r = _browser.fetch_url(tgt, url)
+    r = _browser_session.fetch_url(tgt, url)
     if not r.get("ok"):
         return "browser fetch FAILED: " + str(r.get("error"))
     html = r.get("html", "")
@@ -2554,7 +2663,7 @@ def do_browser_fetch(spec):
 
 def do_browser_clear(_arg=""):
     tgt = (STATE.get("target") if isinstance(STATE, dict) else None) or "unknown"
-    r = _browser.clear(tgt)
+    r = _browser_session.clear(tgt)
     return f"browser session cleared: {r}"
 
 
@@ -2985,12 +3094,26 @@ def _scrub_foreign_target_refs(text, current_target):
     import re as _re2
     # crude host extraction
     hosts = set()
+    _allow = {
+        "example.com", "test.com", "localhost", "example.org",
+        "test.local", "acme.local",
+    }
     for m in _re2.finditer(r"\b([a-z0-9][a-z0-9-]{1,60}\.(?:com|so|app|net|io|org|gov|co\.uk|dev))\b",
                             text, _re2.I):
-        hosts.add(m.group(1).lower())
+        h = m.group(1).lower()
+        if h in _allow:
+            continue
+        if h.endswith(".local") or h.endswith(".test"):
+            continue
+        hosts.add(h)
     cur = current_target.lower().strip(".")
+    # don't flag the target's own domain or system libraries
+    _LIB_RE = _re2.compile(r"^lib[a-z0-9_\-]+\.so", _re2.I)
     foreign = [h for h in hosts
-               if h != cur and not h.endswith("." + cur) and cur not in h]
+               if h != cur
+               and not h.endswith("." + cur)
+               and cur not in h
+               and not _LIB_RE.match(h)]
     if not foreign:
         return ""
     listed = ", ".join(sorted(foreign)[:6])

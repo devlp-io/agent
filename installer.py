@@ -22,6 +22,14 @@ import shutil
 import pathlib
 import subprocess
 
+# load .env so AG_SUDO_PASS / AG_PROXY_ENABLED are visible
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv(pathlib.Path(__file__).resolve().parent / ".env",
+                 override=False)
+except Exception:
+    pass
+
 HERE = pathlib.Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
@@ -45,6 +53,55 @@ def platform():
     if os.path.exists("/etc/redhat-release"):
         return "redhat"
     return "linux"
+
+
+# ── sudo helpers ─────────────────────────────────────────────────────
+_SUDO_PROBE_CACHE = None
+
+def _sudo_password():
+    import os as _os
+    return _os.environ.get("AG_SUDO_PASS", "").strip()
+
+
+def _sudo_available():
+    global _SUDO_PROBE_CACHE
+    if _SUDO_PROBE_CACHE is not None:
+        return _SUDO_PROBE_CACHE
+    if _sudo_password():
+        _SUDO_PROBE_CACHE = True
+        return True
+    import subprocess
+    try:
+        r = subprocess.run(["sudo", "-n", "true"], capture_output=True,
+                           timeout=5)
+        _SUDO_PROBE_CACHE = (r.returncode == 0)
+    except Exception:
+        _SUDO_PROBE_CACHE = False
+    return _SUDO_PROBE_CACHE
+
+
+def _sudo_run(cmd_without_sudo):
+    """Run `sudo <cmd>`. Pipes password via stdin if AG_SUDO_PASS is set."""
+    import subprocess
+    pw = _sudo_password()
+    try:
+        if pw:
+            # -S reads password from stdin; -p '' suppresses the prompt text
+            full = "sudo -S -p '' " + cmd_without_sudo
+            r = subprocess.run(full, shell=True, capture_output=True, text=True,
+                               input=pw + "\n", timeout=1800)
+        else:
+            full = "sudo -n " + cmd_without_sudo
+            r = subprocess.run(full, shell=True, capture_output=True, text=True,
+                               timeout=1800)
+        import re as _re
+        out = ((r.stdout or "") + (r.stderr or ""))
+        # strip any leaked sudo prompt fragments
+        out = _re.sub(r"\[sudo[^\]]*\]\s*Password:\s*", "", out)
+        out = _re.sub(r"^Password:\s*$", "", out, flags=_re.MULTILINE)
+        return r.returncode, out
+    except Exception as e:
+        return -1, str(e)
 
 
 PLAT = platform()
@@ -297,8 +354,16 @@ def install_any(name):
         return install_any("pip:" + name[5:])
     if name.startswith("apt:"):
         pkg = name[4:]
-        rc, out = _run(f"{PKG_MGR} install -y {pkg} 2>&1")
-        return f"{pkg}: {'installed' if rc==0 else 'failed'}\n{out[-400:]}"
+        if not _sudo_available():
+            return (f"[NO-SUDO] {pkg}: apt not available (no passwordless "
+                    f"sudo and AG_SUDO_PASS unset). System package; pip/npm/"
+                    f"gem/cargo/go can't install it. Options: set AG_SUDO_PASS, "
+                    f"pre-install at image build, or pick another technique.")
+        apt_cmd = f"{PKG_MGR.replace('sudo ', '')} install -y {pkg}"
+        rc, out = _sudo_run(apt_cmd)
+        rc2, _ = _run(f"dpkg -s {pkg} 2>&1", timeout=15)
+        ok = (rc2 == 0)
+        return f"{pkg}: {'installed OK' if ok else 'install failed'}\n{out[-600:]}"
     if name.startswith("npm:"):
         pkg = name[4:]
         rc, out = _run(f"npm install -g {pkg} 2>&1")
@@ -333,22 +398,27 @@ def install_any(name):
             print(f"  [bootstrap] {msg}")
 
     # 2) generic multi-method ladder
+    # pip first — python packages are the most common ask
     methods = [
-        # pip first — python packages are the most common ask
         ("pip3-user", f"pip3 install --user {name} 2>&1"),
         ("pip3",      f"pip3 install {name} 2>&1"),
         ("pip-user",  f"pip install --user {name} 2>&1"),
         ("pip",       f"pip install {name} 2>&1"),
         ("pipx",      f"pipx install {name} 2>&1"),
-        # system
-        ("pkg",       f"pkg install -y {name} 2>&1"),
-        ("apt",       f"sudo apt install -y {name} 2>&1 || apt install -y {name} 2>&1"),
-        # other lang ecosystems
-        ("npm",       f"npm install -g {name} 2>&1"),
-        ("gem",       f"gem install {name} 2>&1"),
-        ("cargo",     f"cargo install {name} 2>&1"),
-        ("go",        f"go install {name}@latest 2>&1"),
-        ("snap",      f"snap install {name} 2>&1"),
+    ]
+    # system packages only when sudo works (passwordless or AG_SUDO_PASS)
+    if _sudo_available():
+        methods += [
+            ("apt", f"sudo apt install -y {name} 2>&1"),
+            ("pkg", f"sudo pkg install -y {name} 2>&1"),
+        ]
+    # other ecosystems
+    methods += [
+        ("npm",   f"npm install -g {name} 2>&1"),
+        ("gem",   f"gem install {name} 2>&1"),
+        ("cargo", f"cargo install {name} 2>&1"),
+        ("go",    f"go install {name}@latest 2>&1"),
+        ("snap",  f"snap install {name} 2>&1"),
     ]
     tried = []
     for label, cmd in methods:
