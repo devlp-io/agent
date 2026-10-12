@@ -159,6 +159,7 @@ def is_alive(proxy_url, max_age=_FRESH_SECS):
                 p["fail"] = p.get("fail", 0) + 1
                 p["last_validated"] = _now_iso()
                 save_pool(pool)
+                print(f"[PROXY-FAIL] {proxy_url} revalidation-failed (fail={p['fail']})")
                 return False
     return False
 
@@ -213,9 +214,11 @@ def refresh_pool(force=False, workers=80, keep=200):
     if custom:
         proxies = validate_many(custom, workers=min(workers, len(custom)))
         if not proxies:
-            proxies = [{"url": u, "latency": 0, "ok": 0, "fail": 0,
-                        "last_validated": _now_iso(), "source": "custom-untested"}
-                       for u in custom]
+            # every custom endpoint failed validation — do NOT add them
+            # untested. honeypot proxies eat turns.
+            for u in custom:
+                print(f"[PROXY-FAIL] {u} custom-endpoint-validation-failed")
+            proxies = []
     else:
         candidates = fetch_free_pool()
         proxies = validate_many(candidates, workers=workers)
@@ -354,6 +357,7 @@ def mark_proxy_ok(target, proxy_url, latency=0):
 
 
 def mark_proxy_fail(target, proxy_url, error=""):
+    print(f"[PROXY-FAIL] {proxy_url} {error or 'unknown'}")
     st = load_target(target)
     if st.get("best_proxy") == proxy_url:
         st["best_proxy"] = None
