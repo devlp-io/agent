@@ -3964,6 +3964,28 @@ def agent_loop(task, target, resume_dir=None, resume_history=None):
         except Exception:
             pass
 
+    # one-shot environment recon — surfaces tor, go, tools, proxies,
+    # sudo so the agent never has to discover them by failure later.
+    try:
+        _env_parts = []
+        import shutil as _sh
+        for _b in ("tor", "torsocks", "proxychains4", "proxychains", "go",
+                   "dirsearch", "ffuf", "nuclei", "subfinder", "httpx",
+                   "curl", "dig", "jq"):
+            if _sh.which(_b):
+                _env_parts.append(_b)
+        _env_line = "available: " + ", ".join(_env_parts)
+        _proxy_env = os.environ.get("AG_PROXY", "").strip() or "(none)"
+        _env_line += f"\n  AG_PROXY={_proxy_env}"
+        try:
+            import installer as _inst
+            _env_line += f"\n  sudo_available={_inst._sudo_available()}"
+        except Exception:
+            pass
+        os.environ["AG_ENV_RECON"] = _env_line
+    except Exception:
+        os.environ["AG_ENV_RECON"] = ""
+
     hr()
     banner(f">> task: {task}")
     banner(f"   target: {target}")
@@ -4043,6 +4065,7 @@ def agent_loop(task, target, resume_dir=None, resume_history=None):
             {"role": "user", "content":
                 f"TARGET: {target}\nRUN_DIR: {RUN_DIR}\n\nTASK: {task}\n\n"
                 f"TOOL ENVIRONMENT:\n{tool_ctx}\n\n"
+                f"ENV RECON:\n{os.environ.get('AG_ENV_RECON','')}\n\n"
                 f"Begin. Fingerprint first (WAF: and STACK: on the target URL), "
                 f"then load the matching methodology.{planning_instr}"},
         ]
