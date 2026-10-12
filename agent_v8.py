@@ -2165,7 +2165,7 @@ def do_chain(spec):
 
 def do_browser(url):
     if not _browser.enabled():
-        return "browser disabled — pkg install chromium && export AG_BROWSER=1"
+        return "chromium missing. Prefer BROWSER-SOLVE: https://<host>/ (harness headless chromium). Only install chromium locally for the legacy BROWSER: directive."
     label = re.sub(r"[^a-zA-Z0-9]+", "_", url)[:60]
     out_html = RUN_DIR / "dom" / f"{label}.html"
     out_html.parent.mkdir(exist_ok=True)

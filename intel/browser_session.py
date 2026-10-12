@@ -41,6 +41,23 @@ def _jar_path(target):
     return p / ".cookiejar"
 
 
+def enabled():
+    """Legacy compat with core.browser.enabled(). Returns True if the
+    playwright package + chromium binary are both available."""
+    if not _have_playwright():
+        return False
+    # quick check for the chromium binary via playwright's registry
+    try:
+        import pathlib as _pl
+        cache = _pl.Path.home() / ".cache" / "ms-playwright"
+        if cache.exists():
+            return any(cache.glob("chromium-*"))
+    except Exception:
+        pass
+    # fall back to optimistic yes — playwright will error if missing
+    return True
+
+
 def _have_playwright():
     global _playwright_ready
     if _playwright_ready is None:
