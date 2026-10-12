@@ -309,6 +309,9 @@ THIS DIFFERENTIATION IS THE WHOLE GAME. A 401 for user "foo" means foo
 exists. A 404 means it doesn't. That turns a login into an enumeration
 primitive — but only if you don't trip the rate limiter first.
 
+HARD CAP: batch size is min(15, target_tolerance). The harness PARALLEL
+cap is 15 segments. Never construct a batch above 15.
+
 METHOD:
 
   1. BUILD THE CANDIDATE LIST BEFORE YOU FIRE ANYTHING.
@@ -321,19 +324,27 @@ METHOD:
      Deduplicate. Sort by likelihood (real artifacts before guesses).
 
   2. TIER THE LIST. Fire in batches:
-       tier1: top 5-10 (real artifacts first)
-       tier2: next 20 (format guesses)
-       tier3: next 50 (broad wordlist)
-     Never fire more than 30 in a batch.
+       tier1: top 5 (real artifacts first)
+       tier2: next 10 (format guesses)
+       tier3: next 15 (broad wordlist)
+     Batch size decays on any 429 (see step 4).
 
-  3. JITTER EVERY REQUEST. 2-3 second random delay between requests
-     inside a batch. 5-10 second pause between batches.
+  3. JITTER INSIDE EVERY PARALLEL. Prefix each segment with a random
+     sleep so the burst isn't a metronome:
 
-  4. WATCH FOR RATE-LIMIT SIGNALS IN THE RESPONSE:
-       429 → hard stop, wait 60s, halve batch size for the rest
-       "Connection reset" → same
-       a fresh 403 in a previously-200 stream → same
-     Re-firing through a 429 gets you IP-banned. Back off.
+       PARALLEL: sleep $((RANDOM%3+2)) && curl -s -o - -w "\n%{http_code} u1" ... ||| sleep $((RANDOM%3+2)) && curl ... ||| ...
+
+     Between batches: sleep 5-10s before the next PARALLEL.
+
+  4. RATE-LIMIT RESPONSE (mandatory, not advisory):
+       429 / "Connection reset" / fresh 403 in a previously-200 stream
+       → this turn ends. Next turn:
+          - halve batch size (15 -> 7 -> 3 -> 1)
+          - sleep 60s BEFORE the next PARALLEL (as its own COMMAND:)
+          - if a 429 hits at batch=1, STOP user-enum entirely. Log a
+            NOTE: and pivot to a different technique.
+       Re-firing through a 429 gets you IP-banned. The endpoint stays
+       open for the interesting guesses only if you back off.
 
   5. LOG THE HITS, NOT JUST THE COUNT. Every username that returned
      401 (or a body without "not found") is a valid account. Emit
