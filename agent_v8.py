@@ -2947,7 +2947,7 @@ def dispatch(kind, payload):
 # system prompts
 # ────────────────────────────────────────────────────────────────────
 
-JB_FILE = HERE / "jailbreak.txt"
+JB_FILE = HERE / "persona.txt"
 JB = JB_FILE.read_text().strip() if JB_FILE.exists() else os.environ.get("AG_JB", "")
 
 
