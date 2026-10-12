@@ -336,6 +336,7 @@ def mark_direct_ok(target):
 
 
 def mark_proxy_ok(target, proxy_url, latency=0):
+    print(f"[PROXY-OK] {proxy_url} latency={latency}ms")
     st = load_target(target)
     st["best_proxy"] = proxy_url
     st["needs_proxy"] = True
