@@ -884,6 +884,34 @@ def _run_shell(cmd, timeout=None, _proxy_retry=0, _proxy_exclude=None):
     except Exception:
         pass
 
+    # 429 auto-escalation — a wall of 429s means CF is fingerprinting curl
+    try:
+        if out and ("HTTP/2 429" in out or "HTTP/1.1 429" in out
+                    or "error code: 1015" in out or "Retry-After:" in out):
+            # count how many 429s this run has seen
+            STATE["_429_count"] = STATE.get("_429_count", 0) + 1
+            n = STATE["_429_count"]
+            if n == 1:
+                out += (
+                    "\n[429-WALL] first 429 seen. If the next curl to this host "
+                    "returns 429 again, STOP using raw curl. Emit "
+                    "BROWSER-SOLVE: https://<host>/ which spawns a real "
+                    "chromium that solves CF's JS challenge and captures "
+                    "cookies into auth_ctx. Alternatively route through a "
+                    "reader proxy: SEARCH or FETCH a mirror, or use "
+                    "r.jina.ai as a lens (curl -H 'X-Return-Format: html' "
+                    "https://r.jina.ai/https://<host>/<path>)."
+                )
+            elif n >= 2:
+                out += (
+                    f"\n[429-WALL x{n}] you've been 429'd {n} times. STOP "
+                    "firing raw curl at this host. Required next action: "
+                    "emit BROWSER-SOLVE: https://<target>/. If that fails, "
+                    "use METHOD: recon-pivot. Do NOT fire another plain curl."
+                )
+    except Exception:
+        pass
+
     # tool-hygiene hints the model can act on
     if out:
         # python httpx collision — the agent keeps hitting this
@@ -2902,6 +2930,77 @@ def _cached_probe(kind, payload):
     )
 
 
+# ── sanitizer: strip model-specific tokens from directive payloads ──
+
+_SANITIZE_PATTERNS = [
+    # DeepSeek reasoner / DSML tool-call fragments
+    (r"</?\|?\|?DSML\|?\|?[^>]*>", ""),
+    (r"<\|/?DSML\|?>", ""),
+    (r"</parameter>", ""),
+    (r"</invoke>", ""),
+    (r"</antml:invoke>", ""),
+    (r"</antml:parameter>", ""),
+    (r"<\|end_of_thinking\|>", ""),
+    (r"<\|begin_of_thinking\|>", ""),
+    (r"<\|fim_begin\|>", ""),
+    (r"<\|fim_end\|>", ""),
+    # stray close tags the model invents when wrapping directives
+    (r"</?parameter[^>]*>", ""),
+    (r"</?function_calls>", ""),
+    (r"</?tool_calls>", ""),
+    (r"</?invoke[^>]*>", ""),
+]
+import re as _re_sanitize
+
+def _sanitize_payload(payload):
+    """Strip reasoning-model artefacts that leak into directive payloads.
+    Returns cleaned string. Never raises."""
+    if not payload:
+        return ""
+    s = payload
+    for entry in _SANITIZE_PATTERNS:
+        pat = entry[0] if isinstance(entry, tuple) else entry
+        repl = entry[1] if isinstance(entry, tuple) else ""
+        try:
+            s = _re_sanitize.sub(pat, repl, s)
+        except Exception:
+            pass
+    # normalize stray whitespace at the end that fragments leave
+    s = s.rstrip()
+    return s
+
+
+# ── context bleed scrub ────────────────────────────────────────────
+# If the model references a host that isn't the current target, that
+# mention is a hallucination from a prior run's transcript. Add a note
+# to the next user message so the model is told.
+_KNOWN_TARGETS_CACHE = {}
+
+
+def _scrub_foreign_target_refs(text, current_target):
+    """Find *.tld references in the model output that aren't the current
+    target. Return a warning string or empty."""
+    if not text or not current_target:
+        return ""
+    import re as _re2
+    # crude host extraction
+    hosts = set()
+    for m in _re2.finditer(r"\b([a-z0-9][a-z0-9-]{1,60}\.(?:com|so|app|net|io|org|gov|co\.uk|dev))\b",
+                            text, _re2.I):
+        hosts.add(m.group(1).lower())
+    cur = current_target.lower().strip(".")
+    foreign = [h for h in hosts
+               if h != cur and not h.endswith("." + cur) and cur not in h]
+    if not foreign:
+        return ""
+    listed = ", ".join(sorted(foreign)[:6])
+    return (
+        f"[CONTEXT-SCRUB] you mentioned host(s) that are NOT the current "
+        f"target ({cur}): {listed}. Those are hallucinations from a prior "
+        f"run. Ignore them. Only probe {cur} and its subdomains."
+    )
+
+
 def dispatch(kind, payload):
     fn = DISPATCH.get(kind)
     if not fn:
@@ -2912,6 +3011,11 @@ def dispatch(kind, payload):
         if not _modes.is_allowed(mode_name, kind):
             return (f"[MODE BLOCK] {kind} is blocked in {mode_name} mode. "
                     f"Choose another approach or switch modes with --mode.")
+    except Exception:
+        pass
+    # sanitize model artefacts out of the payload first
+    try:
+        payload = _sanitize_payload(payload)
     except Exception:
         pass
     # probe dedup — return cached before executing
@@ -3061,6 +3165,30 @@ Never write "I'm looping" and then emit another loop iteration. The
 observation is the pivot instruction.
 
 === END LOOPING IS A DIRECTIVE ===
+
+
+=== HARD RULES FOR ANTI-BOT GATES ===
+These are not suggestions. Violating them costs the run 20+ turns.
+
+RULE A: the moment you see HTTP 429 or "error code: 1015" from a host,
+        STOP using raw curl against that host. Your next directive MUST
+        be BROWSER-SOLVE: https://<host>/. It spawns headless chromium,
+        solves the CF challenge, and hands cookies to auth_ctx. Every
+        subsequent curl inherits the session.
+
+RULE B: if you cannot run a browser on this box (deps missing), pivot
+        immediately to a reader proxy. Working lenses:
+          - curl -H "X-Return-Format: html" "https://r.jina.ai/https://<url>"
+          - SEARCH: <query>
+          - FETCH: <url>
+        Do NOT cycle through 4 different "raw" proxies in a row. If
+        the first lens works, use it for every subsequent fetch.
+
+RULE C: if you fire 3 curls in a row and all 3 return 429, that is a
+        wall. Do not fire a 4th. Method-switch, host-switch, or
+        browser-switch. Never re-fire the same shape.
+
+=== END HARD RULES FOR ANTI-BOT GATES ===
 
 === RESPONSE-BODY-FIRST CLASSIFICATION ===
 Status codes lie. Read the BODY before you act on the CODE.
@@ -3821,6 +3949,15 @@ def agent_loop(task, target, resume_dir=None, resume_history=None):
         actions, parse_errors = parse(full)
         has_action = bool(actions)
         said_done = bool(re.search(r"^\s*DONE\b", full, re.MULTILINE))
+
+        # scrub foreign target references
+        try:
+            _bleed = _scrub_foreign_target_refs(
+                full, STATE.get("target") or "")
+            if _bleed:
+                history.append({"role": "user", "content": _bleed})
+        except Exception:
+            pass
 
         # DONE-ANYWAY wins regardless
         done_anyway = bool(_DONE_ANYWAY_RE.search(full))
