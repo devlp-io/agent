@@ -3777,11 +3777,11 @@ def attack_phase(target):
             full = full.strip()
             history.append({"role": "assistant", "content": full})
 
-        # productivity tracker (scan loop)
-        try:
-            _record_productivity(turn + 1)
-        except Exception:
-            pass
+            # productivity tracker (attack loop) — must run per turn
+            try:
+                _record_productivity(turn + 1)
+            except Exception:
+                pass
 
             if is_refusal(full):
                 a_streak += 1
