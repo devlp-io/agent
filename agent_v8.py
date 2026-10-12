@@ -3442,6 +3442,12 @@ def attack_phase(target):
             full = full.strip()
             history.append({"role": "assistant", "content": full})
 
+        # productivity tracker (scan loop)
+        try:
+            _record_productivity(turn + 1)
+        except Exception:
+            pass
+
             if is_refusal(full):
                 a_streak += 1
                 print(f"  {C['yellow']}[attack refusal #{a_streak} — soft redirect]{C['rst']}")
@@ -3820,6 +3826,29 @@ def agent_loop(task, target, resume_dir=None, resume_history=None):
         done_anyway = bool(_DONE_ANYWAY_RE.search(full))
 
         if said_done and not has_action:
+            # STUCK check — reject DONE if the run has stalled
+            try:
+                _stalled_now = int(STATE.get("_stalled_turns", 0))
+                _thresh = _stuck_threshold()
+                _has_f = bool(STATE.get("findings"))
+            except Exception:
+                _stalled_now, _thresh, _has_f = 0, 6, False
+            if _stalled_now >= _thresh and _has_f:
+                print(f"  [STUCK->PIVOT] {_stalled_now} stalled turns")
+                history.append({"role": "user", "content":
+                    _inject_pivot_reason("You emitted DONE but the last "
+                        + str(_stalled_now) + " turns added nothing new.")})
+                STATE["_stalled_turns"] = 0
+                STATE["_stuck_resets"] = STATE.get("_stuck_resets", 0) + 1
+                try:
+                    _state.save(RUN_DIR, STATE)
+                except Exception:
+                    pass
+                if STATE["_stuck_resets"] >= 2:
+                    print("STUCK (accepted after 2 pivots)")
+                    STATE["exit_kind"] = "stuck"
+                    break
+                continue
             open_goals = _open_goals(STATE) if STATE.get("plan") == "custom" else []
             if open_goals and not done_anyway and not STATE.get("_done_pushed"):
                 STATE["_done_pushed"] = True
