@@ -325,10 +325,107 @@ def _ensure_path():
             os.environ["PATH"] = s + ":" + os.environ.get("PATH", "")
 
 
+# ── language inference for NEED_TOOL ───────────────────────────────
+# many tools are distributed in one specific ecosystem; trying pip/npm
+# for a Go binary is the run-1 and run-2 failure. Classify first, then
+# try only the viable managers.
+
+_GO_TOOLS = {
+    "subfinder", "httpx", "nuclei", "katana", "naabu", "dnsx", "tlsx",
+    "gau", "amass", "assetfinder", "waybackurls", "gf", "anew", "ffuf",
+    "gobuster", "dalfox", "gowitness", "gitleaks", "trufflehog", "kr",
+    "chisel", "kerbrute", "shuffledns", "puredns", "gospider", "hakrawler",
+    "interactsh-client", "httprobe", "gron", "notify", "subzy",
+    "jsluice", "cloudlist",
+}
+_PIP_TOOLS = {
+    "sqlmap", "wafw00f", "arjun", "paramspider", "sstimap", "dirsearch",
+    "wfuzz", "impacket", "responder", "pypykatz", "certipy", "coercer",
+    "netexec", "smbmap", "enum4linux-ng", "ssrfmap", "corsy",
+}
+_APT_TOOLS = {
+    "nmap", "masscan", "nikto", "whatweb", "wpscan", "hydra", "hashcat",
+    "john", "smbclient", "sslscan", "redis-cli", "psql", "mongo",
+    "jq", "dig", "whois", "chromium",
+}
+
+def _tool_language(name):
+    n = (name or "").strip().lower()
+    if n in _GO_TOOLS: return "go"
+    if n in _PIP_TOOLS: return "pip"
+    if n in _APT_TOOLS: return "apt"
+    return None
+
+
+# ── language inference for NEED_TOOL ───────────────────────────────
+# many tools are distributed in one specific ecosystem; trying pip/npm
+# for a Go binary is the run-1 and run-2 failure. Classify first, then
+# try only the viable managers.
+
+_GO_TOOLS = {
+    "subfinder", "httpx", "nuclei", "katana", "naabu", "dnsx", "tlsx",
+    "gau", "amass", "assetfinder", "waybackurls", "gf", "anew", "ffuf",
+    "gobuster", "dalfox", "gowitness", "gitleaks", "trufflehog", "kr",
+    "chisel", "kerbrute", "shuffledns", "puredns", "gospider", "hakrawler",
+    "interactsh-client", "httprobe", "gron", "notify", "subzy",
+    "jsluice", "cloudlist",
+}
+_PIP_TOOLS = {
+    "sqlmap", "wafw00f", "arjun", "paramspider", "sstimap", "dirsearch",
+    "wfuzz", "impacket", "responder", "pypykatz", "certipy", "coercer",
+    "netexec", "smbmap", "enum4linux-ng", "ssrfmap", "corsy",
+}
+_APT_TOOLS = {
+    "nmap", "masscan", "nikto", "whatweb", "wpscan", "hydra", "hashcat",
+    "john", "smbclient", "sslscan", "redis-cli", "psql", "mongo",
+    "jq", "dig", "whois", "chromium",
+}
+
+def _tool_language(name):
+    n = (name or "").strip().lower()
+    if n in _GO_TOOLS: return "go"
+    if n in _PIP_TOOLS: return "pip"
+    if n in _APT_TOOLS: return "apt"
+    return None
+
+
 def install_any(name):
     name = name.strip()
     if not name:
         return "install: empty name"
+
+    # language-aware short-circuit — don't try npm for a Go binary
+    _lang = _tool_language(name)
+    if _lang == "go":
+        if not _which("go"):
+            return (f"{name}: Go toolchain not installed. This is a Go "
+                    f"binary. Run NEED_TOOL: go|bootstrap Go, then retry "
+                    f"NEED_TOOL: {name}.")
+        import os as _os
+        home = pathlib.Path.home()
+        _os.environ["PATH"] = (f"{home/'go'/'bin'}:{home/'.local'/'go'/'bin'}:"
+                               + _os.environ.get("PATH",""))
+        rc, out = _run(f"go install -v github.com/projectdiscovery/{name}/v2/cmd/{name}@latest", timeout=900)
+        if rc != 0:
+            rc, out = _run(f"go install -v github.com/projectdiscovery/{name}/cmd/{name}@latest", timeout=900)
+        if rc == 0 and _which(name):
+            _log_install(name, "go-direct", True, "projectdiscovery")
+            return f"{name}: installed via go install"
+        return f"{name}: go install failed\n{out[-400:]}"
+    if _lang == "pip":
+        rc, out = _run(f"pip3 install --user {name} 2>&1", timeout=900)
+        if _which(name):
+            _log_install(name, "pip-direct", True, "")
+            return f"{name}: installed via pip3"
+        return f"{name}: pip install failed\n{out[-400:]}"
+    if _lang == "apt":
+        if not _sudo_available():
+            return (f"[NO-SUDO] {name} is a system package. Set AG_SUDO_PASS "
+                    f"or install manually.")
+        rc, out = _sudo_run(f"apt install -y {name}")
+        if _which(name):
+            return f"{name}: installed via apt"
+        return f"{name}: apt install failed\n{out[-400:]}"
 
     # github/gitlab/http
     if name.startswith(("http://", "https://")):

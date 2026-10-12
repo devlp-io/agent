@@ -954,6 +954,9 @@ def _run_shell(cmd, timeout=None, _proxy_retry=0, _proxy_exclude=None):
                     "r.jina.ai as a lens (curl -H 'X-Return-Format: html' "
                     "https://r.jina.ai/https://<host>/<path>)."
                 )
+                out += ("\n[429-WALL-NEXT] required: BROWSER-SOLVE, "
+                        "OR torsocks <curl>, OR r.jina.ai lens. "
+                        "Do NOT re-fire raw curl on this host.")
             elif n >= 2:
                 out += (
                     f"\n[429-WALL x{n}] you've been 429'd {n} times. STOP "
@@ -1247,6 +1250,8 @@ def _open_goals(state):
 
 def do_command(cmd):
     cmd = re.sub(r"^\s*(COMMAND|PARALLEL):\s*", "", cmd)
+    if re.search(r"\bdirsearch\b", cmd) and " -q" not in cmd and " --quiet" not in cmd:
+        cmd = re.sub(r"\bdirsearch\b", "dirsearch -q", cmd, count=1)
     # reject hand-rolled parallelism — the agent must use PARALLEL:
     if "|||" in cmd:
         parts = [c.strip() for c in cmd.split("|||") if c.strip()]
@@ -1831,6 +1836,9 @@ def do_apimap(spec):
     for oa in ("/openapi.json", "/swagger.json", "/api-docs", "/docs", "/redoc"):
         r = http_probe("GET", base + oa, timeout=8)
         if r["code"].startswith("2"):
+            _ct = (r.get("ctype") or "").lower()
+            if "json" not in _ct:
+                continue
             try:
                 js = json.loads(r["body"])
                 paths = js.get("paths", {})
@@ -2249,8 +2257,7 @@ def do_browser(url):
                         f"  final URL: {res.get('url_final')}\n"
                         f"  {res.get('cookie_count', 0)} cookies captured "
                         f"-> {res.get('jar')}\n"
-                        f"  --- HTML ({len(html)} bytes, first 4000) ---\n"
-                        + html[:4000])
+                        f"  html {len(html)}B preview: " + html[:500])
     except Exception as e:
         _session_err = str(e)[:200]
     else:
@@ -3097,6 +3104,8 @@ def _scrub_foreign_target_refs(text, current_target):
     _allow = {
         "example.com", "test.com", "localhost", "example.org",
         "test.local", "acme.local",
+        "jina.ai", "projectdiscovery.io", "bootstrapmade.com",
+        "cloudflare.com",
     }
     for m in _re2.finditer(r"\b([a-z0-9][a-z0-9-]{1,60}\.(?:com|so|app|net|io|org|gov|co\.uk|dev))\b",
                             text, _re2.I):
@@ -3312,6 +3321,81 @@ RULE C: if you fire 3 curls in a row and all 3 return 429, that is a
         browser-switch. Never re-fire the same shape.
 
 === END HARD RULES FOR ANTI-BOT GATES ===
+
+
+=== AGENT PROTOCOLS (target-agnostic) ===
+
+TURN-0 ENVIRONMENT CHECK (free, one line)
+  Before the first outbound request, glance at the ENV RECON block:
+  available binaries, AG_PROXY state, sudo availability. Note tor, go,
+  jq, dirsearch presence. Never spend a turn discovering a tool that
+  was already listed.
+
+FILE + COMMAND ORDERING
+  When you emit both FILE: and a COMMAND: that runs the file, the
+  harness writes FILE first, then runs the command. If you want to be
+  certain, write the file inline in the COMMAND (`printf ... > f && f`).
+  Never emit COMMAND: that references a file from a FILE: in a
+  subsequent turn — do both in one turn.
+
+CATCH-ALL DETECTION
+  If three or more distinct paths return identical status + size, that
+  host uses a catch-all fallback. Stop guessing paths. Switch to
+  size-differential discovery: probe with a broad wordlist, flag any
+  response whose size != the fallback size. Real routes are the ones
+  that differ.
+
+DEAD-PATH RULE
+  If a path 404s once, do not retry variants (case, encoding, trailing
+  slash, extension, null byte) without a NEW reason. Same for POST
+  bodies that 404. One miss = one strike; two misses on the same class
+  = move on.
+
+POST ENDPOINT PROTOCOL
+  After identifying any POST endpoint, send this in ONE turn:
+    (a) malformed JSON          → {"x":
+    (b) empty body             → Content-Length: 0
+    (c) truncated form         → email=
+    (d) nested object params   → field[a][b]=x
+    (e) array params           → field[]=x
+  These five probes surface Express/body-parser stack traces (path
+  disclosure), object-injection hangs, prototype pollution, and type
+  confusion. Real findings, low cost.
+
+EXPRESS / NODE SPECIFIC
+  Express endpoints often accept urlencoded OR json. Test both content
+  types on the same endpoint — different parsers, different bugs.
+  Nested object params (`a[b]=1`) can hang handlers that do recursive
+  comparison — DoS class. Always confirm by re-firing and checking the
+  app is still responsive for a normal request.
+
+CRITIC IS YOUR INNER VOICE
+  When the critic's suggestion is actionable, execute it. Do not
+  narrate it. "The critic suggests X" is a bug — the sentence itself
+  wastes a turn. Just do X.
+
+TOR EGRESS (when IP-banned)
+  If raw curl returns 429 and BROWSER also gets 429/1015, check for
+  Tor. If `which tor torsocks` succeeds, start tor in the background,
+  then prefix every subsequent curl with `torsocks`. Fresh exit IP
+  resets the ban. Tor is slow (1-3s per request) — use it as a lens,
+  not a hammer.
+
+MALFORMED-INPUT DISCIPLINE
+  When an endpoint returns a stack trace on malformed input, record it
+  as a finding: exact path disclosed, exact library, exact line. That
+  is a real info leak.
+
+CREDENTIAL SPRAY HYGIENE
+  Do not spray a generic list. Build a hypothesis: the app name, the
+  stack, the domain, the industry. Try 3-5 hypotheses per round, then
+  stop. 10 failed tries with no hypothesis is a lost turn.
+
+LONG-SHOT TIMEBOX
+  Session-secret cracking, hash cracking, deep wordlist runs: cap at
+  2 attempts or 2 minutes wall clock. Log the negative result as a
+  NOTE:, then pivot. Do not iterate rockyou-45/70/75/full in sequence.
+=== END AGENT PROTOCOLS ===
 
 === RESPONSE-BODY-FIRST CLASSIFICATION ===
 Status codes lie. Read the BODY before you act on the CODE.
@@ -3737,7 +3821,9 @@ def attack_phase(target):
                 continue
 
             results = []
-            for kind, payload in actions[:2]:
+            _fa = [a for a in actions if a[0] == "FILE"]
+            _oa = [a for a in actions if a[0] != "FILE"]
+            for kind, payload in (_fa + _oa)[:2]:
                 print(f"  {C['red']}* {kind}{C['rst']} {C['dim']}{payload[:160]}{C['rst']}")
                 with Spinner(f"running {kind.lower()}...", "red"):
                     r = dispatch(kind, payload)
@@ -4135,7 +4221,9 @@ def agent_loop(task, target, resume_dir=None, resume_history=None):
             continue
 
         results = []
-        for kind, payload in actions[:2]:
+        _fa = [a for a in actions if a[0] == "FILE"]
+        _oa = [a for a in actions if a[0] != "FILE"]
+        for kind, payload in (_fa + _oa)[:2]:
             print(f"  {C['cyan']}* {kind}{C['rst']} {C['dim']}{payload[:160]}{C['rst']}")
             with Spinner(f"running {kind.lower()}...", "cyan"):
                 r = dispatch(kind, payload)
