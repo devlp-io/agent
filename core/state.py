@@ -127,6 +127,15 @@ def save(run_dir, state):
     os.replace(tmp, run_dir / "state.json")
 
 
+def log_turn(run_dir, turn_record):
+    """Append-only transaction journal for zero-loss recovery."""
+    run_dir = pathlib.Path(run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    j = run_dir / "turns.jsonl"
+    with open(j, "a", encoding="utf-8") as f:
+        f.write(json.dumps(turn_record) + "\n")
+
+
 # ---------- scratchpad ----------
 
 def scratchpad_path(run_dir):

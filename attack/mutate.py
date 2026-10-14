@@ -127,10 +127,37 @@ def header_bypass_headers():
     }
 
 
+def json_unicode_escape(p):
+    """JSON Unicode escape for bypass in REST/JSON APIs (\u0027 for ', \u0022 for ")."""
+    subs = {
+        "'": "\\u0027", '"': "\\u0022", "<": "\\u003c", ">": "\\u003e",
+        "&": "\\u0026", "/": "\\u002f", "\\": "\\u005c", "=": "\\u003d",
+    }
+    return "".join(subs.get(c, c) for c in p)
+
+
+def chunked_payload(p, chunk_size=3):
+    """Format payload with HTTP Transfer-Encoding: chunked structure."""
+    chunks = [p[i:i + chunk_size] for i in range(0, len(p), chunk_size)]
+    lines = []
+    for c in chunks:
+        lines.append(f"{len(c):x}\r\n{c}")
+    lines.append("0\r\n\r\n")
+    return "\r\n".join(lines)
+
+
+def hpp_split(p):
+    """Split SQL/CMDi payload across HPP segments."""
+    parts = p.split()
+    if len(parts) >= 2:
+        return ["/*" + parts[0] + "*/", "/*" + " ".join(parts[1:]) + "*/"]
+    return [p]
+
+
 def variants(payload, context=None):
     """
     Given a payload, return list of (label, mutated_payload) tuples.
-    context = 'sql' | 'xss' | 'lfi' | 'cmd' | None
+    context = 'sql' | 'xss' | 'lfi' | 'cmd' | 'json' | None
     """
     out = []
     out.append(("original", payload))
@@ -141,6 +168,8 @@ def variants(payload, context=None):
     for i, v in enumerate(whitespace_swap(payload)):
         out.append((f"ws_swap_{i}", v))
     out.append(("null_byte", null_byte(payload)))
+    out.append(("json_unicode", json_unicode_escape(payload)))
+    out.append(("chunked", chunked_payload(payload)))
 
     if context == "sql":
         out.append(("sql_comment", comment_inject_sql(payload)))
@@ -151,6 +180,8 @@ def variants(payload, context=None):
     elif context == "lfi":
         for i, v in enumerate(path_traversal_swap(payload)):
             out.append((f"lfi_{i}", v))
+    elif context == "json":
+        out.append(("json_escaped", json_unicode_escape(payload)))
 
     # dedupe, drop identical to original (keep original though)
     seen = set()

@@ -449,7 +449,7 @@ _DIRECTIVE_NAMES = [
     "WS", "OOB", "MUTATE", "CHAIN_AUTO", "HAR", "BUDGET", "TUI", "WAF",
     "STACK", "SCHEMA", "GOAL", "REPLAN", "BELIEF", "POC", "AUTO-POC",
     "BROWSER-SOLVE", "BROWSER-FETCH", "BROWSER-CLEAR", "PROXY-STATUS",
-    "PROXY-REFRESH", "PROXY-CLEAR", "AUTH", "TOOLFIX",
+    "PROXY-REFRESH", "PROXY-CLEAR", "AUTH", "TOOLFIX", "DB-TRIAGE",
 ]
 
 # line-anchored: directive must start at column 0 (after optional spaces),
@@ -2348,16 +2348,250 @@ def do_crack(spec):
 
 
 def do_pivot(spec):
-    parts = spec.split("|", 1)
-    if len(parts) != 2:
-        return "ERROR: PIVOT needs 'target|creds_ref'"
-    target, creds = parts[0].strip(), parts[1].strip()
-    STATE.setdefault("chains", []).append({
-        "from": creds, "to": target, "rule": "pivot",
-        "why": "lateral", "ts": datetime.now().isoformat(),
-    })
-    _state.save(RUN_DIR, STATE)
-    return f"pivot candidate recorded: {creds} → {target}"
+    """PIVOT: <action>|<target>[|<creds_or_cmd>]
+    Supports:
+      PIVOT: socks|127.0.0.1:1080 (sets global proxy for child tools and probes)
+      PIVOT: smb|<host>|<user>:<pass>[|<command>]
+      PIVOT: winrm|<host>|<user>:<pass>|<command>
+      PIVOT: ssh|<host>|<user>:<pass>|<command>
+      PIVOT: mssql|<host>|<user>:<pass>|<query>
+      PIVOT: record|<target>|<creds_ref>
+    """
+    parts = [p.strip() for p in spec.split("|")]
+    if len(parts) < 2:
+        return "ERROR: PIVOT needs 'action|target[|args]'"
+
+    action = parts[0].lower()
+    target = parts[1]
+
+    # Global proxy/tunnel routing
+    if action in ("socks", "socks5", "proxy", "route"):
+        p_url = target if "://" in target else f"socks5://{target}"
+        os.environ["ALL_PROXY"] = p_url
+        os.environ["HTTP_PROXY"] = p_url
+        os.environ["HTTPS_PROXY"] = p_url
+        os.environ["http_proxy"] = p_url
+        os.environ["https_proxy"] = p_url
+        STATE.setdefault("chains", []).append({
+            "action": "proxy_route", "proxy": p_url, "ts": datetime.now().isoformat(),
+        })
+        _state.save(RUN_DIR, STATE)
+        return f"[PIVOT] Global proxy configured: {p_url}\nChild tools and HTTP probes will route through this proxy."
+
+    from attack import pivot as _pvt
+
+    if action == "smb":
+        creds = parts[2] if len(parts) > 2 else ""
+        u, p = creds.split(":", 1) if ":" in creds else (creds, "")
+        cmd = parts[3] if len(parts) > 3 else ""
+        if cmd:
+            res = _pvt.smb_exec(target, u, p, cmd)
+        else:
+            res = _pvt.smb_enum(target, u, p)
+        return json.dumps(res, indent=2)
+
+    elif action == "winrm":
+        creds = parts[2] if len(parts) > 2 else ""
+        u, p = creds.split(":", 1) if ":" in creds else (creds, "")
+        cmd = parts[3] if len(parts) > 3 else "whoami /all"
+        res = _pvt.winrm_exec(target, u, p, cmd)
+        return json.dumps(res, indent=2)
+
+    elif action == "ssh":
+        creds = parts[2] if len(parts) > 2 else ""
+        u, p = creds.split(":", 1) if ":" in creds else (creds, "")
+        cmd = parts[3] if len(parts) > 3 else "id; uname -a"
+        res = _pvt.ssh_exec(target, u, p, cmd)
+        return json.dumps(res, indent=2)
+
+    elif action == "mssql":
+        creds = parts[2] if len(parts) > 2 else ""
+        u, p = creds.split(":", 1) if ":" in creds else (creds, "")
+        q = parts[3] if len(parts) > 3 else "SELECT @@version;"
+        res = _pvt.mssql_exec(target, u, p, q)
+        return json.dumps(res, indent=2)
+
+    else:
+        creds = parts[2] if len(parts) > 2 else ""
+        STATE.setdefault("chains", []).append({
+            "from": creds, "to": target, "rule": action or "pivot",
+            "why": "lateral", "ts": datetime.now().isoformat(),
+        })
+        _state.save(RUN_DIR, STATE)
+        return f"pivot candidate recorded: {creds} → {target} ({action})"
+
+
+def do_db_triage(spec):
+    """DB-TRIAGE: <connection_uri_or_type|host|port|user|pass|db>
+    Automated triage for Postgres, MySQL, Redis, MongoDB, Elasticsearch, MSSQL.
+    """
+    import socket
+    import urllib.parse as _up
+
+    spec = (spec or "").strip()
+    if not spec:
+        return "ERROR: DB-TRIAGE needs 'uri' or 'type|host|port|user|pass|db'"
+
+    db_type = "unknown"
+    host = ""
+    port = 0
+    user = ""
+    password = ""
+    database = ""
+
+    if "://" in spec:
+        u = _up.urlparse(spec)
+        scheme = u.scheme.lower()
+        if "postgres" in scheme:
+            db_type = "postgres"
+            port = u.port or 5432
+        elif "mysql" in scheme:
+            db_type = "mysql"
+            port = u.port or 3306
+        elif "redis" in scheme:
+            db_type = "redis"
+            port = u.port or 6379
+        elif "mongo" in scheme:
+            db_type = "mongodb"
+            port = u.port or 27017
+        elif "elastic" in scheme or u.port == 9200 or ":9200" in spec:
+            db_type = "elasticsearch"
+            port = u.port or 9200
+        else:
+            db_type = scheme
+            port = u.port or 0
+        host = u.hostname or "127.0.0.1"
+        user = u.username or ""
+        password = u.password or ""
+        database = u.path.lstrip("/")
+    else:
+        parts = [p.strip() for p in spec.split("|")]
+        db_type = parts[0].lower()
+        host = parts[1] if len(parts) > 1 else "127.0.0.1"
+        default_ports = {"postgres": 5432, "mysql": 3306, "redis": 6379, "mongodb": 27017, "mssql": 1433, "elasticsearch": 9200}
+        port = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else default_ports.get(db_type, 0)
+        user = parts[3] if len(parts) > 3 else ""
+        password = parts[4] if len(parts) > 4 else ""
+        database = parts[5] if len(parts) > 5 else ""
+
+    lines = [f"[DB-TRIAGE] Target: {db_type.upper()} on {host}:{port} (db: {database or 'default'})"]
+
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(5.0)
+        sock.connect((host, port))
+    except Exception as e:
+        return f"[DB-TRIAGE] Port {host}:{port} unreachable: {e}"
+
+    success = False
+    details = ""
+
+    if db_type == "redis":
+        try:
+            if password:
+                sock.sendall(f"AUTH {password}\r\n".encode())
+                auth_resp = sock.recv(1024).decode(errors="ignore")
+                if "+OK" in auth_resp:
+                    success = True
+            sock.sendall(b"INFO\r\n")
+            info = sock.recv(4096).decode(errors="ignore")
+            if "redis_version" in info:
+                success = True
+                ver = re.search(r"redis_version:([^\r\n]+)", info)
+                ver_str = ver.group(1) if ver else "unknown"
+                sock.sendall(b"DBSIZE\r\n")
+                dbsize = sock.recv(256).decode(errors="ignore")
+                details = f"Redis v{ver_str} accessible! Response: {dbsize.strip()}"
+            elif "NOAUTH" in info:
+                details = "Redis reachable but requires authentication"
+        except Exception as e:
+            details = f"Redis probe error: {e}"
+        finally:
+            sock.close()
+
+    elif db_type == "elasticsearch":
+        sock.close()
+        try:
+            r = http_probe("GET", f"http://{host}:{port}/_cat/indices?v", timeout=10)
+            if r["code"] == "200" and ("index" in r["body"] or "docs.count" in r["body"]):
+                success = True
+                details = f"Elasticsearch open unauth cluster!\nIndices:\n{r['body'][:1500]}"
+            else:
+                r2 = http_probe("GET", f"http://{host}:{port}/", timeout=10)
+                details = f"Elasticsearch response: {r2['code']} - {r2['body'][:300]}"
+                if r2["code"] == "200" and "cluster_name" in r2["body"]:
+                    success = True
+        except Exception as e:
+            details = f"Elasticsearch query failed: {e}"
+
+    elif db_type in ("postgres", "postgresql"):
+        sock.close()
+        p_auth = f"PGPASSWORD='{password}' " if password else ""
+        p_user = f"-U '{user}'" if user else ""
+        p_db = f"-d '{database}'" if database else ""
+        cmd = f"{p_auth}psql -h '{host}' -p {port} {p_user} {p_db} -c '\\l' -c '\\dt' -w"
+        res = _run_shell(cmd, timeout=15)
+        if "List of databases" in res or "List of relations" in res:
+            success = True
+            details = f"PostgreSQL authenticated successfully:\n{res[:1500]}"
+        elif "password authentication failed" in res:
+            details = "PostgreSQL reachable: password authentication failed"
+        else:
+            details = f"psql probe output:\n{res[:500]}"
+
+    elif db_type == "mysql":
+        sock.close()
+        m_user = f"-u'{user}'" if user else "-uroot"
+        m_pass = f"-p'{password}'" if password else ""
+        m_db = database if database else ""
+        cmd = f"mysql -h '{host}' -P {port} {m_user} {m_pass} {m_db} -e 'SHOW DATABASES; SHOW TABLES;' --connect-timeout=5"
+        res = _run_shell(cmd, timeout=15)
+        if "Database" in res or "Tables_in_" in res:
+            success = True
+            details = f"MySQL authenticated successfully:\n{res[:1500]}"
+        elif "Access denied" in res:
+            details = "MySQL reachable: Access denied for given credentials"
+        else:
+            details = f"mysql probe output:\n{res[:500]}"
+
+    elif db_type == "mongodb":
+        sock.close()
+        u_str = f"mongodb://{user}:{password}@{host}:{port}/{database}" if user else f"mongodb://{host}:{port}"
+        cmd = f"mongosh '{u_str}' --eval 'db.adminCommand({{listDatabases: 1}})' --quiet"
+        res = _run_shell(cmd, timeout=15)
+        if "databases" in res or "totalSize" in res:
+            success = True
+            details = f"MongoDB authenticated successfully:\n{res[:1500]}"
+        else:
+            details = f"MongoDB probe output:\n{res[:500]}"
+
+    elif db_type == "mssql":
+        sock.close()
+        from attack import pivot as _pvt
+        res = _pvt.mssql_exec(host, user, password, "SELECT @@version; SELECT name FROM master.dbo.sysdatabases;", port=port, database=database or "master")
+        out = res.get("out", "")
+        if "Microsoft SQL Server" in out or "master" in out:
+            success = True
+            details = f"MSSQL authenticated successfully:\n{out[:1500]}"
+        else:
+            details = f"MSSQL probe output:\n{out[:500]}"
+    else:
+        sock.close()
+        details = f"Port open on {host}:{port} for {db_type}. Generic socket connection established."
+
+    lines.append(details)
+
+    if success:
+        f_entry = {
+            "sev": "critical" if not password or "admin" in user.lower() else "high",
+            "title": f"Database Access: {db_type.upper()} on {host}:{port}",
+            "evidence": details[:2500],
+        }
+        STATE.setdefault("findings", []).append(f_entry)
+        _state.save(RUN_DIR, STATE)
+        lines.append(f"[!] Logged {f_entry['sev'].upper()} finding for database access.")
+
+    return "\n".join(lines)
 
 
 def do_status(_arg=""):
@@ -2973,6 +3207,8 @@ DISPATCH = {
     "PROXY-REFRESH": do_proxy_refresh,
     "PROXY-CLEAR": do_proxy_clear,
     "AUTH": do_auth,
+    "TOOLFIX": do_toolfix,
+    "DB-TRIAGE": do_db_triage,
     "GOAL": do_goal,
     "REPLAN": do_replan,
 }
@@ -3362,6 +3598,14 @@ def dispatch(kind, payload):
         pass
     try:
         _record_dispatch(kind, payload, result)
+        if RUN_DIR and STATE:
+            _state.log_turn(RUN_DIR, {
+                "turn": STATE.get("turn", 0),
+                "kind": kind,
+                "payload": payload[:1000],
+                "result": str(result)[:2000],
+                "ts": datetime.now().isoformat(),
+            })
     except Exception:
         pass
     # update beliefs from directive outcomes
@@ -3410,7 +3654,8 @@ DIRECTIVES:
   EXPLOIT: <tool>|<target>|<args>
   LOOT: <kind>|<value>
   CRACK: <hash>|auto
-  PIVOT: <target>|<creds_ref>
+  PIVOT: socks|<host:port> | smb|<host>|<u:p> | winrm|<host>|<u:p> | ssh|<host>|<u:p> | mssql|<host>|<u:p>
+  DB-TRIAGE: <uri or type|host|port|user|pass|db>  # auto-triage postgres/mysql/redis/mongo/elastic/mssql
   STATUS:
   CHAIN: <from>|<to>[|note]
   WAF: <url>
@@ -3669,8 +3914,8 @@ DIRECTIVES you can emit:
   EXPLOIT: <tool>|<url_or_target>|<extra_args>
   SHELL: <kind>|<lhost>|<lport>[|encode]
   LOOT: <kind>|<value>
-  CRACK: <hash>|auto
-  PIVOT: <target>|<creds_ref>
+  PIVOT: socks|<host:port> | smb|<host>|<u:p> | winrm|<host>|<u:p> | ssh|<host>|<u:p> | mssql|<host>|<u:p>
+  DB-TRIAGE: <uri or type|host|port|user|pass|db>
   CHAIN: <from>|<to>|<note>
   OOB: <method>|<url>|<param>|<payload>
   MUTATE: <payload>|<context>
@@ -3802,35 +4047,50 @@ def is_refusal(t):
     return bool(REFUSAL_PAT.search(t)) and not parse(t)
 
 
-def generate(history):
+def generate(history, max_retries=3):
     client, model = current_client()
-    spinner = Spinner("thinking...", "yellow").__enter__()
-    first = True
-    full = ""
-    try:
+    # Auto-save scan state and summary before calling LLM so history is never lost
+    if RUN_DIR and STATE:
         try:
-            stream = client.chat.completions.create(
-                model=model, messages=history, stream=True, temperature=0.1)
-        except Exception as e:
-            spinner.__exit__(None, None, None)
-            print(f"{C['red']}[llm err] {e}{C['rst']}")
-            raise
-        t0 = time.time()
-        for chunk in stream:
-            delta = chunk.choices[0].delta.content or ""
-            if not delta:
-                continue
+            _state.save(RUN_DIR, STATE)
+            _state.write_summary(RUN_DIR, STATE)
+        except Exception:
+            pass
+
+    for attempt in range(1, max_retries + 1):
+        spinner = Spinner(f"thinking... (attempt {attempt}/{max_retries})" if attempt > 1 else "thinking...", "yellow").__enter__()
+        first = True
+        full = ""
+        try:
+            try:
+                stream = client.chat.completions.create(
+                    model=model, messages=history, stream=True, temperature=0.1)
+            except Exception as e:
+                spinner.__exit__(None, None, None)
+                print(f"\n{C['red']}[llm err attempt {attempt}/{max_retries}] {e}{C['rst']}")
+                if attempt < max_retries:
+                    backoff = attempt * 3.0
+                    print(f"  {C['yellow']}[re-trying in {backoff:.1f}s — retaining model {model}]{C['rst']}")
+                    time.sleep(backoff)
+                    continue
+                else:
+                    raise
+            t0 = time.time()
+            for chunk in stream:
+                delta = chunk.choices[0].delta.content or ""
+                if not delta:
+                    continue
+                if first:
+                    spinner.__exit__(None, None, None)
+                    print(f"  {C['cyan']}[agent]{C['rst']} {C['gray']}(+{time.time() - t0:.1f}s){C['rst']} ", end="", flush=True)
+                    first = False
+                print(delta, end="", flush=True)
+                full += delta
+            print()
+            return full
+        finally:
             if first:
                 spinner.__exit__(None, None, None)
-                print(f"  {C['cyan']}[agent]{C['rst']} {C['gray']}(+{time.time() - t0:.1f}s){C['rst']} ", end="", flush=True)
-                first = False
-            print(delta, end="", flush=True)
-            full += delta
-        print()
-        return full
-    finally:
-        if first:
-            spinner.__exit__(None, None, None)
 
 
 def summarize_history(history, client, model):
