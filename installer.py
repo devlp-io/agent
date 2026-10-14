@@ -48,6 +48,8 @@ def platform():
         return "termux"
     if sys.platform == "darwin":
         return "macos"
+    if sys.platform == "win32":
+        return "windows"
     if os.path.exists("/etc/debian_version"):
         return "ubuntu"
     if os.path.exists("/etc/redhat-release"):
@@ -110,6 +112,7 @@ PKG_MGR = {
     "ubuntu":  "sudo apt",
     "macos":   "brew",
     "redhat":  "sudo dnf",
+    "windows": "winget",
     "linux":   "sudo apt",
 }.get(PLAT, "apt")
 

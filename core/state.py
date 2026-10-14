@@ -85,7 +85,7 @@ def append_inbox(run_dir, kind: str, text: str = "", **extra):
     """Append a line to inbox.jsonl. Called by dashboard / external tools."""
     p, _ = _inbox_paths(run_dir)
     p.parent.mkdir(parents=True, exist_ok=True)
-    rec = {"ts": _time.time() if '_time' in globals() else 0.0,
+    rec = {"ts": time.time(),
            "kind": kind, "text": text}
     rec.update(extra)
     with open(p, "a") as f:

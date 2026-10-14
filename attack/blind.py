@@ -151,18 +151,25 @@ class LocalCallback:
         self.callbacks = []
 
     def start(self):
-        with socketserver.TCPServer((self.host, self.port), _CallbackHandler) as httpd:
-            httpd.callbacks = self.callbacks
-            self.httpd = httpd
-            self.port = httpd.server_address[1]
-            self.thread = threading.Thread(target=httpd.serve_forever, daemon=True)
-            self.thread.start()
+        httpd = socketserver.TCPServer((self.host, self.port), _CallbackHandler)
+        httpd.callbacks = self.callbacks
+        self.httpd = httpd
+        self.port = httpd.server_address[1]
+        self.thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        self.thread.start()
         return self.port
 
     def stop(self):
         if self.httpd:
-            self.httpd.shutdown()
-            self.httpd.server_close()
+            try:
+                self.httpd.shutdown()
+            except Exception:
+                pass
+            try:
+                self.httpd.server_close()
+            except Exception:
+                pass
+            self.httpd = None
 
     def url_for(self, host="localhost"):
         return f"http://{host}:{self.port}"
