@@ -527,7 +527,7 @@ def parse(msg):
 
 def http_probe(method, url, params=None, timeout=15, headers=None,
                as_json_body=False, data_binary=None):
-    h = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) Ag/2.0"}
+    h = _chttp.get_random_browser_headers()
     if headers:
         h.update(headers)
     kw = {"timeout": timeout, "headers": h}
@@ -808,6 +808,13 @@ def _run_shell(cmd, timeout=None, _proxy_retry=0, _proxy_exclude=None):
         "bufsize": 1,
         "env": env,
     }
+    if sys.platform != "win32":
+        shell_exec = os.environ.get("SHELL") or shutil.which("bash") or shutil.which("sh")
+        if not shell_exec and os.path.exists("/data/data/com.termux/files/usr/bin/sh"):
+            shell_exec = "/data/data/com.termux/files/usr/bin/sh"
+        if shell_exec:
+            popen_kwargs["executable"] = shell_exec
+
     if hasattr(os, "setsid"):
         popen_kwargs["preexec_fn"] = os.setsid
     elif sys.platform == "win32" and hasattr(subprocess, "CREATE_NEW_PROCESS_GROUP"):
@@ -1633,6 +1640,8 @@ def do_probe(spec):
         ("x-forwarded-localhost", {"X-Forwarded-For": "127.0.0.1", "X-Real-IP": "127.0.0.1"}),
         ("x-original-url", {"X-Original-URL": "/admin"}),
         ("x-rewrite-url", {"X-Rewrite-URL": "/admin"}),
+        ("x-custom-ip-auth", {"X-Custom-IP-Authorization": "127.0.0.1", "X-Originating-IP": "127.0.0.1"}),
+        ("x-method-override", {"X-HTTP-Method-Override": "GET"}),
     ]
     results = []
     for name, hdr in variants:
@@ -1909,6 +1918,43 @@ def do_apimap(spec):
     return f"no openapi at {base}"
 
 
+def _normalize_urls(urls):
+    """Normalize and declutter URLs. Uses uro if installed, else Python heuristic."""
+    if not urls:
+        return []
+    import urllib.parse as _up
+    uro_bin = shutil.which("uro")
+    if uro_bin:
+        try:
+            inp = "\n".join(urls)
+            p = subprocess.run([uro_bin], input=inp, text=True, capture_output=True, timeout=15)
+            if p.returncode == 0 and p.stdout:
+                cleaned = [line.strip() for line in p.stdout.splitlines() if line.strip()]
+                if cleaned:
+                    return cleaned
+        except Exception:
+            pass
+
+    seen_params = set()
+    cleaned = []
+    STATIC_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".svg", ".css", ".woff", ".woff2", ".ttf", ".eot", ".ico", ".webp"}
+    for u in urls:
+        try:
+            parsed = _up.urlparse(u)
+            path = parsed.path.lower()
+            if any(path.endswith(ext) for ext in STATIC_EXTS):
+                continue
+            qs = _up.parse_qs(parsed.query, keep_blank_values=True)
+            param_sig = (parsed.netloc, parsed.path, tuple(sorted(qs.keys())))
+            if param_sig in seen_params:
+                continue
+            seen_params.add(param_sig)
+            cleaned.append(u)
+        except Exception:
+            cleaned.append(u)
+    return cleaned or list(urls)
+
+
 def do_harvest(path):
     p = pathlib.Path(path)
     if not p.is_absolute():
@@ -1928,6 +1974,8 @@ def do_harvest(path):
     for kind, pat in pats.items():
         vals = sorted(set(re.findall(pat, blob)))
         if vals:
+            if kind == "urls":
+                vals = _normalize_urls(vals)
             (out_dir / f"{p.stem}_{kind}.txt").write_text("\n".join(vals))
             summary[kind] = len(vals)
     return f"HARVEST {p.name}: {summary}"
@@ -3133,6 +3181,14 @@ def _update_beliefs(kind, payload, result):
             ("denied", "failed", "error", "refused")
         )
         _beliefs.from_command(tgt, cmd, out, ok)
+    elif kind == "WAF":
+        out = str(result or "")
+        if any(w in out.lower() for w in ("detected", "waf", "blocked", "challenge")):
+            _beliefs.from_explicit(tgt, "waf_gate", payload, 0.9, out[:200])
+    elif kind == "AUTH":
+        out = str(result or "")
+        if any(a in out.lower() for a in ("401", "403", "unauthorized", "forbidden")):
+            _beliefs.from_explicit(tgt, "auth_gate", payload, 0.85, out[:200])
 
 
 # ── probe deduplication ───────────────────────────────────────────

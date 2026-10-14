@@ -38,6 +38,8 @@ TOOLS = {
     "cdncheck":    {"check": "command -v cdncheck",    "install": "go install -v github.com/projectdiscovery/cdncheck/cmd/cdncheck@latest", "category": "recon", "desc": "detect CDN / WAF per host", "url": "https://github.com/projectdiscovery/cdncheck"},
     "httpx":       {"check": "command -v httpx",       "install": "go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest", "category": "recon", "desc": "http probe + fingerprint", "url": "https://github.com/projectdiscovery/httpx"},
     "tlsx":        {"check": "command -v tlsx",        "install": "go install -v github.com/projectdiscovery/tlsx/cmd/tlsx@latest", "category": "recon", "desc": "TLS fingerprint / SANs", "url": "https://github.com/projectdiscovery/tlsx"},
+    "asnmap":      {"check": "command -v asnmap",      "install": "go install -v github.com/projectdiscovery/asnmap/cmd/asnmap@latest", "category": "recon", "desc": "ASN to CIDR / IP range mapping", "url": "https://github.com/projectdiscovery/asnmap"},
+    "subzy":       {"check": "command -v subzy",       "install": "go install -v github.com/pentest-io/subzy@latest", "category": "recon", "desc": "subdomain takeover verifier", "url": "https://github.com/pentest-io/subzy"},
     "naabu":       {"check": "command -v naabu",       "install": "go install -v github.com/projectdiscovery/naabu/v2/cmd/naabu@latest", "category": "recon", "desc": "fast port scanner", "url": "https://github.com/projectdiscovery/naabu"},
     "gau":         {"check": "command -v gau",         "install": "go install -v github.com/lc/gau/v2/cmd/gau@latest", "category": "recon", "desc": "getallurls from wayback/cc/otx", "url": "https://github.com/lc/gau"},
     "gauplus":     {"check": "command -v gauplus",     "install": "go install -v github.com/bp0lr/gauplus@latest", "category": "recon", "desc": "gau with filters", "url": "https://github.com/bp0lr/gauplus"},
@@ -54,6 +56,8 @@ TOOLS = {
     "qsreplace":   {"check": "command -v qsreplace",   "install": "go install -v github.com/tomnomnom/qsreplace@latest", "category": "recon", "desc": "query string replacement", "url": "https://github.com/tomnomnom/qsreplace"},
     "anew":        {"check": "command -v anew",        "install": "go install -v github.com/tomnomnom/anew@latest", "category": "util", "desc": "dedupe append", "url": "https://github.com/tomnomnom/anew"},
     "gf":          {"check": "command -v gf",          "install": "go install -v github.com/tomnomnom/gf@latest", "category": "util", "desc": "grep patterns for URLs", "url": "https://github.com/tomnomnom/gf"},
+    "uro":         {"check": "command -v uro",         "install": "pipx install uro || pip install --user uro", "category": "util", "desc": "declutter and deduplicate URLs", "url": "https://github.com/s0md3v/uro"},
+    "unfurl":      {"check": "command -v unfurl",      "install": "go install -v github.com/tomnomnom/unfurl@latest", "category": "util", "desc": "extract URL components and parameters", "url": "https://github.com/tomnomnom/unfurl"},
 
     # ═══════════════════════════════════════════════════════════════════
     # WEB — exploitation, XSS, SQLi, SSRF, SSTI, CMDi, smuggling
@@ -138,6 +142,7 @@ TOOLS = {
     "enum4linux-ng": {"check": "command -v enum4linux-ng", "install": "pipx install enum4linux-ng || pip install --user enum4linux-ng", "category": "pivot", "desc": "SMB/LDAP enum", "url": "https://github.com/cddmp/enum4linux-ng"},
     "responder":   {"check": "command -v responder",   "install": "apt install -y responder || pip install --user responder", "category": "pivot", "desc": "LLMNR/NBT-NS poisoner", "url": "https://github.com/lgandx/Responder"},
     "mitmproxy":   {"check": "command -v mitmproxy",   "install": "pipx install mitmproxy || pip install --user mitmproxy", "category": "pivot", "desc": "interactive MITM", "url": "https://mitmproxy.org/"},
+    "caido-cli":   {"check": "command -v caido-cli",   "install": "curl -sL https://caido.download/cli/linux/x86_64 -o ~/agent/tools/caido-cli && chmod +x ~/agent/tools/caido-cli", "category": "pivot", "desc": "lightweight headless web security proxy", "url": "https://caido.io"},
     "rpcclient":   {"check": "command -v rpcclient",   "install": "apt install -y samba-common-bin || pkg install -y samba", "category": "pivot", "desc": "RPC enumeration", "url": "https://www.samba.org/"},
 
     # ═══════════════════════════════════════════════════════════════════
