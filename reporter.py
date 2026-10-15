@@ -5,7 +5,7 @@ Reads state.json + scan dir, produces:
   report.html  — styled HTML (severity colour-coded)
   report.pdf   — final PDF (weasyprint → wkhtmltopdf → chromium)
 """
-import os, re, json, subprocess, pathlib, html as html_mod
+import re, json, subprocess, pathlib, html as html_mod
 from datetime import datetime
 
 try:
@@ -73,8 +73,8 @@ def build_report_markdown(run_dir, state):
         sev_counts[(f.get("sev") or "info").lower()] = sev_counts.get((f.get("sev") or "info").lower(), 0) + 1
 
     M = []
-    M.append(f"# Security Assessment Report")
-    M.append(f"")
+    M.append("# Security Assessment Report")
+    M.append("")
     M.append(f"**Target:** `{target}`  ")
     M.append(f"**Generated:** {now}  ")
     M.append(f"**Scan dir:** `{run_dir}`")
@@ -209,9 +209,9 @@ def build_report_markdown(run_dir, state):
         M.append("")
         for s in secrets[:100]:
             M.append(f"- **{s.get('kind','?')}** `{s.get('path','')}`")
-            M.append(f"  ```")
+            M.append("  ```")
             M.append(f"  {s.get('value','')}")
-            M.append(f"  ```")
+            M.append("  ```")
         M.append("")
     else:
         M.append("_No secrets recorded._")
@@ -355,7 +355,6 @@ def build_report_markdown(run_dir, state):
 
     # ── decision timeline
     try:
-        import json as _json
         from core import decisions as _decisions
         _entries = _decisions.read(run_dir, limit=500)
     except Exception:
@@ -392,7 +391,7 @@ def build_report_markdown(run_dir, state):
         M.append("")
         M.append(f"- HTTP transcripts: **{_as.get('http',0)}** (see `archive/http/`)")
         M.append(f"- Full tool outputs: **{_as.get('tool',0)}** (see `archive/tool/`)")
-        M.append(f"- Index: `archive/index.jsonl`")
+        M.append("- Index: `archive/index.jsonl`")
         M.append("")
         idx = pathlib.Path(run_dir) / "archive" / "index.jsonl"
         if idx.exists():
@@ -588,4 +587,3 @@ if __name__ == "__main__":
         print(f"no state.json in {rd}"); sys.exit(1)
     st = json.loads(sp.read_text())
     generate_all(rd, st)
-PYEOF

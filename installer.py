@@ -133,7 +133,14 @@ def _is_data_repo(name):
 
 def _which(binary):
     _ensure_path()
-    return shutil.which(binary) is not None
+    b = str(binary).strip()
+    if shutil.which(b) is not None:
+        return True
+    if PLAT == "windows":
+        for ext in (".exe", ".cmd", ".bat", ".ps1"):
+            if shutil.which(b + ext) is not None:
+                return True
+    return False
 
 
 def _run(cmd, timeout=1800, cwd=None):
@@ -180,8 +187,11 @@ def _try_curated(name):
     entry = TOOLS.get(name.lower())
     if not entry:
         return None
+    if _which(name):
+        return True, f"{name}: already installed"
+
     check = entry.get("check")
-    if check:
+    if check and PLAT != "windows":
         rc, _ = _run(check, timeout=15)
         if rc == 0:
             return True, f"{name}: already installed"
@@ -192,9 +202,14 @@ def _try_curated(name):
     if not install:
         return None
 
+    if PLAT == "windows":
+        install = re.sub(r"\bpython3\b", "python", install)
+        install = re.sub(r"\bpip3\b", "pip", install)
+        if "apt " in install and "pip " in install:
+            install = f"pip install --user {name}"
+
     rc, out = _run(install, timeout=1800)
-    rc2, _ = _run(check or f"command -v {name}", timeout=15)
-    ok = rc2 == 0
+    ok = _which(name)
     _log_install(name, install.split()[0], ok, out[-500:])
     return ok, f"{name}: {'installed OK' if ok else 'install failed'}\n{out[-600:]}"
 
@@ -286,7 +301,7 @@ _GO_TARBALL = "https://go.dev/dl/go1.22.4.linux-amd64.tar.gz"
 def _bootstrap_go():
     """Install Go to ~/.local/go and expose ~/go/bin + ~/.local/go/bin.
     Runs without sudo — writes under $HOME. Idempotent."""
-    import os, shutil, subprocess, urllib.request, tarfile
+    import os, shutil, urllib.request, tarfile
     home = pathlib.Path.home()
     go_root = home / ".local" / "go"
     go_bin  = go_root / "bin" / "go"
@@ -322,42 +337,27 @@ def _ensure_path():
     distro/pip versions. Call before every _which() check."""
     import os
     home = pathlib.Path.home()
-    for p in (home / "agent" / "tools", home / "go" / "bin", home / ".local" / "bin"):
+    dirs = [
+        home / "agent" / "tools",
+        home / "go" / "bin",
+        home / ".local" / "bin",
+    ]
+    if PLAT == "windows":
+        dirs.extend([
+            pathlib.Path(r"C:\Program Files\Git\bin"),
+            pathlib.Path(r"C:\Program Files\Git\usr\bin"),
+            pathlib.Path(r"C:\Program Files\Git\cmd"),
+            pathlib.Path(os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python\Python312")),
+            pathlib.Path(os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python\Python312\Scripts")),
+            home / "AppData" / "Roaming" / "Python" / "Python312" / "Scripts",
+        ])
+    sep = os.pathsep
+    curr_parts = os.environ.get("PATH", "").split(sep)
+    for p in dirs:
         s = str(p)
-        if p.exists() and s not in os.environ.get("PATH", "").split(":"):
-            os.environ["PATH"] = s + ":" + os.environ.get("PATH", "")
-
-
-# ── language inference for NEED_TOOL ───────────────────────────────
-# many tools are distributed in one specific ecosystem; trying pip/npm
-# for a Go binary is the run-1 and run-2 failure. Classify first, then
-# try only the viable managers.
-
-_GO_TOOLS = {
-    "subfinder", "httpx", "nuclei", "katana", "naabu", "dnsx", "tlsx",
-    "gau", "amass", "assetfinder", "waybackurls", "gf", "anew", "ffuf",
-    "gobuster", "dalfox", "gowitness", "gitleaks", "trufflehog", "kr",
-    "chisel", "kerbrute", "shuffledns", "puredns", "gospider", "hakrawler",
-    "interactsh-client", "httprobe", "gron", "notify", "subzy",
-    "jsluice", "cloudlist",
-}
-_PIP_TOOLS = {
-    "sqlmap", "wafw00f", "arjun", "paramspider", "sstimap", "dirsearch",
-    "wfuzz", "impacket", "responder", "pypykatz", "certipy", "coercer",
-    "netexec", "smbmap", "enum4linux-ng", "ssrfmap", "corsy",
-}
-_APT_TOOLS = {
-    "nmap", "masscan", "nikto", "whatweb", "wpscan", "hydra", "hashcat",
-    "john", "smbclient", "sslscan", "redis-cli", "psql", "mongo",
-    "jq", "dig", "whois", "chromium",
-}
-
-def _tool_language(name):
-    n = (name or "").strip().lower()
-    if n in _GO_TOOLS: return "go"
-    if n in _PIP_TOOLS: return "pip"
-    if n in _APT_TOOLS: return "apt"
-    return None
+        if p.exists() and s not in curr_parts:
+            os.environ["PATH"] = s + sep + os.environ.get("PATH", "")
+            curr_parts.insert(0, s)
 
 
 # ── language inference for NEED_TOOL ───────────────────────────────
@@ -555,12 +555,17 @@ def already_installed(names):
 
 def status():
     """Report what's installed from tools_db."""
+    _ensure_path()
     installed = []
     missing = []
     for name, entry in TOOLS.items():
-        check = entry.get("check") or f"command -v {name}"
-        rc, _ = _run(check, timeout=5)
-        (installed if rc == 0 else missing).append(name)
+        if PLAT == "windows":
+            is_inst = _which(name)
+            (installed if is_inst else missing).append(name)
+        else:
+            check = entry.get("check") or f"command -v {name}"
+            rc, _ = _run(check, timeout=5)
+            (installed if rc == 0 else missing).append(name)
     return {
         "platform": PLAT,
         "total_in_db": len(TOOLS),

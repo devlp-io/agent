@@ -4,9 +4,6 @@ core/recorder.py — append-only per-target action log.
 Every command, directive, finding, probe, walk, and successful result the
 agent produces gets appended here. Keyed by target, not by run, so the
 record survives across scans.
-
-The UI-builder agent (uibuilder.py) reads this to know what the target
-actually exposes and what actions are worth exposing in the console.
 """
 import os
 import json
