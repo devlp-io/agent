@@ -169,6 +169,15 @@ somscan
    source ~/.bashrc
    ```
 
+6. **Updating to Latest Version**:
+   Pull upstream improvements, hardened directives, and test updates anytime:
+   ```bash
+   cd ~/agent
+   git pull origin main
+   source venv/bin/activate
+   pip install -r requirements.txt --upgrade
+   ```
+
 ---
 
 ### macOS (Apple Silicon & Intel)
@@ -195,6 +204,14 @@ somscan
    # Set API key in .env
    chmod +x somscan
    ./somscan
+   ```
+
+4. **Updating to Latest Version**:
+   ```bash
+   cd ~/agent
+   git pull origin main
+   source venv/bin/activate
+   pip install -r requirements.txt --upgrade
    ```
 
 ---
@@ -235,6 +252,14 @@ SOM-SCAN runs natively on Windows 10 and Windows 11 with full color rendering an
    python somscan.py
    ```
 
+6. **Updating to Latest Version**:
+   Open PowerShell in the installation directory:
+   ```powershell
+   cd C:\agent
+   git pull origin main
+   python -m pip install -r requirements.txt --upgrade
+   ```
+
 ---
 
 ### Windows (WSL2 Ubuntu)
@@ -252,6 +277,12 @@ For access to native Linux security utilities (`naabu`, `masscan`, `nmap` raw so
    bash bootstrap.sh
    source ~/.bashrc
    ./somscan
+   ```
+3. **Updating to Latest Version**:
+   ```bash
+   cd ~/agent
+   git pull origin main
+   pip install -r requirements.txt --upgrade
    ```
 
 ---
@@ -285,10 +316,34 @@ SOM-SCAN supports mobile security testing directly within [Termux](https://termu
    python somscan.py
    ```
 
+5. **Updating to Latest Version**:
+   ```bash
+   cd ~/agent
+   git pull origin main
+   pip install -r requirements.txt --upgrade
+   ```
+
 > **Termux Tips**:
 > - Use the Termux extra-keys bar for `ESC`, `CTRL`, and arrow keys.
 > - Soft keyboard opens automatically when tapping the input field.
 > - To prevent Android from sleeping during background scans: acquire a wake-lock via Termux notification or run `termux-wake-lock`.
+
+---
+
+## Updating the Agent (All Platforms)
+
+Whenever new features, attack methodologies, UI enhancements, or supervisor updates are pushed upstream, operators can sync their local installation with a single command:
+
+| Platform | One-Liner Update Command |
+|---|---|
+| **Linux (Debian / Ubuntu / Kali / Arch)** | `cd ~/agent && git pull origin main && source venv/bin/activate && pip install -r requirements.txt --upgrade` |
+| **macOS (Apple Silicon & Intel)** | `cd ~/agent && git pull origin main && source venv/bin/activate && pip install -r requirements.txt --upgrade` |
+| **Windows (PowerShell)** | `cd C:\agent; git pull origin main; python -m pip install -r requirements.txt --upgrade` |
+| **Windows (WSL2 Ubuntu)** | `cd ~/agent && git pull origin main && pip install -r requirements.txt --upgrade` |
+| **Android (Termux)** | `cd ~/agent && git pull origin main && pip install -r requirements.txt --upgrade` |
+
+> [!TIP]
+> Your `.env` credentials, custom methodologies, and local scan artifacts (`~/scans/` or `C:\Users\<user>\scans\`) are never overwritten during updates because they are excluded in `.gitignore`.
 
 ---
 
