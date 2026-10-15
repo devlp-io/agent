@@ -219,6 +219,13 @@ Screen {
     padding: 0;
 }
 
+.assistant-sub-box {
+    width: 100%;
+    height: auto;
+    margin: 0;
+    padding: 0;
+}
+
 .assistant-marker {
     width: 100%;
     color: #38bdf8;
@@ -235,11 +242,20 @@ Screen {
     text-wrap: wrap;
 }
 
+.assistant-sub-text {
+    width: 100%;
+    height: auto;
+    color: #e2e8f0;
+    padding-left: 2;
+    margin: 0;
+    text-wrap: wrap;
+}
+
 /* Thinking Indicator */
 .thinking-box {
     width: 100%;
     height: auto;
-    margin: 1 0 0 0;
+    margin: 0 0 0 0;
     padding-left: 2;
 }
 
@@ -254,7 +270,7 @@ Screen {
     height: auto;
     background: #080c16;
     border: round #ec4899;
-    margin: 1 0 0 0;
+    margin: 0 0 1 0;
     padding: 0 1;
 }
 
@@ -288,13 +304,13 @@ Screen {
     text-wrap: wrap;
 }
 
-/* Code Bubble — Plain Code Container with Cyan & Pink Palette */
+/* Code Bubble — Compact Container with Cyan & Pink Palette */
 .code-bubble {
     width: 100%;
     height: auto;
-    background: #070913;
-    border: round #38bdf8;
-    margin: 1 0 0 0;
+    background: #060911;
+    border: round #0284c7;
+    margin: 0 0 1 0;
     padding: 0 1;
 }
 
@@ -324,7 +340,7 @@ Screen {
     height: auto;
     background: #140d1f;
     border: solid #a855f7;
-    margin: 1 0 0 0;
+    margin: 0 0 1 0;
     padding: 0 1;
 }
 
@@ -345,7 +361,7 @@ Screen {
 .task-status-box {
     width: 100%;
     height: auto;
-    margin: 1 0 0 0;
+    margin: 0 0 1 0;
     padding: 0 1;
 }
 
@@ -920,6 +936,7 @@ class SomScanApp(App):
         self._auto_scroll = True
         self._conversation_history: List[str] = list(self._preserved_history)
         self._explicit_quit = False
+        self._last_emitter: Optional[str] = None
 
         # Animated Spinner state
         self._spinner_idx = 0
@@ -1260,6 +1277,8 @@ class SomScanApp(App):
         if scroll is None or not text.strip():
             return
 
+        is_continuation = (self._last_emitter == "assistant")
+
         # 1. Parse fenced code blocks ```lang ... ```
         if "```" in text:
             parts = re.split(r"(```[a-zA-Z0-9_\-]*\n.*?```)", text, flags=re.DOTALL)
@@ -1274,13 +1293,21 @@ class SomScanApp(App):
                     bubble = CodeBubble(code=code_body, language=lang)
                     self._code_bubbles.append(bubble)
                     scroll.mount(bubble)
+                    self._last_emitter = "code_bubble"
                 else:
-                    a_box = Vertical(
-                        Label("[*] SOM-SCAN", classes="assistant-marker", markup=False),
-                        SafeMarkdown(p, classes="assistant-text"),
-                        classes="assistant-box",
-                    )
+                    if self._last_emitter == "assistant":
+                        a_box = Vertical(
+                            SafeMarkdown(p, classes="assistant-sub-text"),
+                            classes="assistant-sub-box",
+                        )
+                    else:
+                        a_box = Vertical(
+                            Label("[*] SOM-SCAN", classes="assistant-marker", markup=False),
+                            SafeMarkdown(p, classes="assistant-text"),
+                            classes="assistant-box",
+                        )
                     scroll.mount(a_box)
+                    self._last_emitter = "assistant"
             return
 
         # 2. Plain code detection (multi-line scripts without markdown fences)
@@ -1294,15 +1321,23 @@ class SomScanApp(App):
             bubble = CodeBubble(code=text, language="code", title="◈ PLAIN CODE BUBBLE")
             self._code_bubbles.append(bubble)
             scroll.mount(bubble)
+            self._last_emitter = "code_bubble"
             return
 
         # 3. Standard narrative message
-        a_box = Vertical(
-            Label("[*] SOM-SCAN", classes="assistant-marker", markup=False),
-            SafeMarkdown(text, classes="assistant-text"),
-            classes="assistant-box",
-        )
+        if is_continuation:
+            a_box = Vertical(
+                SafeMarkdown(text, classes="assistant-sub-text"),
+                classes="assistant-sub-box",
+            )
+        else:
+            a_box = Vertical(
+                Label("[*] SOM-SCAN", classes="assistant-marker", markup=False),
+                SafeMarkdown(text, classes="assistant-text"),
+                classes="assistant-box",
+            )
         scroll.mount(a_box)
+        self._last_emitter = "assistant"
 
 
     # ────────────────────────────────────────────────────────────────
@@ -1336,6 +1371,7 @@ class SomScanApp(App):
             scroll = None
 
         if isinstance(event, UserMessageEvent):
+            self._last_emitter = "user"
             u_box = Vertical(
                 Label("> You", classes="user-marker", markup=False),
                 Static(event.text, classes="user-text", markup=False),
@@ -1406,8 +1442,8 @@ class SomScanApp(App):
                 self._mount_formatted_assistant_message(scroll, clean_text)
                 self._conversation_history.append(f"[*] SOM-SCAN\n{clean_text}")
 
-
         elif isinstance(event, CommandStartEvent):
+            self._last_emitter = "command"
             self._handle_event(ThinkingStopEvent())
             card = CommandCard(event.command)
             self._current_command_card = card
@@ -1424,6 +1460,7 @@ class SomScanApp(App):
                 self._current_command_card = None
 
         elif isinstance(event, FindingEvent):
+            self._last_emitter = "finding"
             sev_prefix = f"[{event.severity.upper()} FINDING]"
             title_text = f"{sev_prefix} {event.title or 'Finding'}"
             children = [Label(title_text, classes="finding-title", markup=False)]
@@ -1437,6 +1474,7 @@ class SomScanApp(App):
             self._conversation_history.append(finding_log)
 
         elif isinstance(event, TaskCompleteEvent):
+            self._last_emitter = "system"
             self._handle_event(ThinkingStopEvent())
             clean_status = event.status or "Task completed"
             while clean_status.startswith("✓") or clean_status.startswith("✗") or clean_status.startswith("●"):
@@ -1457,6 +1495,7 @@ class SomScanApp(App):
                 pass
 
         elif isinstance(event, TaskCancelledEvent):
+            self._last_emitter = "system"
             self._handle_event(ThinkingStopEvent())
             cancel_text = f"⚠ {event.message or 'Task cancelled'}"
             cancel_lbl = Label(cancel_text, classes="task-cancelled", markup=False)
@@ -1470,6 +1509,7 @@ class SomScanApp(App):
                 pass
 
         elif isinstance(event, ErrorEvent):
+            self._last_emitter = "system"
             self._handle_event(ThinkingStopEvent())
             err_text = f"✗ Error: {event.error or 'Unknown error'}"
             err_lbl = Label(err_text, classes="task-failed", markup=False)

@@ -435,6 +435,13 @@ python dashboard.py --port 8787
 ```
 Open `http://127.0.0.1:8787` in any browser to inspect live log streams, inspect finding tables, interact with the HTTP repeater, or dispatch operator directives.
 
+### 6. Local SQLite Session Database & Memory Recall
+SOM-SCAN automatically maintains an embedded SQLite database (`~/.somscan/sessions.db`) persisting every chat turn, finding, and scan across CLI sessions:
+- `/sessions` or `/history` — List saved sessions with targets, message counts, and timestamps.
+- `/load <session-id>` — Switch active session and restore full memory context into conversation history.
+- `/search <query>` — Full-text search across sessions, findings, targets, and logs.
+- Natural language continuation: say `"continue"`, `"resume"`, or ask questions about findings, and the agent recalls target state first-hand.
+
 ---
 
 ## Security Tooling & Auto-Installer
@@ -476,7 +483,7 @@ SOM-SCAN includes an automated unit and integration test suite covering startup,
 python -m unittest test_somscan.py -v
 ```
 
-All 37 test cases validate in under 30 seconds with zero external dependencies.
+All 39 test cases validate in under 30 seconds with zero external dependencies.
 
 ---
 

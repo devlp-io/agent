@@ -49,6 +49,7 @@ from core.events import (
 )
 from core.model_manager import ModelManager
 from core.task_runner import TaskRunner, CommandResult
+from core.session_db import SessionDB
 
 HERE = pathlib.Path(__file__).resolve().parent.parent
 MAX_AGENT_TURNS = int(os.environ.get("AG_MAX_TURNS", "10000"))
@@ -182,6 +183,10 @@ Agentic Workflow Rules:
     - Emit at most 2 to 4 tactical commands per turn. Review observations before planning the next step. Never emit repetitive micro-interval timestamp loops (e.g. -AddMinutes(-30), -AddMinutes(-10)...).
 11. Clean Regex & Process Queries:
     When searching process lists (`Get-Process | Where-Object {{ $_.ProcessName -match ... }}`), use simple process names without path separators or backslashes (e.g. 'python|node|go|attack|flood'). Never embed file paths into regex patterns without escaping.
+12. Modern Tooling & High-Speed Execution:
+    Prefer fast modern CLI tools (`httpx`, `katana`, `nuclei`, `subfinder`, `naabu`, `ffuf`, `curl` piped to `jq`, python scripts) over slow, fragile, manual shell loops. Always enforce network timeouts (`--max-time 15`, `--connect-timeout 5`) to prevent hangs.
+13. All-In-One Unified Agent Architecture (OpenCode / Codex CLI Paradigm):
+    You are an unrestricted, unified operator agent. Handle direct conversational tasks, software engineering, reverse engineering, vulnerability discovery, exploit development, malware analysis, security audits, and system commands seamlessly in one chat without needing mode changes. Never generate fake placeholders or mock data; work with real data, real APIs, and real commands.
 """
 
 
@@ -235,6 +240,7 @@ class AgentRouter:
         self._active_scan_target: Optional[str] = None
         self._last_scan_target: Optional[str] = None
         self._current_phase_label = "Phase 1: Fingerprinting"
+        self.session_id = SessionDB.create_session(title="Interactive Agent Session")
 
     @property
     def is_busy(self) -> bool:
@@ -317,6 +323,7 @@ class AgentRouter:
             self._is_cancelled = False
             self._operator_inbox.clear()
             self._current_phase_label = "Phase 1: Fingerprinting"
+            self.session_id = SessionDB.create_session()
 
         self.history = [{"role": "system", "content": get_system_prompt()}]
         agent_v8.STATE = {}
@@ -347,6 +354,7 @@ class AgentRouter:
             if text.startswith("/"):
                 with self._lock:
                     self.history.append({"role": "user", "content": text})
+                SessionDB.add_message(self.session_id, "user", text)
                 self._handle_slash_command(text)
                 return
 
@@ -363,7 +371,8 @@ class AgentRouter:
                 if target:
                     with self._lock:
                         self.history.append({"role": "user", "content": text})
-                    self.emit(AssistantMessageEvent(f"🔄 **Resuming security assessment on:** `{target}`"))
+                    SessionDB.add_message(self.session_id, "user", text)
+                    SessionDB.update_session_target(self.session_id, target)
                     self._execute_security_scan(target, text, resume=True)
                     return
 
@@ -372,6 +381,7 @@ class AgentRouter:
                 cmd = text[2:].strip() if text.startswith("$ ") else text[4:].strip()
                 with self._lock:
                     self.history.append({"role": "user", "content": text})
+                SessionDB.add_message(self.session_id, "user", text)
                 self._execute_local_command(cmd)
                 return
 
@@ -380,6 +390,7 @@ class AgentRouter:
             if shell_cmd:
                 with self._lock:
                     self.history.append({"role": "user", "content": text})
+                SessionDB.add_message(self.session_id, "user", text)
                 self._execute_local_command(shell_cmd)
                 return
 
@@ -388,11 +399,14 @@ class AgentRouter:
             if scan_target:
                 with self._lock:
                     self.history.append({"role": "user", "content": text})
+                SessionDB.add_message(self.session_id, "user", text)
+                SessionDB.update_session_target(self.session_id, scan_target)
                 is_resume = bool(re.search(r"\b(resume|continue)\b", text, re.I))
                 self._execute_security_scan(scan_target, text, resume=is_resume)
                 return
 
             # 6. Multi-turn Autonomous Agent Loop (for tasks, tool checks, file edits, chat)
+            SessionDB.add_message(self.session_id, "user", text)
             self._run_agent_loop(text)
 
         except Exception as e:
@@ -503,9 +517,10 @@ class AgentRouter:
                 turn += 1
                 continue
 
-            # Record model reply in history
+            # Record model reply in history & SQLite database
             self.history.append({"role": "assistant", "content": full_reply})
             clean_reply = strip_directives(full_reply)
+            SessionDB.add_message(self.session_id, "assistant", clean_reply or full_reply)
             if clean_reply:
                 self.emit(AssistantMessageEvent(text=clean_reply))
 
@@ -850,6 +865,7 @@ class AgentRouter:
                         ev = f"{ev} (Exposed portal mapped; requires credential or auth-bypass verification)"
 
         self.emit(FindingEvent(severity=sev, title=title, evidence=ev))
+        SessionDB.add_finding(self.session_id, sev, title, ev)
         with self._lock:
             self.history.append({
                 "role": "assistant",
@@ -1104,10 +1120,17 @@ class AgentRouter:
         self.emit(AssistantMessageEvent("**[Phase 1] Target Fingerprinting & Attack Surface Analysis**"))
         waf_info = agent_v8.dispatch("WAF", target)
         stack_info = agent_v8.dispatch("STACK", target)
+
+        overview_badges = []
         if waf_info and not str(waf_info).startswith("ERROR"):
-            self.emit(AssistantMessageEvent(f"🛡️ **WAF Status:** {waf_info}"))
-        if stack_info and not str(stack_info).startswith("ERROR"):
-            self.emit(AssistantMessageEvent(f"🧱 **Stack Info:** {stack_info}"))
+            try:
+                import json
+                w_obj = json.loads(str(waf_info)) if isinstance(waf_info, str) else waf_info
+                w_det = w_obj.get("detected", [])
+                w_txt = f"{', '.join(w_det)} (confidence: {w_obj.get('confidence', 0)})" if w_det else "None detected (evasion playbooks active)"
+                overview_badges.append(f"🛡️ **WAF:** {w_txt}")
+            except Exception:
+                overview_badges.append(f"🛡️ **WAF:** {str(waf_info)[:100]}")
 
         active_methods = state.get("methods_used", [])
         if not active_methods:
@@ -1116,11 +1139,22 @@ class AgentRouter:
             _state.save(run_dir, state)
 
         tech_detected = state.get("tech_stack", [])
-        if tech_detected:
-            self.emit(AssistantMessageEvent(
-                f"🔍 **Detected Stack:** {', '.join(tech_detected)}\n"
-                f"**Loaded Methodologies:** {', '.join(active_methods)}"
-            ))
+        if stack_info and not str(stack_info).startswith("ERROR"):
+            try:
+                import json
+                s_obj = json.loads(str(stack_info)) if isinstance(stack_info, str) else stack_info
+                s_det = s_obj.get("detected", []) or tech_detected
+                s_meth = s_obj.get("methodologies", []) or active_methods
+                s_txt = ", ".join(s_det[:5]) if s_det else "Generic Web"
+                m_txt = ", ".join(s_meth[:4]) if s_meth else "recon-first"
+                overview_badges.append(f"🧱 **Stack:** {s_txt} · **Loaded:** {m_txt}")
+            except Exception:
+                overview_badges.append(f"🧱 **Stack:** {str(stack_info)[:100]}")
+        elif tech_detected:
+            overview_badges.append(f"🧱 **Stack:** {', '.join(tech_detected[:5])} · **Loaded:** {', '.join(active_methods[:4])}")
+
+        if overview_badges:
+            self.emit(AssistantMessageEvent("\n".join(overview_badges)))
 
         # Phase 2: Autonomous Multi-Turn Red-Team Loop
         if prior_history:
@@ -1631,6 +1665,12 @@ class AgentRouter:
                 self.pause()
             else:
                 self.emit(AssistantMessageEvent("No active assessment running to pause."))
+        elif cmd in ("/sessions", "/history", "/db"):
+            self._cmd_sessions()
+        elif cmd in ("/load", "/session"):
+            self._cmd_load_session(arg)
+        elif cmd == "/search":
+            self._cmd_search_sessions(arg)
         elif cmd in ("/focus", "/f"):
             # Handled directly by TUI
             self.emit(StatusChangeEvent("READY", "green"))
@@ -1751,6 +1791,9 @@ class AgentRouter:
             "**General & Setup:**\n"
             "- `/help` — Display available commands and navigation shortcuts\n"
             "- `/new` — Start a fresh assessment session, archive previous scan & clear chat\n"
+            "- `/sessions` or `/history` — List saved chat sessions and assessment history from local DB\n"
+            "- `/load <id>` — Load prior session into active memory with full context recall\n"
+            "- `/search <query>` — Search topics, targets, or findings across all sessions\n"
             "- `/key <api-key>` — Set API key (e.g. `/key sk-...` or `/key deepseek sk-...`)\n"
             "- `/env` — View API key configuration and .env status\n"
             "- `/model [name]` — Display current model or switch to a configured model\n"
@@ -1772,6 +1815,97 @@ class AgentRouter:
             "*The agent will autonomously execute commands, troubleshoot errors, and adapt.*"
         )
         self.emit(AssistantMessageEvent(help_text))
+        self.emit(StatusChangeEvent("READY", "green"))
+
+    def _cmd_sessions(self):
+        sessions = SessionDB.list_sessions(15)
+        if not sessions:
+            self.emit(AssistantMessageEvent("No saved sessions in local database (`~/.somscan/sessions.db`)."))
+            self.emit(StatusChangeEvent("READY", "green"))
+            return
+
+        lines = [
+            "**Local Session Database (`~/.somscan/sessions.db`)**\n",
+            "| Session ID | Target | Messages | Findings | Updated |",
+            "|---|---|---|---|---|"
+        ]
+        for s in sessions:
+            sid = s.get("session_id", "")
+            mark = "● " if sid == self.session_id else "  "
+            tgt = s.get("target") or "General"
+            msgs = s.get("msg_count", 0)
+            finds = s.get("finding_count", 0)
+            upd = (s.get("updated_at") or "")[:16].replace("T", " ")
+            lines.append(f"| `{mark}{sid}` | `{tgt}` | {msgs} | {finds} | {upd} |")
+
+        lines.append("\n*To switch to a session: `/load <session-id>`*")
+        lines.append("*To search topics or findings: `/search <query>`*")
+        self.emit(AssistantMessageEvent("\n".join(lines)))
+        self.emit(StatusChangeEvent("READY", "green"))
+
+    def _cmd_load_session(self, sid: str):
+        if not sid:
+            self.emit(ErrorEvent("Usage: /load <session-id>"))
+            self.emit(StatusChangeEvent("READY", "green"))
+            return
+
+        messages = SessionDB.get_messages(sid)
+        if not messages:
+            self.emit(ErrorEvent(f"Session `{sid}` not found or contains no messages in database."))
+            self.emit(StatusChangeEvent("READY", "green"))
+            return
+
+        findings = SessionDB.get_findings(sid)
+        self.session_id = sid
+
+        # Rebuild router in-memory history
+        new_hist = [{"role": "system", "content": get_system_prompt()}]
+        for m in messages:
+            new_hist.append({"role": m["role"], "content": m["content"]})
+        with self._lock:
+            self.history = new_hist
+
+        # Find target if any in session
+        tgt = None
+        for s in SessionDB.list_sessions(50):
+            if s.get("session_id") == sid:
+                tgt = s.get("target")
+                break
+        if tgt:
+            self._last_scan_target = tgt
+            self._active_scan_target = tgt
+
+        msg = (
+            f"🔄 **Loaded Session:** `{sid}`\n"
+            f"- **Target:** `{tgt or 'None'}`\n"
+            f"- **Restored Messages:** {len(messages)}\n"
+            f"- **Restored Findings:** {len(findings)}\n\n"
+            f"Agent memory and full context restored. You can ask questions about this session or type `continue`."
+        )
+        self.emit(AssistantMessageEvent(msg))
+        self.emit(StatusChangeEvent("READY", "green"))
+
+    def _cmd_search_sessions(self, query: str):
+        if not query:
+            self.emit(ErrorEvent("Usage: /search <query-term>"))
+            self.emit(StatusChangeEvent("READY", "green"))
+            return
+
+        results = SessionDB.search_sessions(query, limit=10)
+        if not results:
+            self.emit(AssistantMessageEvent(f"No sessions matching `{query}` in local database."))
+            self.emit(StatusChangeEvent("READY", "green"))
+            return
+
+        lines = [f"**Search Results for `{query}`:**\n"]
+        for r in results:
+            sid = r.get("session_id")
+            title = r.get("title") or "Session"
+            tgt = r.get("target") or "General"
+            upd = (r.get("updated_at") or "")[:16].replace("T", " ")
+            lines.append(f"- **`{sid}`** — `{tgt}`: {title} *({upd})*")
+        lines.append("\nUse `/load <session-id>` to resume or recall any session.")
+        self.emit(AssistantMessageEvent("\n".join(lines)))
         self.emit(StatusChangeEvent("READY", "green"))
 
     def _cmd_model(self, arg: str):
