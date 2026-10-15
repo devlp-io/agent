@@ -671,7 +671,32 @@ class TestSomScan(unittest.TestCase):
             self.assertIn("-Attributes !ReparsePoint", gci_adapted)
 
 
+    def test_39_continuation_intent_and_session_memory(self):
+        """Verify natural continuation detection and active session memory recall."""
+        router = AgentRouter(ModelManager(), TaskRunner())
+
+        # Test continuation patterns
+        self.assertTrue(router._is_continuation_intent("hey continue"))
+        self.assertTrue(router._is_continuation_intent("continue"))
+        self.assertTrue(router._is_continuation_intent("keep going"))
+        self.assertTrue(router._is_continuation_intent("resume"))
+        self.assertTrue(router._is_continuation_intent("what's next"))
+        self.assertFalse(router._is_continuation_intent("hi"))
+        self.assertFalse(router._is_continuation_intent("build a website"))
+
+        # Test target extraction with resume/continue keywords
+        tgt = router._extract_scan_target("resume https://www.biriqstore.com/")
+        self.assertTrue(tgt.startswith("https://www.biriqstore.com"))
+
+        # Test session memory prompt generation when active target is set
+        router._last_scan_target = "https://www.biriqstore.com/"
+        mem_prompt = router.get_session_memory_prompt()
+        self.assertIn("biriqstore.com", mem_prompt)
+        self.assertIn("ACTIVE SESSION ASSESSMENT MEMORY", mem_prompt)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
 

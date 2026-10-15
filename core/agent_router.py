@@ -345,28 +345,54 @@ class AgentRouter:
         try:
             # 1. Slash commands
             if text.startswith("/"):
+                with self._lock:
+                    self.history.append({"role": "user", "content": text})
                 self._handle_slash_command(text)
                 return
 
-            # 2. Explicit shell execution ($ cmd or run cmd)
+            # 2. Continuation intent for active or recent security assessment (e.g. "hey continue", "resume", "keep going")
+            if self._is_continuation_intent(text):
+                target = self._active_scan_target or self._last_scan_target
+                if not target:
+                    try:
+                        valid_runs = find_valid_scan_runs()
+                        if valid_runs:
+                            target = valid_runs[-1].parent.name.replace("_", ".")
+                    except Exception:
+                        pass
+                if target:
+                    with self._lock:
+                        self.history.append({"role": "user", "content": text})
+                    self.emit(AssistantMessageEvent(f"🔄 **Resuming security assessment on:** `{target}`"))
+                    self._execute_security_scan(target, text, resume=True)
+                    return
+
+            # 3. Explicit shell execution ($ cmd or run cmd)
             if text.startswith("$ ") or text.startswith("run "):
                 cmd = text[2:].strip() if text.startswith("$ ") else text[4:].strip()
+                with self._lock:
+                    self.history.append({"role": "user", "content": text})
                 self._execute_local_command(cmd)
                 return
 
-            # 3. Direct single shell queries (dir, ls, git status, whoami, python -V)
+            # 4. Direct single shell queries (dir, ls, git status, whoami, python -V)
             shell_cmd = self._detect_shell_query(text)
             if shell_cmd:
+                with self._lock:
+                    self.history.append({"role": "user", "content": text})
                 self._execute_local_command(shell_cmd)
                 return
 
-            # 4. Red Team Security Assessment / Pentest target detection
+            # 5. Red Team Security Assessment / Pentest target detection
             scan_target = self._extract_scan_target(text)
             if scan_target:
-                self._execute_security_scan(scan_target, text)
+                with self._lock:
+                    self.history.append({"role": "user", "content": text})
+                is_resume = bool(re.search(r"\b(resume|continue)\b", text, re.I))
+                self._execute_security_scan(scan_target, text, resume=is_resume)
                 return
 
-            # 5. Multi-turn Autonomous Agent Loop (for tasks, tool checks, file edits, chat)
+            # 6. Multi-turn Autonomous Agent Loop (for tasks, tool checks, file edits, chat)
             self._run_agent_loop(text)
 
         except Exception as e:
@@ -384,9 +410,10 @@ class AgentRouter:
         Allows the agent to plan, execute directives, inspect output & errors,
         adapt, troubleshoot, and keep going until the task is complete.
         """
-        # Dynamically refresh root system prompt with current persona.md on every new chat/task
+        # Dynamically refresh root system prompt with current persona.md and active session assessment memory
+        session_mem = self.get_session_memory_prompt()
         if self.history and self.history[0].get("role") == "system":
-            self.history[0]["content"] = get_system_prompt()
+            self.history[0]["content"] = get_system_prompt() + (f"\n{session_mem}" if session_mem else "")
 
         self.history.append({"role": "user", "content": initial_user_text})
         has_executed_action = False
@@ -823,6 +850,11 @@ class AgentRouter:
                         ev = f"{ev} (Exposed portal mapped; requires credential or auth-bypass verification)"
 
         self.emit(FindingEvent(severity=sev, title=title, evidence=ev))
+        with self._lock:
+            self.history.append({
+                "role": "assistant",
+                "content": f"🎯 [{sev.upper()} FINDING] {title}: {ev[:200]}"
+            })
 
     def _extract_and_register_endpoints(self, output: str, target: str, state: dict, run_dir: pathlib.Path) -> int:
         """Auto-extract discovered routes, URLs, and pages from tool output and register in state."""
@@ -915,6 +947,64 @@ class AgentRouter:
             self.emit(TaskCompleteEvent(status=f"Process exited with code {res.returncode}", success=False, duration_sec=res.duration))
         self.emit(StatusChangeEvent("READY", "green"))
 
+    def _is_continuation_intent(self, text: str) -> bool:
+        """Detect natural language intent to resume, continue, or advance an active/prior assessment."""
+        t = text.strip().lower()
+        continue_patterns = [
+            r"^(?:hey\s+|yo\s+|ok\s+|please\s+)?(?:continue|resume|proceed|keep\s+going|go\s+on|keep\s+hunting|keep\s+scanning|keep\s+probing|keep\s+attacking)\b",
+            r"^(?:hey\s+)?(?:what(?:'s|\s+is)\s+next|next\s+step|next\s+phase)\b",
+            r"^(?:attack|exploit|pwn)\s+(?:it|the\s+target|now)\b",
+        ]
+        return any(re.search(pat, t) for pat in continue_patterns)
+
+    def get_session_memory_prompt(self) -> str:
+        """Synthesize active session assessment findings, target, and tech stack for full conversational recall."""
+        target = self._active_scan_target or self._last_scan_target
+        if not target:
+            try:
+                valid_runs = find_valid_scan_runs()
+                if valid_runs:
+                    target = valid_runs[-1].parent.name.replace("_", ".")
+            except Exception:
+                pass
+
+        if not target:
+            return ""
+
+        try:
+            valid_runs = find_valid_scan_runs(target)
+            if not valid_runs:
+                return f"\n[ACTIVE SESSION CONTEXT: Most recent target referenced is '{target}']\n"
+
+            run_dir = valid_runs[-1]
+            state = _state.load(run_dir)
+            findings = state.get("findings", [])
+            endpoints = state.get("endpoints", [])
+            tech = state.get("tech_stack", [])
+            waf = state.get("waf", "None/Unknown")
+
+            findings_txt = "\n".join(
+                f"  - [{f.get('sev', 'info').upper()}] {f.get('title', 'Finding')}: {f.get('evidence', '')[:250]}"
+                for f in findings
+            ) if findings else "  None logged yet."
+
+            ep_txt = ", ".join(e.get("url", str(e)) for e in endpoints[:20]) if endpoints else "None mapped yet."
+
+            return (
+                f"\n[ACTIVE SESSION ASSESSMENT MEMORY — RECALL ALL FINDINGS AND CONTEXT FIRST-HAND]:\n"
+                f"- Active Target: {target}\n"
+                f"- Assessment Run Directory: {run_dir}\n"
+                f"- WAF / Gate Status: {waf}\n"
+                f"- Technology Stack: {', '.join(tech) if tech else 'N/A'}\n"
+                f"- Verified Findings ({len(findings)}):\n{findings_txt}\n"
+                f"- Discovered Endpoints / Routes: {ep_txt}\n"
+                f"- Operational Instruction: You possess full first-hand recollection of this target, all discovered data leaks, "
+                f"endpoints, keys, and findings. If the operator says 'continue', 'what did you find', 'resume', or discusses the target, "
+                f"speak with complete, detailed authority on the findings. Never say you 'only said hi'.\n"
+            )
+        except Exception:
+            return f"\n[ACTIVE SESSION CONTEXT: Target '{target}']\n"
+
     # ────────────────────────────────────────────────────────────────
     # Autonomous Security Assessment (Red Team / Pentest)
     # ────────────────────────────────────────────────────────────────
@@ -922,7 +1012,7 @@ class AgentRouter:
     def _extract_scan_target(self, text: str) -> Optional[str]:
         t = text.strip()
         # Direct slash commands
-        if t.startswith("/scan ") or t.startswith("/attack "):
+        if t.startswith("/scan ") or t.startswith("/attack ") or t.startswith("/resume "):
             parts = t.split(maxsplit=1)
             if len(parts) > 1 and parts[1].strip():
                 return parts[1].strip()
@@ -931,7 +1021,7 @@ class AgentRouter:
             "scan", "assess", "pentest", "audit", "exploit", "enumerate",
             "redteam", "recon", "probe", "vulnerabilit", "vuln", "check",
             "inspect", "attack", "test", "security", "bug", "analyze", "hack",
-            "fingerprint", "port"
+            "fingerprint", "port", "resume", "continue"
         ]
         has_intent = any(re.search(rf"\b{kw}", t, re.I) for kw in scan_keywords)
 
@@ -1004,6 +1094,11 @@ class AgentRouter:
             f"- **Live Log:** `{run_dir / 'live.log'}`\n"
             f"- **Findings Log:** `{run_dir / 'findings.md'}`"
         ))
+        with self._lock:
+            self.history.append({
+                "role": "assistant",
+                "content": f"🛡️ {action_title} `{target}` (Run Directory: `{run_dir}`)."
+            })
 
         # Phase 1: WAF & Technology Stack Fingerprinting
         self.emit(AssistantMessageEvent("**[Phase 1] Target Fingerprinting & Attack Surface Analysis**"))
