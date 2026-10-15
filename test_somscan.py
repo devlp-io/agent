@@ -638,7 +638,40 @@ class TestSomScan(unittest.TestCase):
         self.assertEqual(finding_ev.severity, "medium")
         self.assertIn("requires credential or auth-bypass verification", finding_ev.evidence)
 
+    def test_38_strip_directives_and_supervisor_resilience(self):
+        """Verify machine directives are stripped from assistant text and regexes are protected."""
+        from core.agent_router import strip_directives
+
+        raw_llm_text = (
+            "[DevLP] hunting for DDoS tooling on the box.\n\n"
+            "COMMAND: powershell -NoProfile -Command \"Get-ChildItem\"\n"
+            "FILE: test.py|print('hello')\n"
+            "PROBE: GET|https://example.com\n"
+            "DONE: Finished investigation"
+        )
+        cleaned = strip_directives(raw_llm_text)
+        self.assertEqual(cleaned, "[DevLP] hunting for DDoS tooling on the box.")
+        self.assertNotIn("COMMAND:", cleaned)
+        self.assertNotIn("FILE:", cleaned)
+        self.assertNotIn("PROBE:", cleaned)
+        self.assertNotIn("DONE:", cleaned)
+
+        from core.task_runner import CommandSupervisor
+
+        # Verify python regex in process search is NOT replaced with path
+        cmd = 'powershell -NoProfile -Command "Get-Process | Where-Object { $_.ProcessName -match \'(?i)(ddos|flood|python|node)\' }"'
+        adapted, notes = CommandSupervisor.analyze_and_adapt(cmd)
+        self.assertIn("ddos|flood|python|node", adapted)
+        self.assertNotIn("AppData\\Local\\Programs\\Python", adapted)
+
+        # Verify Get-ChildItem -Recurse receives -Attributes !ReparsePoint on Windows
+        if sys.platform == "win32":
+            gci_cmd = "powershell -NoProfile -Command \"Get-ChildItem -Path 'C:\\Users\\libaa' -Recurse\""
+            gci_adapted, _ = CommandSupervisor.analyze_and_adapt(gci_cmd)
+            self.assertIn("-Attributes !ReparsePoint", gci_adapted)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 

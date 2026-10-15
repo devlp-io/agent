@@ -53,6 +53,31 @@ from core.task_runner import TaskRunner, CommandResult
 HERE = pathlib.Path(__file__).resolve().parent.parent
 MAX_AGENT_TURNS = int(os.environ.get("AG_MAX_TURNS", "10000"))
 
+DIRECTIVE_TAGS = (
+    "COMMAND:", "PARALLEL:", "FILE:", "INSTALL:", "TOOLS:", "LIST:",
+    "FINDING:", "NOTE:", "PROBE:", "WALK:", "WAF:", "STACK:",
+    "PARAMFIND:", "CVE:", "METHOD:", "EXPLOIT:", "PAYLOAD:",
+    "SECRET:", "CRED:", "REPORT:", "SEAL:", "GRAPH:", "DONE:"
+)
+
+
+def strip_directives(text: str) -> str:
+    """
+    Remove machine directives (COMMAND:, FILE:, INSTALL:, PROBE:, etc.)
+    from user-facing assistant text so operators only see clean narrative.
+    The commands themselves execute and render in dedicated CommandCards.
+    """
+    if not text:
+        return ""
+    cleaned_lines = []
+    for line in text.splitlines():
+        trimmed = line.strip()
+        if any(trimmed.startswith(tag) for tag in DIRECTIVE_TAGS):
+            continue
+        cleaned_lines.append(line)
+    result = re.sub(r"\n{3,}", "\n\n", "\n".join(cleaned_lines)).strip()
+    return result
+
 
 def load_persona() -> str:
     """Dynamically load agent persona from persona.md (primary) or persona.txt (fallback) on every turn/chat."""
@@ -149,6 +174,14 @@ Agentic Workflow Rules:
 7. Script & Shell Safety: When executing complex multi-line PowerShell scripts or commands containing variables ($), save them to a `.ps1` file via FILE: directive or run them cleanly so variable names ($wshell, $_, etc.) are never mangled by shell interpolation.
 8. If the user is just having a conversation, greeting you, or asking a technical question, answer directly without emitting unneeded directives.
 9. Deliver crisp, professional, production-grade output. No disclaimers or moralizing fluff.
+10. Targeted Local Investigation & Deadlock Prevention:
+    When hunting for files, projects, scripts, or payloads on the local machine:
+    - NEVER run unbounded recursive searches across entire user homes or drive roots (e.g. `Get-ChildItem -Path 'C:/Users/username' -Recurse` or `find /`). Unbounded recursion deadlocks in infinite NTFS junction loops (Application Data) or hangs indefinitely in massive AppData/node_modules trees.
+    - Always scope searches to specific high-probability directories: `scans/`, `scans/workspace/`, `Downloads/`, `Desktop/`, `Temp/`, or the active project workspace.
+    - When searching with PowerShell, always include `-Attributes !ReparsePoint` and specify a depth limit (e.g. `-Depth 3`).
+    - Emit at most 2 to 4 tactical commands per turn. Review observations before planning the next step. Never emit repetitive micro-interval timestamp loops (e.g. -AddMinutes(-30), -AddMinutes(-10)...).
+11. Clean Regex & Process Queries:
+    When searching process lists (`Get-Process | Where-Object {{ $_.ProcessName -match ... }}`), use simple process names without path separators or backslashes (e.g. 'python|node|go|attack|flood'). Never embed file paths into regex patterns without escaping.
 """
 
 
@@ -384,12 +417,38 @@ class AgentRouter:
             self.emit(ThinkingStartEvent(step_label))
 
             accumulated: List[str] = []
+            stream_line_buf: str = ""
+            is_suppressed_line: bool = False
+
             try:
                 for chunk in self.model_manager.stream_chat(self.history):
                     if self._is_cancelled:
                         break
                     accumulated.append(chunk)
-                    self.emit(AssistantChunkEvent(chunk=chunk))
+
+                    # Filter out machine directives so they never flash on the user's terminal
+                    for char in chunk:
+                        if char == "\n":
+                            if not is_suppressed_line and stream_line_buf:
+                                self.emit(AssistantChunkEvent(chunk=stream_line_buf + "\n"))
+                            stream_line_buf = ""
+                            is_suppressed_line = False
+                        else:
+                            stream_line_buf += char
+                            if not is_suppressed_line:
+                                stripped = stream_line_buf.lstrip()
+                                if any(stripped.startswith(tag) for tag in DIRECTIVE_TAGS):
+                                    is_suppressed_line = True
+                                    stream_line_buf = ""
+                                elif not any(tag.startswith(stripped) for tag in DIRECTIVE_TAGS if stripped):
+                                    # Regular narrative text, flush immediately
+                                    self.emit(AssistantChunkEvent(chunk=stream_line_buf))
+                                    stream_line_buf = ""
+
+                # Flush trailing characters if not a directive
+                if stream_line_buf and not is_suppressed_line:
+                    if not any(stream_line_buf.lstrip().startswith(tag) for tag in DIRECTIVE_TAGS):
+                        self.emit(AssistantChunkEvent(chunk=stream_line_buf))
             except Exception as e:
                 self.emit(ThinkingStopEvent())
                 self.emit(ErrorEvent(f"Chat error: {e}"))
@@ -419,7 +478,9 @@ class AgentRouter:
 
             # Record model reply in history
             self.history.append({"role": "assistant", "content": full_reply})
-            self.emit(AssistantMessageEvent(text=full_reply))
+            clean_reply = strip_directives(full_reply)
+            if clean_reply:
+                self.emit(AssistantMessageEvent(text=clean_reply))
 
             if self._is_cancelled:
                 self.emit(TaskCancelledEvent("Task or chat stopped immediately by operator. History preserved."))
@@ -472,7 +533,12 @@ class AgentRouter:
             self._empty_directive_count = 0
             obs_lines: List[str] = []
 
-            for kind, payload in directives:
+            # Limit max directives per turn to 5 to prevent runaway execution loops
+            max_batch = 5
+            to_execute = directives[:max_batch]
+            has_more = len(directives) > max_batch
+
+            for kind, payload in to_execute:
                 if self._is_cancelled:
                     break
 
@@ -525,6 +591,12 @@ class AgentRouter:
                         self.emit(AssistantMessageEvent(f"🎯 **CVE:** `{payload}` → `{r_str[:160]}`"))
                     elif kind == "METHOD":
                         self.emit(AssistantMessageEvent(f"📚 **Loaded Methodology:** `{payload}`"))
+
+            if has_more:
+                obs_lines.append(
+                    f"[Supervisor Notice: Executed first {max_batch} of {len(directives)} directives. "
+                    f"Analyze these results before issuing further commands.]"
+                )
 
             if self._is_cancelled:
                 if obs_lines:

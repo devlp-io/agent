@@ -129,17 +129,29 @@ class CommandSupervisor:
                     adapted = adapted_dig
                     notes.append("Adapted 'dig' command(s) to 'nslookup' for Windows host")
             # Fix: python / python3 -> sys.executable (bypasses Windows Store 0.0.0.0 alias stub)
-            # Use forward slashes or lambda to prevent \U... escape errors in Windows paths
+            # Only rewrite python/python3 when it is invoked as an executable at command position,
+            # NOT when it appears inside quotes, regexes, arguments, or process names (e.g. ProcessName -match '...python...')
             real_py = get_real_python()
-            py_bin = f'"{real_py}"'
+            def _replace_py_cmd(m):
+                prefix = m.group(1) or ""
+                return f'{prefix}"{real_py}"'
+
             adapted_py = re.sub(
-                r"(?<![a-zA-Z0-9_\-\.\"\'])python3?(?![a-zA-Z0-9_\-\.\"\'])",
-                lambda _m: py_bin,
+                r"(^|[\;&|]\s*|(?:^|\s)(?:sudo|nohup|exec|env)\s+)python3?(?=\s+|$)",
+                _replace_py_cmd,
                 adapted
             )
             if adapted_py != adapted:
                 adapted = adapted_py
                 notes.append(f"Mapped python/python3 to runtime executable '{real_py}'")
+
+            # PowerShell Deadlock & Junction Loop Safeguard:
+            # Prevent infinite loops in recursive directory searches (e.g. C:\Users\<user>\Application Data loop)
+            low_a = adapted.lower()
+            if "get-childitem" in low_a or " gci " in low_a or low_a.startswith("gci "):
+                if "-recurse" in low_a and "-attributes" not in low_a:
+                    adapted = re.sub(r"(\b(?:Get-ChildItem|gci)\b)", r"\1 -Attributes !ReparsePoint", adapted, count=1, flags=re.IGNORECASE)
+                    notes.append("Injected '-Attributes !ReparsePoint' to prevent NTFS junction loop hangs")
 
         # 2. Smart Anti-WAF Throttling & Tool Pacing defaults
         low_cmd = adapted.lower()

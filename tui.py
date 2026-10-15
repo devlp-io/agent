@@ -42,7 +42,7 @@ from core.events import (
     TaskCancelledEvent, ErrorEvent
 )
 from core.model_manager import ModelManager
-from core.agent_router import AgentRouter
+from core.agent_router import AgentRouter, strip_directives
 from core.version import __version__, get_version_string
 
 SPINNER_FRAMES = ("⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏")
@@ -1371,24 +1371,28 @@ class SomScanApp(App):
             if self._thinking_widget is not None:
                 self._handle_event(ThinkingStopEvent())
 
-            if self._streaming_box is None:
-                self._streaming_text_widget = Static("", classes="assistant-text", markup=False)
-                self._streaming_box = Vertical(
-                    Label("[*] SOM-SCAN", classes="assistant-marker", markup=False),
-                    self._streaming_text_widget,
-                    classes="assistant-box",
-                )
-                if scroll is not None:
-                    scroll.mount(self._streaming_box)
-                self._streaming_accumulated_text = ""
-
             self._streaming_accumulated_text += event.chunk
-            if self._streaming_text_widget:
-                self._streaming_text_widget.update(self._streaming_accumulated_text)
+            clean_chunk_text = strip_directives(self._streaming_accumulated_text)
+
+            if clean_chunk_text:
+                if self._streaming_box is None:
+                    self._streaming_text_widget = Static("", classes="assistant-text", markup=False)
+                    self._streaming_box = Vertical(
+                        Label("[*] SOM-SCAN", classes="assistant-marker", markup=False),
+                        self._streaming_text_widget,
+                        classes="assistant-box",
+                    )
+                    if scroll is not None:
+                        scroll.mount(self._streaming_box)
+
+                if self._streaming_text_widget:
+                    self._streaming_text_widget.update(clean_chunk_text)
 
         elif isinstance(event, AssistantMessageEvent):
             self._handle_event(ThinkingStopEvent())
-            text_to_show = event.text or self._streaming_accumulated_text
+            raw_text = event.text or self._streaming_accumulated_text
+            clean_text = strip_directives(raw_text)
+
             if self._streaming_box is not None:
                 try:
                     self._streaming_box.remove()
@@ -1398,8 +1402,9 @@ class SomScanApp(App):
                 self._streaming_text_widget = None
                 self._streaming_accumulated_text = ""
 
-            self._mount_formatted_assistant_message(scroll, text_to_show)
-            self._conversation_history.append(f"[*] SOM-SCAN\n{text_to_show}")
+            if clean_text.strip():
+                self._mount_formatted_assistant_message(scroll, clean_text)
+                self._conversation_history.append(f"[*] SOM-SCAN\n{clean_text}")
 
 
         elif isinstance(event, CommandStartEvent):
