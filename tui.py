@@ -39,7 +39,8 @@ from core.events import (
     AgentEvent, UserMessageEvent, AssistantChunkEvent, AssistantMessageEvent,
     ThinkingStartEvent, ThinkingStopEvent, CommandStartEvent, CommandOutputEvent,
     CommandFinishEvent, FindingEvent, StatusChangeEvent, TaskCompleteEvent,
-    TaskCancelledEvent, ErrorEvent
+    TaskCancelledEvent, ErrorEvent, PhaseTransitionEvent, SubagentStartEvent,
+    SubagentFinishEvent, PayloadCardEvent, ExploitCardEvent
 )
 from core.model_manager import ModelManager
 from core.agent_router import AgentRouter, strip_directives
@@ -52,6 +53,10 @@ SLASH_COMMANDS: List[Tuple[str, str]] = [
     ("/scan <target>", "Launch autonomous security assessment on domain or URL"),
     ("/resume [target]", "Resume previous assessment from last saved state"),
     ("/attack [target]", "Launch post-scan exploit/attack phase on findings"),
+    ("/phase", "Inspect active assessment phase: what's done, what's next move"),
+    ("/subagent <type> <task>", "Dispatch autonomous specialist subagent (recon/exploit/malware/reversing/webaudit)"),
+    ("/malware <spec>", "Malware Lab: craft weaponized shellcode, loaders, stagers, and cross-compile"),
+    ("/payload <type>", "Generate evasive payload (xss/sqli/ssrf/rce/ssti/nosqli/crlf)"),
     ("/copy", "Copy entire session (chat, commands, findings) to clipboard"),
     ("/cancel", "Interrupt active task, scan, or command"),
     ("/pause", "Pause running scan and open operator control menu"),
@@ -69,6 +74,7 @@ SLASH_COMMANDS: List[Tuple[str, str]] = [
     ("/help", "Display full command reference"),
     ("/quit", "Cleanly exit SOM-SCAN application"),
 ]
+
 
 
 def copy_to_system_clipboard(text: str) -> bool:
@@ -133,8 +139,15 @@ def copy_to_system_clipboard(text: str) -> bool:
         except Exception:
             pass
 
-    # 4. Linux xclip / wl-copy / xsel
+    # 4. Linux xclip / wl-copy / xsel / WSL clip.exe
     if sys.platform.startswith("linux"):
+        # WSL fallback: pipe directly to Windows host clip.exe
+        for wsl_clip in ("/mnt/c/Windows/System32/clip.exe", "clip.exe"):
+            try:
+                subprocess.run([wsl_clip], input=text.encode("utf-8", errors="replace"), check=True, stderr=subprocess.DEVNULL)
+                return True
+            except Exception:
+                pass
         for cmd in (["wl-copy"], ["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]):
             try:
                 subprocess.run(cmd, input=text.encode("utf-8"), check=True)
@@ -143,6 +156,7 @@ def copy_to_system_clipboard(text: str) -> bool:
                 continue
 
     return False
+
 
 
 TUI_CSS = """
@@ -416,6 +430,119 @@ Screen {
     margin-top: 0;
 }
 
+/* Phase Transition Card — High-visibility operator transparency */
+.phase-card {
+    width: 100%;
+    height: auto;
+    background: #08111e;
+    border: heavy #00d2ff;
+    margin: 1 0 1 0;
+    padding: 0 1;
+}
+
+.phase-header {
+    width: 100%;
+    color: #38bdf8;
+    text-style: bold;
+    text-wrap: wrap;
+}
+
+.phase-done-block {
+    width: 100%;
+    color: #4ade80;
+    text-wrap: wrap;
+    margin-top: 0;
+}
+
+.phase-next-block {
+    width: 100%;
+    color: #facc15;
+    text-style: bold;
+    text-wrap: wrap;
+    margin-top: 0;
+}
+
+/* Subagent Execution Card */
+.subagent-card {
+    width: 100%;
+    height: auto;
+    background: #150a21;
+    border: solid #a855f7;
+    margin: 1 0 1 0;
+    padding: 0 1;
+}
+
+.subagent-header {
+    width: 100%;
+    color: #c084fc;
+    text-style: bold;
+    text-wrap: wrap;
+}
+
+.subagent-task {
+    width: 100%;
+    color: #94a3b8;
+    text-wrap: wrap;
+}
+
+.subagent-status {
+    width: 100%;
+    color: #e2e8f0;
+    text-wrap: wrap;
+}
+
+/* Weaponized Payload Card */
+.payload-card {
+    width: 100%;
+    height: auto;
+    background: #180914;
+    border: solid #ec4899;
+    margin: 1 0 1 0;
+    padding: 0 1;
+}
+
+.payload-header {
+    width: 100%;
+    color: #f472b6;
+    text-style: bold;
+    text-wrap: wrap;
+}
+
+.payload-meta {
+    width: 100%;
+    color: #fb7185;
+    text-wrap: wrap;
+}
+
+.payload-body {
+    width: 100%;
+    color: #38bdf8;
+    text-wrap: wrap;
+}
+
+/* Exploit Card */
+.exploit-card {
+    width: 100%;
+    height: auto;
+    background: #1a0c06;
+    border: solid #f97316;
+    margin: 1 0 1 0;
+    padding: 0 1;
+}
+
+.exploit-header {
+    width: 100%;
+    color: #fb923c;
+    text-style: bold;
+    text-wrap: wrap;
+}
+
+.exploit-body {
+    width: 100%;
+    color: #fdba74;
+    text-wrap: wrap;
+}
+
 
 /* Fixed Bottom Composer with margin and top border divider */
 #composer-container {
@@ -668,6 +795,103 @@ class CodeBubble(Static):
             self._content_static.update(self._format_highlighted_code())
         except Exception:
             pass
+
+class PhaseTransitionCard(Static):
+    """Visual card for scan/attack phase transitions with explicit what's done & what's next."""
+
+    def __init__(self, phase: str, name: str, whats_done: str, whats_next: str, **kwargs):
+        super().__init__(classes="phase-card", **kwargs)
+        self.phase = phase
+        self.name = name
+        self.whats_done = whats_done
+        self.whats_next = whats_next
+        self._header_label = Label(f"◈ PHASE {self.phase}: {self.name.upper()} ◈", classes="phase-header", markup=False)
+        self._done_label = Label(f"✓ DONE: {self.whats_done}", classes="phase-done-block", markup=False)
+        self._next_label = Label(f"▶ NEXT MOVE: {self.whats_next}", classes="phase-next-block", markup=False)
+
+    def compose(self) -> ComposeResult:
+        yield self._header_label
+        yield self._done_label
+        yield self._next_label
+
+
+class SubagentCard(Static):
+    """Visual card tracking autonomous specialist subagents."""
+
+    def __init__(self, subagent_id: str, subagent_type: str, task: str, **kwargs):
+        super().__init__(classes="subagent-card", **kwargs)
+        self.subagent_id = subagent_id
+        self.subagent_type = subagent_type
+        self.task = task
+        self.status = "RUNNING"
+        self._header_label = Label(
+            f"⚡ SUBAGENT [{self.subagent_type.upper()}] ── ID: {self.subagent_id}",
+            classes="subagent-header",
+            markup=False,
+        )
+        self._task_label = Label(f"🎯 TASK: {self.task}", classes="subagent-task", markup=False)
+        self._status_label = Label("Status: In progress...", classes="subagent-status", markup=False)
+
+    def compose(self) -> ComposeResult:
+        yield self._header_label
+        yield self._task_label
+        yield self._status_label
+
+    def update_finish(self, success: bool, summary: str):
+        self.status = "SUCCESS" if success else "FAILED"
+        mark = "✓" if success else "✗"
+        self._header_label.update(f"⚡ SUBAGENT [{self.subagent_type.upper()}] ── {mark} {self.status}")
+        self._status_label.update(f"{mark} {summary}")
+
+
+class PayloadCard(Static):
+    """Visual card for generated weaponized/evasive payloads."""
+
+    def __init__(self, payload_type: str, target: str, payload_code: str, evasion_notes: str = "", **kwargs):
+        super().__init__(classes="payload-card", **kwargs)
+        self.payload_type = payload_type
+        self.target = target
+        self.payload_code = payload_code
+        self.evasion_notes = evasion_notes
+        target_str = f" ── Target: {self.target}" if self.target else ""
+        self._header_label = Label(
+            f"🔥 WEAPONIZED PAYLOAD [{self.payload_type.upper()}]{target_str}",
+            classes="payload-header",
+            markup=False,
+        )
+        notes_str = f"🛡️ EVASION: {self.evasion_notes}\n" if self.evasion_notes else ""
+        self._meta_label = Label(notes_str, classes="payload-meta", markup=False)
+        self._body_label = Label(self.payload_code, classes="payload-body", markup=False)
+
+    def compose(self) -> ComposeResult:
+        yield self._header_label
+        if self.evasion_notes:
+            yield self._meta_label
+        yield self._body_label
+
+
+class ExploitCard(Static):
+    """Visual card for red-team exploit execution and foothold verification."""
+
+    def __init__(self, vuln_name: str, target: str, status: str, details: str = "", **kwargs):
+        super().__init__(classes="exploit-card", **kwargs)
+        self.vuln_name = vuln_name
+        self.target = target
+        self.status = status
+        self.details = details
+        self._header_label = Label(
+            f"⚔️ EXPLOIT: {self.vuln_name} ── Target: {self.target}",
+            classes="exploit-header",
+            markup=False,
+        )
+        status_text = f"Status: {self.status}"
+        if self.details:
+            status_text += f"\nDetails: {self.details}"
+        self._body_label = Label(status_text, classes="exploit-body", markup=False)
+
+    def compose(self) -> ComposeResult:
+        yield self._header_label
+        yield self._body_label
 
 
 class SafeMarkdown(Static):
@@ -930,6 +1154,7 @@ class SomScanApp(App):
         self._thinking_widget: Optional[Label] = None
         self._command_cards: List[CommandCard] = []
         self._code_bubbles: List[CodeBubble] = []
+        self._subagent_cards: Dict[str, SubagentCard] = {}
         self._input_history: List[str] = []
         self._input_history_idx: int = -1
         self._in_pause_menu: bool = False
@@ -1521,6 +1746,85 @@ class SomScanApp(App):
                 self.query_one("#input-box", CommandInput).focus()
             except Exception:
                 pass
+
+        elif isinstance(event, PhaseTransitionEvent):
+            self._last_emitter = "phase"
+            self._handle_event(ThinkingStopEvent())
+            card = PhaseTransitionCard(
+                phase=event.phase,
+                name=event.name,
+                whats_done=event.whats_done,
+                whats_next=event.whats_next,
+            )
+            if scroll is not None:
+                scroll.mount(card)
+            self._conversation_history.append(
+                f"[Phase {event.phase}: {event.name}]\n✓ Done: {event.whats_done}\n▶ Next Move: {event.whats_next}"
+            )
+
+        elif isinstance(event, SubagentStartEvent):
+            self._last_emitter = "subagent"
+            self._handle_event(ThinkingStopEvent())
+            card = SubagentCard(
+                subagent_id=event.subagent_id,
+                subagent_type=event.subagent_type,
+                task=event.task,
+            )
+            self._subagent_cards[event.subagent_id] = card
+            if scroll is not None:
+                scroll.mount(card)
+            self._conversation_history.append(
+                f"[Subagent {event.subagent_type.upper()} ({event.subagent_id}) Started] Task: {event.task}"
+            )
+
+        elif isinstance(event, SubagentFinishEvent):
+            self._last_emitter = "subagent"
+            card = self._subagent_cards.get(event.subagent_id)
+            if card is not None:
+                card.update_finish(event.success, event.summary)
+            else:
+                card = SubagentCard(
+                    subagent_id=event.subagent_id,
+                    subagent_type=event.subagent_type,
+                    task=f"Finished: {event.summary}",
+                )
+                card.update_finish(event.success, event.summary)
+                if scroll is not None:
+                    scroll.mount(card)
+            mark = "✓" if event.success else "✗"
+            self._conversation_history.append(
+                f"[Subagent {event.subagent_type.upper()} ({event.subagent_id}) {mark}] {event.summary}"
+            )
+
+        elif isinstance(event, PayloadCardEvent):
+            self._last_emitter = "payload"
+            self._handle_event(ThinkingStopEvent())
+            card = PayloadCard(
+                payload_type=event.payload_type,
+                target=event.target,
+                payload_code=event.payload_code,
+                evasion_notes=event.evasion_notes,
+            )
+            if scroll is not None:
+                scroll.mount(card)
+            self._conversation_history.append(
+                f"[Payload {event.payload_type.upper()}] Target: {event.target}\n{event.payload_code}"
+            )
+
+        elif isinstance(event, ExploitCardEvent):
+            self._last_emitter = "exploit"
+            self._handle_event(ThinkingStopEvent())
+            card = ExploitCard(
+                vuln_name=event.vuln_name,
+                target=event.target,
+                status=event.status,
+                details=event.details,
+            )
+            if scroll is not None:
+                scroll.mount(card)
+            self._conversation_history.append(
+                f"[Exploit: {event.vuln_name}] Target: {event.target} Status: {event.status}"
+            )
 
         elif isinstance(event, StatusChangeEvent):
             self._current_status_text = event.status

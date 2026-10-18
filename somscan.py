@@ -66,11 +66,16 @@ Usage:
 
 Inside SOM-SCAN TUI:
   /help       List available commands and navigation shortcuts
+  /phase      Inspect active phase: what's done, what's next move
+  /subagent   Dispatch specialist subagent (recon/exploit/malware/reversing/webaudit)
+  /malware    Malware Lab: craft weaponized shellcode, loaders, stagers, obfuscate
+  /payload    Generate weaponized evasive payload (xss/sqli/ssrf/rce/ssti/nosqli)
   /new        Start fresh assessment session, archive previous scan & clear chat
   /key        Set or update API key (/key sk-...)
   /env        View API keys and environment status
   /model      View or switch active AI model (deepseek-chat, gemini, etc.)
   /scan       Initiate security scan on target
+  /attack     Launch exploit and foothold phase on scan findings
   /resume     Resume previous scan
   /tools      Check security tool catalog or status
   /install    Install security tool (/install <name>)
@@ -79,7 +84,7 @@ Inside SOM-SCAN TUI:
   /clear      Clear conversation viewport
   /long       Expand full command output
   /short      Collapse long command outputs
-  /copy       Export session history to file
+  /copy       Export session history to clipboard & log
   /quit       Exit SOM-SCAN (or Ctrl+Q)
 """)
             return

@@ -106,6 +106,10 @@ somscan
 | `/model [name]` | View active model or switch engine profile (`deepseek-chat`, `gemini-2.5-flash`, etc.) |
 | `/scan <target>` | Launch an autonomous security assessment against a URL or hostname |
 | `/resume [target]` | Resume previous assessment session from last turn |
+| `/phase [name]` | Inspect or switch active assessment phase (`RECON`, `PROBE`, `API_MAP`, `VULN_AUDIT`, `EXPLOIT`, `REPORT`) |
+| `/subagent [name]`| Dispatch or inspect autonomous specialist subagents (`recon`, `api_auditor`, `exploit_crafter`, `reporter`) |
+| `/malware <type>` | Scaffold specialized offensive tooling, loaders, crypters, and payloads |
+| `/attack` | Toggle autonomous intrusive exploitation mode |
 | `/tools` | Display installed and available security tooling catalog |
 | `/install <name>` | Download and compile tool from the curated catalog |
 | `/file <action>` | Built-in file management (`list`, `view <file>`, `cat <file>`, `rm <file>`) |
@@ -264,26 +268,129 @@ SOM-SCAN runs natively on Windows 10 and Windows 11 with full color rendering an
 
 ### Windows (WSL2 Ubuntu)
 
-For access to native Linux security utilities (`naabu`, `masscan`, `nmap` raw sockets):
+Running SOM-SCAN inside WSL2 Ubuntu delivers the ultimate performance and capability: full raw-socket penetration testing utilities (`nmap`, `naabu`, `nuclei`, `subfinder`, `masscan`), native C/C++ & MinGW compilers, and high-performance terminal rendering.
 
-1. **Enable WSL2**:
+---
+
+#### A. First-Time Setup (New Operators)
+
+Follow these exact steps to set up an operational SOM-SCAN node from scratch:
+
+1. **Install & Launch WSL2 Ubuntu**:
+   Open Windows PowerShell (Run as Administrator) and run:
    ```powershell
    wsl --install -d Ubuntu
    ```
-2. **Inside Ubuntu WSL Shell**:
+   *(If WSL is already installed, simply launch Ubuntu from your Start menu or run `wsl -d Ubuntu` in PowerShell).*
+
+2. **Clone the Repository**:
+   Inside your Ubuntu WSL terminal:
    ```bash
+   # Clone directly into your Linux home directory (recommended for max I/O performance)
    git clone https://github.com/devlp-io/agent.git ~/agent
    cd ~/agent
-   bash bootstrap.sh
-   source ~/.bashrc
-   ./somscan
+
+   # OR if your repository lives on a Windows drive (e.g. D:\agent):
+   # cd /mnt/d/agent
    ```
-3. **Updating to Latest Version**:
+
+3. **Run the Red-Team Automated Bootstrapper**:
+   Execute `bootstrap.sh`. This automatically updates apt repositories, installs essential compilers (`gcc`, `g++`, `mingw-w64`, `nasm`, `make`), debuggers (`gdb`, `radare2`, `strace`), builds the isolated Python virtual environment (`.venv_linux`), and installs all Python dependencies:
    ```bash
-   cd ~/agent
-   git pull origin main
-   pip install -r requirements.txt --upgrade
+   bash bootstrap.sh
    ```
+
+4. **Make `somscan` Launchable from Anywhere**:
+   Create a canonical global symlink in `/usr/local/bin` so you can launch the agent from any folder, drive, or target workspace:
+   ```bash
+   sudo ln -sf "$(pwd)/somscan" /usr/local/bin/somscan
+   ```
+
+5. **Configure API Credentials**:
+   Copy the example environment configuration and insert your API key:
+   ```bash
+   cp .env.examples .env
+   nano .env
+   ```
+   Set your model key (e.g., DeepSeek, Gemini, or OpenAI):
+   ```ini
+   AG_MODEL=deepseek-chat
+   AG_BASE=https://api.deepseek.com/v1
+   DEEPSEEK_KEY=sk-your-key-here
+   AG_KEY=sk-your-key-here
+   ```
+   *(Alternatively, launch `somscan` directly and type `/key sk-your-key-here` inside the interactive TUI).*
+
+6. **Launch SOM-SCAN**:
+   Launch from any directory in your terminal:
+   ```bash
+   somscan
+   ```
+   Or target a host directly:
+   ```bash
+   somscan --scan https://target-example.com
+   ```
+
+---
+
+#### B. Upgrading Existing Installations (For Existing Operators)
+
+If you already have an earlier checkout of SOM-SCAN installed in WSL2, run this single block to pull the latest offensive architecture, visual cards, deadlock watchdogs, and dependencies:
+
+```bash
+# 1. Navigate to your repository directory
+cd ~/agent    # or cd /mnt/d/agent
+
+# 2. Pull the latest commits from main
+git pull origin main
+
+# 3. Activate the virtual environment
+source .venv_linux/bin/activate 2>/dev/null || source venv/bin/activate
+
+# 4. Install updated requirements (using --no-compile to prevent NTFS bytecode stalls)
+pip install --upgrade pip
+pip install --no-compile -r requirements.txt
+
+# 5. Ensure global symlink points to the latest launcher
+sudo ln -sf "$(pwd)/somscan" /usr/local/bin/somscan
+
+# 6. Verify and launch
+somscan
+```
+
+---
+
+#### C. Launching from Windows PowerShell / Terminal (Optional)
+
+You can launch SOM-SCAN directly from Windows PowerShell or Windows Terminal without manually opening an Ubuntu prompt:
+
+```powershell
+# Run interactively from any Windows PowerShell session:
+wsl -d Ubuntu -e somscan
+
+# Or pass a target directly from Windows:
+wsl -d Ubuntu -e somscan --scan https://target-example.com
+```
+
+> [!TIP]
+> **Windows PowerShell Alias**: To type `somscan` directly in Windows PowerShell, add this to your PowerShell profile (`notepad $PROFILE`):
+> ```powershell
+> function somscan { wsl -d Ubuntu -e somscan $args }
+> ```
+
+---
+
+#### D. WSL2 Operator Notes & Performance Tips
+
+- **NTFS DrvFs Mounts (`/mnt/c/...` or `/mnt/d/...`)**:
+  When installing or updating pip packages on a Windows drive mounted inside WSL, always pass `--no-compile` (e.g. `pip install --no-compile -r requirements.txt`). Python 3.14+ bytecode writes can encounter filesystem locking on Windows NTFS mounts.
+- **Raw Socket Capabilities**:
+  To grant raw-socket network scan capabilities to `nmap` without running everything as root:
+  ```bash
+  sudo setcap cap_net_raw,cap_net_admin,cap_net_bind_service+eip $(which nmap)
+  ```
+- **Terminal Aesthetics**:
+  For optimal rendering of the minimal near-black TUI, use [Windows Terminal](https://aka.ms/windowsterminal) with a TrueColor-capable font such as *Cascadia Code*, *JetBrains Mono*, or *Fira Code*.
 
 ---
 
@@ -339,7 +446,7 @@ Whenever new features, attack methodologies, UI enhancements, or supervisor upda
 | **Linux (Debian / Ubuntu / Kali / Arch)** | `cd ~/agent && git pull origin main && source venv/bin/activate && pip install -r requirements.txt --upgrade` |
 | **macOS (Apple Silicon & Intel)** | `cd ~/agent && git pull origin main && source venv/bin/activate && pip install -r requirements.txt --upgrade` |
 | **Windows (PowerShell)** | `cd C:\agent; git pull origin main; python -m pip install -r requirements.txt --upgrade` |
-| **Windows (WSL2 Ubuntu)** | `cd ~/agent && git pull origin main && pip install -r requirements.txt --upgrade` |
+| **Windows (WSL2 Ubuntu)** | `cd ~/agent && git pull origin main && source .venv_linux/bin/activate && pip install --no-compile -r requirements.txt` |
 | **Android (Termux)** | `cd ~/agent && git pull origin main && pip install -r requirements.txt --upgrade` |
 
 > [!TIP]

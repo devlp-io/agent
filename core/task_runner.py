@@ -95,6 +95,19 @@ class CommandSupervisor:
         adapted = command.strip()
         notes: List[str] = []
 
+        # 0. Sanitize hallucinated model tokens and anti-hang cleanups
+        # Strip trailing XML / DSML / tool parameter tags hallucinated by DeepSeek/OpenAI models
+        adapted = re.sub(r"</?[a-zA-Z0-9_\-:\s|]+>\s*$", "", adapted).strip()
+        adapted = re.sub(r"<\s*/\s*[^>]*parameter\s*>\s*$", "", adapted, flags=re.IGNORECASE).strip()
+        adapted = re.sub(r"<\s*/\s*[^>]*DSML[^>]*>\s*$", "", adapted, flags=re.IGNORECASE).strip()
+        adapted = re.sub(r"</[^>]*parameter.*$", "", adapted, flags=re.IGNORECASE).strip()
+        adapted = re.sub(r"</?$", "", adapted).strip()
+
+        # Strip trailing background '&' operator that breaks stdin/stdout pipes and hangs watchdog
+        if adapted.endswith("&") and not adapted.endswith(r"\&") and not adapted.endswith("&&"):
+            adapted = adapted[:-1].rstrip()
+            notes.append("Stripped trailing background '&' to prevent subprocess pipe deadlock")
+
         # 1. Windows platform adaptations
         if IS_WIN:
             # Fix: getent hosts <domain> -> nslookup <domain>
@@ -154,15 +167,23 @@ class CommandSupervisor:
                     notes.append("Injected '-Attributes !ReparsePoint' to prevent NTFS junction loop hangs")
 
         # 2. Smart Anti-WAF Throttling & Tool Pacing defaults
-        low_cmd = adapted.lower()
-        if "curl" in low_cmd:
-            if "-m " not in low_cmd and "--max-time" not in low_cmd:
-                adapted = re.sub(r"\bcurl\b(?!\s+-m\b)(?!\s+--max-time\b)", "curl -m 25", adapted, count=1)
-                notes.append("Injected '-m 25' network timeout safety on curl")
+        # ONLY adapt curl when it is an executable invocation at start of line or after command separator (; && || |)
+        curl_pattern = r"(^|[\;&|]\s*|\n\s*)curl\b"
+        if re.search(curl_pattern, adapted):
+            low_cmd = adapted.lower()
             if "-a " not in low_cmd and "--user-agent" not in low_cmd:
-                adapted = re.sub(r"\bcurl\b", 'curl -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"', adapted, count=1)
+                def _inject_curl_ua(m):
+                    prefix = m.group(1) or ""
+                    return f'{prefix}curl -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"'
+                adapted = re.sub(curl_pattern, _inject_curl_ua, adapted, count=1)
                 notes.append("Injected browser User-Agent to avoid default curl WAF blocks")
 
+            low_cmd = adapted.lower()
+            if "-m " not in low_cmd and "--max-time" not in low_cmd:
+                adapted = re.sub(curl_pattern, r"\g<1>curl -m 25", adapted, count=1)
+                notes.append("Injected '-m 25' network timeout safety on curl")
+
+        low_cmd = adapted.lower()
         # ffuf: throttle request burst to avoid instant 429 IP bans
         if low_cmd.startswith("ffuf") or " ffuf " in low_cmd:
             if "-rate" not in low_cmd and " -p " not in low_cmd:
@@ -194,7 +215,6 @@ class CommandSupervisor:
 
         # 3. Classify execution profile
         first_token = low_cmd.split()[0] if low_cmd.split() else ""
-        # Strip path or extensions
         bin_name = os.path.basename(first_token).replace(".exe", "").replace(".bat", "")
 
         fast_probes = {
@@ -205,7 +225,7 @@ class CommandSupervisor:
         network_tools = {
             "subfinder", "httpx", "amass", "whatweb", "wafw00f", "pip", "npm",
             "git-dumper", "arjun", "waybackurls", "gau", "paramspider",
-            "katana", "dnsx", "assetfinder", "curl", "python", "python3"
+            "katana", "dnsx", "assetfinder", "curl", "python", "python3", "playwright"
         }
         heavy_scanners = {
             "nmap", "masscan", "ffuf", "gobuster", "feroxbuster", "dirsearch",
@@ -213,15 +233,16 @@ class CommandSupervisor:
             "hashcat", "john"
         }
 
-        if bin_name in fast_probes or (bin_name == "git" and "clone" not in low_cmd):
-            profile_name = "FAST_PROBE"
-            base, stall, ext, max_t = cls.PROFILE_FAST_PROBE
-        elif any(tool in low_cmd for tool in heavy_scanners):
+        # Check for heavy or network tools ANYWHERE in compound commands before defaulting to fast probe
+        if any(tool in low_cmd for tool in heavy_scanners):
             profile_name = "HEAVY_SCANNER"
             base, stall, ext, max_t = cls.PROFILE_HEAVY_SCANNER
         elif any(tool in low_cmd for tool in network_tools) or "install" in low_cmd:
             profile_name = "NETWORK_TOOL"
             base, stall, ext, max_t = cls.PROFILE_NETWORK_TOOL
+        elif bin_name in fast_probes and not any(sep in low_cmd for sep in (";", "&&", "||", "|")):
+            profile_name = "FAST_PROBE"
+            base, stall, ext, max_t = cls.PROFILE_FAST_PROBE
         else:
             profile_name = "DEFAULT"
             base, stall, ext, max_t = cls.PROFILE_DEFAULT
@@ -265,11 +286,6 @@ class TaskRunner:
     def _kill_tree(self, proc: subprocess.Popen):
         if proc is None:
             return
-        try:
-            if proc.poll() is not None:
-                return
-        except Exception:
-            pass
 
         if IS_WIN:
             try:
@@ -453,7 +469,17 @@ class TaskRunner:
             while True:
                 time.sleep(0.2)
                 with self._lock:
-                    if self._cancelled or proc.poll() is not None:
+                    if self._cancelled:
+                        return
+                    if proc.poll() is not None:
+                        # Process itself has terminated. Give at most 1.0s grace period for stdout buffer
+                        time.sleep(1.0)
+                        try:
+                            if proc.stdout and not proc.stdout.closed:
+                                proc.stdout.close()
+                        except Exception:
+                            pass
+                        self._kill_tree(proc)
                         return
 
                 now = time.time()
@@ -466,6 +492,11 @@ class TaskRunner:
                     supervisor_notes.append(
                         f"Command supervisor: process stalled with 0 output for {int(silence)}s. Cleanly terminated."
                     )
+                    try:
+                        if proc.stdout and not proc.stdout.closed:
+                            proc.stdout.close()
+                    except Exception:
+                        pass
                     self._kill_tree(proc)
                     return
 
@@ -475,6 +506,11 @@ class TaskRunner:
                     supervisor_notes.append(
                         f"Command supervisor: process reached timeout budget ({int(current_timeout)}s). Cleanly terminated."
                     )
+                    try:
+                        if proc.stdout and not proc.stdout.closed:
+                            proc.stdout.close()
+                    except Exception:
+                        pass
                     self._kill_tree(proc)
                     return
 

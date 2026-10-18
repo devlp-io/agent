@@ -120,3 +120,105 @@ class ErrorEvent(AgentEvent):
         super().__init__(timestamp)
         self.error = error
         self.context = context
+
+
+class PhaseTransitionEvent(AgentEvent):
+    """Event emitted when assessment transitions phase, with explicit what's done & next moves."""
+    def __init__(
+        self,
+        phase_num: int = 1,
+        phase_name: str = "Fingerprinting",
+        target: str = "",
+        whats_done: Optional[List[str]] = None,
+        whats_next: Optional[List[str]] = None,
+        findings_count: int = 0,
+        endpoints_count: int = 0,
+        timestamp: Optional[float] = None,
+    ):
+        super().__init__(timestamp)
+        self.phase_num = phase_num
+        self.phase_name = phase_name
+        self.target = target
+        self.whats_done = whats_done or []
+        self.whats_next = whats_next or []
+        self.findings_count = findings_count
+        self.endpoints_count = endpoints_count
+
+
+class SubagentStartEvent(AgentEvent):
+    """Event emitted when an autonomous subagent is dispatched."""
+    def __init__(
+        self,
+        subagent_type: str = "recon",
+        task: str = "",
+        subagent_id: str = "",
+        timestamp: Optional[float] = None,
+    ):
+        super().__init__(timestamp)
+        self.subagent_type = subagent_type
+        self.task = task
+        self.subagent_id = subagent_id
+
+
+class SubagentFinishEvent(AgentEvent):
+    """Event emitted when an autonomous subagent completes its task."""
+    def __init__(
+        self,
+        subagent_type: str = "recon",
+        summary: str = "",
+        subagent_id: str = "",
+        success: bool = True,
+        duration_sec: float = 0.0,
+        findings_discovered: int = 0,
+        details: str = "",
+        timestamp: Optional[float] = None,
+    ):
+        super().__init__(timestamp)
+        self.subagent_type = subagent_type
+        self.summary = summary
+        self.subagent_id = subagent_id
+        self.success = success
+        self.duration_sec = duration_sec
+        self.findings_discovered = findings_discovered
+        self.details = details
+
+
+class PayloadCardEvent(AgentEvent):
+    """Event emitted when a payload or malware component is generated."""
+    def __init__(
+        self,
+        payload_type: str = "shellcode",
+        target_platform: str = "linux/x64",
+        code: str = "",
+        evasion_notes: str = "",
+        compilation_cmd: str = "",
+        timestamp: Optional[float] = None,
+    ):
+        super().__init__(timestamp)
+        self.payload_type = payload_type
+        self.target_platform = target_platform
+        self.code = code
+        self.evasion_notes = evasion_notes
+        self.compilation_cmd = compilation_cmd
+
+
+class ExploitCardEvent(AgentEvent):
+    """Event emitted when an exploit or attack chain is executed."""
+    def __init__(
+        self,
+        title: str = "",
+        target: str = "",
+        tool: str = "",
+        success: bool = False,
+        output_snippet: str = "",
+        proof: str = "",
+        timestamp: Optional[float] = None,
+    ):
+        super().__init__(timestamp)
+        self.title = title
+        self.target = target
+        self.tool = tool
+        self.success = success
+        self.output_snippet = output_snippet
+        self.proof = proof
+

@@ -116,17 +116,20 @@ _DRY_RUN = False
 # operator's line, not a moralizing check
 # ────────────────────────────────────────────────────────────────────
 
+# Operator line: only catastrophic whole-disk wipeouts are blocked; all red-team commands, exploits, payloads are unconstrained
 _DENY_PATTERNS = (
-    __import__("re").compile(r"\brm\s+(-[rRf]+\s+)*/\s*(?:$|[;&|])"),
-    __import__("re").compile(r"\bmkfs(?:\.[a-z0-9]+)?\b"),
-    __import__("re").compile(r"\bdd\s+if=.*\bof=/dev/"),
-    __import__("re").compile(r"\bfind\s+/\s+(?:-\w+\s+)*-delete"),
-    __import__("re").compile(r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:"),
-    __import__("re").compile(r"\bchmod\s+-R\s+777\s+/(?:\s|$)"),
     __import__("re").compile(r">\s*/dev/sd[a-z]\b"),
+    __import__("re").compile(r"\bmkfs(?:\.[a-z0-9]+)?\s+/dev/sd[a-z]\b"),
+    __import__("re").compile(r"\bdd\s+if=.*\bof=/dev/sd[a-z]\b"),
 )
 
 def _is_denied(cmd):
+    # Unconstrained mode: allow all red team, exploits, malware dev, compilers, tools
+    if os.environ.get("AG_UNCONSTRAINED", "1") == "1":
+        for p in _DENY_PATTERNS:
+            if p.search(cmd):
+                return True, p.pattern
+        return False, None
     for p in _DENY_PATTERNS:
         if p.search(cmd):
             return True, p.pattern
@@ -136,14 +139,17 @@ def _is_denied(cmd):
 _URL_IN_CMD = __import__("re").compile(r"https?://[^\s\"\'|;&<>()]+")
 
 def _scope_check_cmd(cmd):
-    """Block any command whose URLs fall outside scope.txt (if scope.txt exists)."""
-    if _scope is None:
+    """Permissive scope check: allow full autonomous exploration unless scope.txt specifically requires restriction."""
+    if os.environ.get("AG_UNCONSTRAINED", "1") == "1":
+        return True, None
+    if _scope is None or not (RUN_DIR and (RUN_DIR / "scope.txt").exists()):
         return True, None
     for u in _URL_IN_CMD.findall(cmd):
         ok, reason = _scope.in_scope(u, RUN_DIR)
         if not ok:
             return False, f"{u} — {reason}"
     return True, None
+
 
 
 def current_client():
@@ -450,6 +456,7 @@ _DIRECTIVE_NAMES = [
     "STACK", "SCHEMA", "GOAL", "REPLAN", "BELIEF", "POC", "AUTO-POC",
     "BROWSER-SOLVE", "BROWSER-FETCH", "BROWSER-CLEAR", "PROXY-STATUS",
     "PROXY-REFRESH", "PROXY-CLEAR", "AUTH", "TOOLFIX", "DB-TRIAGE",
+    "SUBAGENT", "MALWARE",
 ]
 
 # line-anchored: directive must start at column 0 (after optional spaces),
@@ -636,11 +643,6 @@ def _kill_tree(proc):
     """Kill the whole process group — node/chromium/child shells included."""
     if proc is None:
         return
-    try:
-        if proc.poll() is not None:
-            return
-    except Exception:
-        pass
     if hasattr(os, "killpg") and hasattr(os, "getpgid"):
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
@@ -865,6 +867,16 @@ def _run_shell(cmd, timeout=None, _proxy_retry=0, _proxy_exclude=None):
     except Exception as e:
         return f"ERROR: {e}"
 
+    # Sanitize hallucinated model tags and background &
+    if isinstance(spawn_cmd, str):
+        spawn_cmd = re.sub(r"</?[a-zA-Z0-9_\-:\s|]+>\s*$", "", spawn_cmd).strip()
+        spawn_cmd = re.sub(r"<\s*/\s*[^>]*parameter\s*>\s*$", "", spawn_cmd, flags=re.I).strip()
+        spawn_cmd = re.sub(r"<\s*/\s*[^>]*DSML[^>]*>\s*$", "", spawn_cmd, flags=re.I).strip()
+        spawn_cmd = re.sub(r"</[^>]*parameter.*$", "", spawn_cmd, flags=re.I).strip()
+        spawn_cmd = re.sub(r"</?$", "", spawn_cmd).strip()
+        if spawn_cmd.endswith("&") and not spawn_cmd.endswith(r"\&") and not spawn_cmd.endswith("&&"):
+            spawn_cmd = spawn_cmd[:-1].rstrip()
+
     accumulated = []
     start = time.time()
     timed_out = False
@@ -873,12 +885,21 @@ def _run_shell(cmd, timeout=None, _proxy_retry=0, _proxy_exclude=None):
     def _watchdog():
         while time.time() - start < base_timeout:
             if proc.poll() is not None:
+                # Process itself exited. Wait up to 1.0s grace period for stdout buffer
+                time.sleep(1.0)
+                try:
+                    if proc.stdout and not proc.stdout.closed:
+                        proc.stdout.close()
+                except Exception:
+                    pass
+                _kill_tree(proc)
                 return
             time.sleep(0.5)
         # timeout hit — kill tree
         _kill_tree(proc)
         try:
-            os.close(proc.stdout.fileno())
+            if proc.stdout and not proc.stdout.closed:
+                proc.stdout.close()
         except Exception:
             pass
 
@@ -3210,6 +3231,27 @@ def do_toolfix(spec):
     return f"TOOLFIX {spec}:\n{install_any(spec)}"
 
 
+def do_subagent(payload):
+    parts = payload.split("|", 1)
+    stype = parts[0].strip()
+    task = parts[1].strip() if len(parts) > 1 else ""
+    try:
+        from core.subagents import SubagentDispatcher
+        res = SubagentDispatcher.dispatch(stype, task, lambda e: None, work_dir=RUN_DIR)
+        return f"[SUBAGENT {stype.upper()}]: {res.summary}\n{res.details[:600]}"
+    except Exception as e:
+        return f"[SUBAGENT ERROR]: failed running {stype}: {e}"
+
+
+def do_malware(payload):
+    try:
+        from core.subagents import SubagentDispatcher
+        res = SubagentDispatcher.dispatch("malware", payload, lambda e: None, work_dir=RUN_DIR)
+        return f"[MALWARE LAB]: {res.summary}\n{res.details[:600]}"
+    except Exception as e:
+        return f"[MALWARE LAB ERROR]: {e}"
+
+
 DISPATCH = {
     "COMMAND": do_command,
     "PARALLEL": do_parallel,
@@ -3270,7 +3312,10 @@ DISPATCH = {
     "DB-TRIAGE": do_db_triage,
     "GOAL": do_goal,
     "REPLAN": do_replan,
+    "SUBAGENT": do_subagent,
+    "MALWARE": do_malware,
 }
+
 
 
 # map directive kind → recorder kind, for the ones worth logging

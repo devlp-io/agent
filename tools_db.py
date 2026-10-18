@@ -207,8 +207,48 @@ TOOLS = {
     # MISC / EXPLOIT FRAMEWORKS
     # ═══════════════════════════════════════════════════════════════════
     "msfconsole":  {"check": "command -v msfconsole",  "install": "apt install -y metasploit-framework || pkg install -y metasploit", "category": "misc", "desc": "metasploit framework", "url": "https://www.metasploit.com/"},
+    "msfvenom":    {"check": "command -v msfvenom",    "install": "apt install -y metasploit-framework", "category": "misc", "desc": "payload generation & encoding", "url": "https://www.metasploit.com/"},
     "searchsploit": {"check": "command -v searchsploit", "install": "apt install -y exploitdb || git clone --depth 1 https://gitlab.com/exploit-database/exploitdb ~/agent/tools/exploitdb && ln -sf ~/agent/tools/exploitdb/searchsploit ~/agent/tools/searchsploit", "category": "misc", "desc": "exploit-db local search", "url": "https://gitlab.com/exploit-database/exploitdb"},
+
+    # ═══════════════════════════════════════════════════════════════════
+    # RED TEAM / C2 / POST-EXPLOIT / MALWARE LAB
+    # ═══════════════════════════════════════════════════════════════════
+    "sliver":      {"check": "command -v sliver-server || command -v sliver", "install": "curl -s https://sliver.sh/install | bash", "category": "pivot", "desc": "Sliver C2 framework (cross-platform implants)", "url": "https://github.com/BishopFox/sliver"},
+    "pwncat":      {"check": "command -v pwncat-cs || command -v pwncat", "install": "pipx install pwncat-cs || pip install --user pwncat-cs", "category": "pivot", "desc": "post-exploitation & reverse shell handler", "url": "https://github.com/calebstewart/pwncat"},
+    "evil-winrm":  {"check": "command -v evil-winrm",  "install": "gem install evil-winrm || pipx install evil-winrm", "category": "pivot", "desc": "WinRM shell for pentesting", "url": "https://github.com/Hackplayers/evil-winrm"},
+    "certipy":     {"check": "command -v certipy",     "install": "pipx install certipy-ad || pip install --user certipy-ad", "category": "pivot", "desc": "Active Directory Certificate Services enumeration & abuse", "url": "https://github.com/ly4k/Certipy"},
+    "coercer":     {"check": "command -v coercer",     "install": "pipx install coercer || pip install --user coercer", "category": "pivot", "desc": "coerces Windows servers to authenticate to arbitrary machines", "url": "https://github.com/p0dalirius/Coercer"},
+    "pypykatz":    {"check": "command -v pypykatz",    "install": "pipx install pypykatz || pip install --user pypykatz", "category": "creds", "desc": "Pure Python Mimikatz implementation", "url": "https://github.com/skelsec/pypykatz"},
+    "linpeas":     {"check": "test -f ~/agent/tools/linpeas.sh", "install": "mkdir -p ~/agent/tools && curl -sL https://github.com/peass-ng/PEASS-ng/releases/latest/download/linpeas.sh -o ~/agent/tools/linpeas.sh && chmod +x ~/agent/tools/linpeas.sh", "category": "pivot", "desc": "Linux privilege escalation checker", "url": "https://github.com/peass-ng/PEASS-ng"},
+    "winpeas":     {"check": "test -f ~/agent/tools/winPEASx64.exe", "install": "mkdir -p ~/agent/tools && curl -sL https://github.com/peass-ng/PEASS-ng/releases/latest/download/winPEASx64.exe -o ~/agent/tools/winPEASx64.exe", "category": "pivot", "desc": "Windows privilege escalation checker", "url": "https://github.com/peass-ng/PEASS-ng"},
+    "donut":       {"check": "command -v donut",       "install": "pipx install donut-shellcode || git clone --depth 1 https://github.com/TheWover/donut ~/agent/tools/donut && cd ~/agent/tools/donut && make", "category": "misc", "desc": "Position-independent shellcode generator from VBS/JS/EXE/DLL", "url": "https://github.com/TheWover/donut"},
+    "upx":         {"check": "command -v upx",         "install": "apt install -y upx-ucl || pkg install -y upx", "category": "util", "desc": "executable packer for evasion/compression", "url": "https://upx.github.io/"},
+
+    # ═══════════════════════════════════════════════════════════════════
+    # REVERSING / BINARY EXPLOITATION
+    # ═══════════════════════════════════════════════════════════════════
+    "radare2":     {"check": "command -v r2 || command -v radare2", "install": "apt install -y radare2 || git clone --depth 1 https://github.com/radareorg/radare2 ~/agent/tools/radare2 && ~/agent/tools/radare2/sys/install.sh", "category": "misc", "desc": "reverse engineering framework & disassembler", "url": "https://github.com/radareorg/radare2"},
+    "pwntools":    {"check": "python3 -c 'import pwn' 2>/dev/null", "install": "pip install --user pwntools", "category": "misc", "desc": "CTF & exploit development framework", "url": "https://github.com/Gallopsled/pwntools"},
+    "ropper":      {"check": "command -v ropper",      "install": "pipx install ropper || pip install --user ropper", "category": "misc", "desc": "ROP chain & gadget finder", "url": "https://github.com/sashs/Ropper"},
+    "ROPgadget":   {"check": "command -v ROPgadget",   "install": "pipx install ROPgadget || pip install --user ROPgadget", "category": "misc", "desc": "ROP gadget finder with binary search", "url": "https://github.com/JonathanSalwan/ROPgadget"},
+    "checksec":    {"check": "command -v checksec",    "install": "apt install -y checksec || curl -sL https://raw.githubusercontent.com/slimm609/checksec.sh/master/checksec -o ~/agent/tools/checksec && chmod +x ~/agent/tools/checksec", "category": "misc", "desc": "binary mitigation check (RELRO, Canary, NX, PIE)", "url": "https://github.com/slimm609/checksec.sh"},
+    "gdb":         {"check": "command -v gdb",         "install": "apt install -y gdb", "category": "misc", "desc": "GNU Project debugger", "url": "https://www.gnu.org/software/gdb/"},
+    "strace":      {"check": "command -v strace",      "install": "apt install -y strace", "category": "util", "desc": "Linux system call tracer", "url": "https://strace.io/"},
+    "ltrace":      {"check": "command -v ltrace",      "install": "apt install -y ltrace", "category": "util", "desc": "Linux library call tracer", "url": "https://ltrace.org/"},
+    "binwalk":     {"check": "command -v binwalk",     "install": "apt install -y binwalk || pip install --user binwalk", "category": "misc", "desc": "firmware analysis & binary extraction", "url": "https://github.com/ReFirmLabs/binwalk"},
+
+    # ═══════════════════════════════════════════════════════════════════
+    # COMPILERS & SYSTEM TOOLCHAINS (WSL Ubuntu Focus)
+    # ═══════════════════════════════════════════════════════════════════
+    "gcc":         {"check": "command -v gcc",         "install": "apt install -y build-essential gcc", "category": "util", "desc": "GNU C Compiler", "url": "https://gcc.gnu.org/"},
+    "g++":         {"check": "command -v g++",         "install": "apt install -y g++", "category": "util", "desc": "GNU C++ Compiler", "url": "https://gcc.gnu.org/"},
+    "mingw-w64":   {"check": "command -v x86_64-w64-mingw32-gcc", "install": "apt install -y mingw-w64", "category": "util", "desc": "Windows cross-compiler for Linux/WSL", "url": "https://www.mingw-w64.org/"},
+    "nasm":        {"check": "command -v nasm",        "install": "apt install -y nasm", "category": "util", "desc": "Netwide Assembler for x86/x64 shellcode", "url": "https://www.nasm.us/"},
+    "tmux":        {"check": "command -v tmux",        "install": "apt install -y tmux", "category": "util", "desc": "terminal multiplexer for persistent sessions", "url": "https://github.com/tmux/tmux"},
+    "xclip":       {"check": "command -v xclip",       "install": "apt install -y xclip", "category": "util", "desc": "X11 clipboard interface", "url": "https://github.com/astrand/xclip"},
+    "wl-clipboard": {"check": "command -v wl-copy",    "install": "apt install -y wl-clipboard", "category": "util", "desc": "Wayland clipboard interface", "url": "https://github.com/bugaevc/wl-clipboard"},
 }
+
 
 
 def list_categories():
