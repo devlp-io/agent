@@ -802,7 +802,7 @@ class PhaseTransitionCard(Static):
     def __init__(self, phase: Any, name: str, whats_done: Any, whats_next: Any, **kwargs):
         super().__init__(classes="phase-card", **kwargs)
         self.phase = str(phase)
-        self.name = str(name)
+        self.phase_title = str(name)
 
         if isinstance(whats_done, list):
             self.whats_done = "\n".join(f"• {x}" for x in whats_done) if whats_done else "Objectives completed."
@@ -814,7 +814,7 @@ class PhaseTransitionCard(Static):
         else:
             self.whats_next = str(whats_next or "Advancing to next vector.")
 
-        self._header_label = Label(f"◈ PHASE {self.phase}: {self.name.upper()} ◈", classes="phase-header", markup=False)
+        self._header_label = Label(f"◈ PHASE {self.phase}: {self.phase_title.upper()} ◈", classes="phase-header", markup=False)
         self._done_label = Label(f"✓ DONE:\n{self.whats_done}", classes="phase-done-block", markup=False)
         self._next_label = Label(f"▶ NEXT MOVE:\n{self.whats_next}", classes="phase-next-block", markup=False)
 
