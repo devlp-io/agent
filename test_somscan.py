@@ -20,6 +20,7 @@ Tests all 15 requirements specified in the rebuild specification:
 import os
 import sys
 import time
+import shutil
 import unittest
 import pathlib
 from unittest.mock import MagicMock, patch
@@ -432,6 +433,8 @@ class TestSomScan(unittest.TestCase):
 
     def test_27_powershell_dollar_escaping(self):
         """Verify PowerShell commands with variables and semicolons are not mangled by git_bash."""
+        if sys.platform != "win32" and not shutil.which("powershell"):
+            self.skipTest("PowerShell dollar escaping is a Windows git_bash compatibility test")
         runner = TaskRunner()
         cmd = 'powershell -NoProfile -Command "$testvar = 9876; Write-Output (\'RESULT=\' + $testvar)"'
         res = runner.run_command(cmd, timeout=15)

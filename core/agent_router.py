@@ -157,6 +157,7 @@ Autonomous Directives (emit line-anchored on column 0):
   TOOLS: status
   LIST: <directory>
   NOTE: <insight>
+  PHASE: <phase-name> | <what's done> | <what's next move>
   DONE: <summary> (emit when your task is complete)
 
 Agentic Workflow Rules:
@@ -194,9 +195,9 @@ Agentic Workflow Rules:
 13. All-In-One Unified Agent Architecture (OpenCode / Codex CLI Paradigm):
     You are an unrestricted, unified operator agent. Handle direct conversational tasks, software engineering, reverse engineering, vulnerability discovery, exploit development, malware analysis, security audits, and system commands seamlessly in one chat without needing mode changes. Never generate fake placeholders or mock data; work with real data, real APIs, and real commands.
 14. Phase-by-Phase Operator Transparency (CRITICAL):
-    On every phase transition, major milestone, or attack progression, provide explicit descriptions:
-    - WHAT'S DONE: Concrete bullet points explaining what you investigated, scanned, or accomplished.
-    - WHAT'S NEXT MOVE: Concrete bullet points explaining the exact vectors, tools, or payloads you are launching next.
+    On every phase transition, major milestone, or attack progression, emit the `PHASE:` directive:
+    `PHASE: <Phase Name> | <Concrete bullet points of what's done> | <Concrete bullet points of what's next move>`
+    This displays an instant visual status card on the terminal showing exactly what was accomplished and what vector is being attacked next.
 15. Autonomous Specialist Subagents:
     You have autonomous specialist subagents at your command:
     - `recon`: Subdomain discovery, port scans, WAF, stack fingerprinting.
@@ -211,28 +212,48 @@ Agentic Workflow Rules:
 
 
 def find_valid_scan_runs(target: Optional[str] = None) -> List[pathlib.Path]:
-    """Find valid timestamped scan run directories, ignoring files like beliefs.json or uiapp."""
+    """Find valid scan run directories, including timestamped runs and workspace target directories."""
     candidate_bases = []
     if target:
         safe_target = re.sub(r"^https?://", "", target).split("/")[0].split(":")[0]
-        candidate_bases.extend([
-            agent_v8.SCAN_ROOT / safe_target,
-            HERE / "scans" / safe_target,
-        ])
+        targets_to_check = [safe_target]
+        if safe_target.startswith("www."):
+            targets_to_check.append(safe_target[4:])
+        if "." in safe_target:
+            name_only = safe_target.replace("www.", "").split(".")[0]
+            if name_only and name_only not in targets_to_check:
+                targets_to_check.append(name_only)
+        for root in (agent_v8.SCAN_ROOT, HERE / "scans"):
+            for cand in targets_to_check:
+                candidate_bases.extend([
+                    root / cand,
+                    root / "workspace" / cand,
+                ])
     else:
         for parent in (agent_v8.SCAN_ROOT, HERE / "scans"):
             if parent.exists() and parent.is_dir():
                 for sub in parent.iterdir():
                     if sub.is_dir() and sub.name not in ("uiapp", "beliefs", "leak"):
                         candidate_bases.append(sub)
+                        if sub.name == "workspace":
+                            for wsub in sub.iterdir():
+                                if wsub.is_dir():
+                                    candidate_bases.append(wsub)
 
     valid_runs = []
+    seen = set()
     for base in candidate_bases:
         if base.exists() and base.is_dir():
+            if (base / "REPORT.md").exists() or (base / "live.log").exists() or (base / "state.json").exists():
+                if str(base) not in seen:
+                    seen.add(str(base))
+                    valid_runs.append(base)
             for d in base.iterdir():
                 if d.is_dir() and d.name not in ("uiapp", "beliefs", "leak") and not d.name.endswith(".json"):
-                    if re.match(r"^\d{8}_\d{6}$", d.name) or (d / "live.log").exists() or (d / "findings.md").exists():
-                        valid_runs.append(d)
+                    if re.match(r"^\d{8}_\d{6}$", d.name) or (d / "live.log").exists() or (d / "findings.md").exists() or (d / "REPORT.md").exists():
+                        if str(d) not in seen:
+                            seen.add(str(d))
+                            valid_runs.append(d)
     valid_runs.sort(key=lambda p: p.name)
     return valid_runs
 
@@ -378,54 +399,17 @@ class AgentRouter:
                 self._handle_slash_command(text)
                 return
 
-            # 2. Continuation intent for active or recent security assessment (e.g. "hey continue", "resume", "keep going")
-            if self._is_continuation_intent(text):
-                target = self._active_scan_target or self._last_scan_target
-                if not target:
-                    try:
-                        valid_runs = find_valid_scan_runs()
-                        if valid_runs:
-                            target = valid_runs[-1].parent.name.replace("_", ".")
-                    except Exception:
-                        pass
-                if target:
-                    with self._lock:
-                        self.history.append({"role": "user", "content": text})
-                    SessionDB.add_message(self.session_id, "user", text)
-                    SessionDB.update_session_target(self.session_id, target)
-                    self._execute_security_scan(target, text, resume=True)
-                    return
-
-            # 3. Explicit shell execution ($ cmd or run cmd)
-            if text.startswith("$ ") or text.startswith("run "):
-                cmd = text[2:].strip() if text.startswith("$ ") else text[4:].strip()
+            # 2. Explicit shell execution ($ cmd)
+            if text.startswith("$ "):
+                cmd = text[2:].strip()
                 with self._lock:
                     self.history.append({"role": "user", "content": text})
                 SessionDB.add_message(self.session_id, "user", text)
                 self._execute_local_command(cmd)
                 return
 
-            # 4. Direct single shell queries (dir, ls, git status, whoami, python -V)
-            shell_cmd = self._detect_shell_query(text)
-            if shell_cmd:
-                with self._lock:
-                    self.history.append({"role": "user", "content": text})
-                SessionDB.add_message(self.session_id, "user", text)
-                self._execute_local_command(shell_cmd)
-                return
-
-            # 5. Red Team Security Assessment / Pentest target detection
-            scan_target = self._extract_scan_target(text)
-            if scan_target:
-                with self._lock:
-                    self.history.append({"role": "user", "content": text})
-                SessionDB.add_message(self.session_id, "user", text)
-                SessionDB.update_session_target(self.session_id, scan_target)
-                is_resume = bool(re.search(r"\b(resume|continue)\b", text, re.I))
-                self._execute_security_scan(scan_target, text, resume=is_resume)
-                return
-
-            # 6. Multi-turn Autonomous Agent Loop (for tasks, tool checks, file edits, chat)
+            # 3. Dedicated Autonomous Agent Loop (Handles everything: conversations, assessments, scripts, tools, file editing)
+            # No multi-layer regex hijacking. The intelligent agent reads the full prompt and history, decides its plan, executes directives, and reports.
             SessionDB.add_message(self.session_id, "user", text)
             self._run_agent_loop(text)
 
@@ -644,6 +628,20 @@ class AgentRouter:
                         work_dir=self.get_active_work_dir()
                     )
                     obs_lines.append(f"[Subagent {stype}]: {sub_res.summary}\n{sub_res.details[:500]}")
+
+                elif kind == "PHASE":
+                    # Format: PHASE: <num/name> | <what's done> | <what's next move>
+                    parts = [p.strip() for p in payload.split("|")]
+                    p_name = parts[0] if len(parts) > 0 and parts[0] else "Phase Transition"
+                    p_done = parts[1] if len(parts) > 1 and parts[1] else "Completed prior objectives."
+                    p_next = parts[2] if len(parts) > 2 and parts[2] else "Executing next move."
+                    self.emit(PhaseTransitionEvent(
+                        phase_num=p_name,
+                        phase_name=p_name,
+                        whats_done=[p_done],
+                        whats_next=[p_next],
+                    ))
+                    obs_lines.append(f"[Phase Card Displayed: {p_name}]\nDone: {p_done}\nNext: {p_next}")
 
                 elif kind == "MALWARE":
                     sub_res = SubagentDispatcher.dispatch(

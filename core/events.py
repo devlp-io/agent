@@ -126,23 +126,33 @@ class PhaseTransitionEvent(AgentEvent):
     """Event emitted when assessment transitions phase, with explicit what's done & next moves."""
     def __init__(
         self,
-        phase_num: int = 1,
-        phase_name: str = "Fingerprinting",
+        phase_num: Any = 1,
+        phase_name: str = "Phase Transition",
         target: str = "",
-        whats_done: Optional[List[str]] = None,
-        whats_next: Optional[List[str]] = None,
+        whats_done: Optional[Any] = None,
+        whats_next: Optional[Any] = None,
         findings_count: int = 0,
         endpoints_count: int = 0,
         timestamp: Optional[float] = None,
+        phase: Optional[Any] = None,
+        name: Optional[str] = None,
     ):
         super().__init__(timestamp)
-        self.phase_num = phase_num
-        self.phase_name = phase_name
+        self.phase_num = phase if phase is not None else phase_num
+        self.phase_name = name if name is not None else phase_name
         self.target = target
         self.whats_done = whats_done or []
         self.whats_next = whats_next or []
         self.findings_count = findings_count
         self.endpoints_count = endpoints_count
+
+    @property
+    def phase(self) -> Any:
+        return self.phase_num
+
+    @property
+    def name(self) -> str:
+        return self.phase_name
 
 
 class SubagentStartEvent(AgentEvent):

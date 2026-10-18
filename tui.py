@@ -799,15 +799,24 @@ class CodeBubble(Static):
 class PhaseTransitionCard(Static):
     """Visual card for scan/attack phase transitions with explicit what's done & what's next."""
 
-    def __init__(self, phase: str, name: str, whats_done: str, whats_next: str, **kwargs):
+    def __init__(self, phase: Any, name: str, whats_done: Any, whats_next: Any, **kwargs):
         super().__init__(classes="phase-card", **kwargs)
-        self.phase = phase
-        self.name = name
-        self.whats_done = whats_done
-        self.whats_next = whats_next
+        self.phase = str(phase)
+        self.name = str(name)
+
+        if isinstance(whats_done, list):
+            self.whats_done = "\n".join(f"• {x}" for x in whats_done) if whats_done else "Objectives completed."
+        else:
+            self.whats_done = str(whats_done or "Objectives completed.")
+
+        if isinstance(whats_next, list):
+            self.whats_next = "\n".join(f"• {x}" for x in whats_next) if whats_next else "Advancing to next vector."
+        else:
+            self.whats_next = str(whats_next or "Advancing to next vector.")
+
         self._header_label = Label(f"◈ PHASE {self.phase}: {self.name.upper()} ◈", classes="phase-header", markup=False)
-        self._done_label = Label(f"✓ DONE: {self.whats_done}", classes="phase-done-block", markup=False)
-        self._next_label = Label(f"▶ NEXT MOVE: {self.whats_next}", classes="phase-next-block", markup=False)
+        self._done_label = Label(f"✓ DONE:\n{self.whats_done}", classes="phase-done-block", markup=False)
+        self._next_label = Label(f"▶ NEXT MOVE:\n{self.whats_next}", classes="phase-next-block", markup=False)
 
     def compose(self) -> ComposeResult:
         yield self._header_label
@@ -1750,16 +1759,18 @@ class SomScanApp(App):
         elif isinstance(event, PhaseTransitionEvent):
             self._last_emitter = "phase"
             self._handle_event(ThinkingStopEvent())
+            phase_val = getattr(event, "phase", getattr(event, "phase_num", 1))
+            name_val = getattr(event, "name", getattr(event, "phase_name", "Phase Transition"))
             card = PhaseTransitionCard(
-                phase=event.phase,
-                name=event.name,
-                whats_done=event.whats_done,
-                whats_next=event.whats_next,
+                phase=phase_val,
+                name=name_val,
+                whats_done=getattr(event, "whats_done", []),
+                whats_next=getattr(event, "whats_next", []),
             )
             if scroll is not None:
                 scroll.mount(card)
             self._conversation_history.append(
-                f"[Phase {event.phase}: {event.name}]\n✓ Done: {event.whats_done}\n▶ Next Move: {event.whats_next}"
+                f"[Phase {phase_val}: {name_val}]\n✓ Done:\n{card.whats_done}\n▶ Next Move:\n{card.whats_next}"
             )
 
         elif isinstance(event, SubagentStartEvent):
