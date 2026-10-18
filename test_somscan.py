@@ -697,9 +697,53 @@ class TestSomScan(unittest.TestCase):
         self.assertIn("biriqstore.com", mem_prompt)
         self.assertIn("ACTIVE SESSION ASSESSMENT MEMORY", mem_prompt)
 
+    def test_40_nonstop_loop_commentary_continuation_and_diagnostics(self):
+        """Verify autonomous loop does NOT prematurely stop on commentary, resists false DONE, and provides diagnostics."""
+        events = []
+        router = AgentRouter(event_callback=lambda ev: events.append(ev))
+
+        # 1. Verify strict _check_is_done immunity to casual English
+        self.assertFalse(router._check_is_done("Done testing initial batch of 5 requests."))
+        self.assertFalse(router._check_is_done("Done with step 1."))
+        self.assertFalse(router._check_is_done("done."))
+        self.assertFalse(router._check_is_done("- Done: audited endpoints"))
+        self.assertTrue(router._check_is_done("DONE: comprehensive audit complete"))
+        self.assertTrue(router._check_is_done("Everything finished. DONE"))
+        self.assertTrue(router._check_is_done("DONE"))
+
+        # 2. Multi-turn execution test:
+        # Turn 1: model executes command
+        # Turn 2: model responds with commentary containing 'Done testing...' and NO directives (would kill agent in old code)
+        # Turn 3: model responds to supervisor directive with a second command
+        # Turn 4: model explicitly emits DONE: directive
+        responses = [
+            ['COMMAND: echo "step1_output"'],
+            ['Done testing the initial batch. The verify-otp endpoint showed no rate limit.'],
+            ['COMMAND: echo "step2_pivoting"'],
+            ['DONE: assessment fully accomplished and verified.'],
+        ]
+
+        def mock_stream(history):
+            if responses:
+                return responses.pop(0)
+            return ["DONE: finished"]
+
+        with patch.object(router.model_manager, "stream_chat", side_effect=mock_stream):
+            router._run_agent_loop("test target rate limit on beco.so")
+
+            # Check that both commands executed
+            cmd_outputs = [e.output for e in events if isinstance(e, CommandFinishEvent)]
+            self.assertTrue(any("step1_output" in str(out) for out in cmd_outputs), "Step 1 command should have executed")
+            self.assertTrue(any("step2_pivoting" in str(out) for out in cmd_outputs), "Step 2 command should have executed after commentary turn")
+
+            # Check that task completed cleanly at the end
+            has_complete = any(isinstance(e, TaskCompleteEvent) and e.success for e in events)
+            self.assertTrue(has_complete, "Autonomous loop should finish with TaskCompleteEvent upon explicit DONE directive")
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 
