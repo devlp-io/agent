@@ -93,6 +93,7 @@ wordlists/*.zip
 wordlists/seclists/
 wordlists/PayloadsAllTheThings/
 installs.json
+tools_verified.json
 
 # runtime artifacts
 .env.models

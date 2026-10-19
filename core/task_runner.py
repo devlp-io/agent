@@ -57,9 +57,13 @@ def get_real_python() -> str:
     if getattr(sys, "frozen", False):
         import shutil
         for candidate in (
+            os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python\Python314\python.exe"),
+            os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python\Python313\python.exe"),
             os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python\Python312\python.exe"),
             os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python\Python311\python.exe"),
             os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python\Python310\python.exe"),
+            r"C:\Program Files\Python314\python.exe",
+            r"C:\Program Files\Python313\python.exe",
             r"C:\Program Files\Python312\python.exe",
             r"C:\Program Files\Python311\python.exe",
             r"C:\Program Files\Python310\python.exe",
@@ -81,10 +85,10 @@ class CommandSupervisor:
     """
 
     # Tool Profiles: (base_timeout, stall_threshold, extension_step, max_timeout)
-    PROFILE_FAST_PROBE = (35.0, 15.0, 30.0, 180.0)
-    PROFILE_NETWORK_TOOL = (120.0, 30.0, 60.0, 900.0)
-    PROFILE_HEAVY_SCANNER = (600.0, 60.0, 120.0, 3600.0)
-    PROFILE_DEFAULT = (180.0, 30.0, 60.0, 1200.0)
+    PROFILE_FAST_PROBE = (45.0, 30.0, 30.0, 180.0)
+    PROFILE_NETWORK_TOOL = (180.0, 90.0, 60.0, 1200.0)
+    PROFILE_HEAVY_SCANNER = (900.0, 180.0, 120.0, 3600.0)
+    PROFILE_DEFAULT = (300.0, 90.0, 60.0, 1800.0)
 
     @classmethod
     def analyze_and_adapt(cls, command: str) -> Tuple[str, Dict[str, Any]]:
@@ -167,51 +171,59 @@ class CommandSupervisor:
                     notes.append("Injected '-Attributes !ReparsePoint' to prevent NTFS junction loop hangs")
 
         # 2. Smart Anti-WAF Throttling & Tool Pacing defaults
-        # ONLY adapt curl when it is an executable invocation at start of line or after command separator (; && || |)
-        curl_pattern = r"(^|[\;&|]\s*|\n\s*)curl\b"
-        if re.search(curl_pattern, adapted):
-            low_cmd = adapted.lower()
-            if "-a " not in low_cmd and "--user-agent" not in low_cmd:
-                def _inject_curl_ua(m):
-                    prefix = m.group(1) or ""
-                    return f'{prefix}curl -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"'
-                adapted = re.sub(curl_pattern, _inject_curl_ua, adapted, count=1)
-                notes.append("Injected browser User-Agent to avoid default curl WAF blocks")
-
-            low_cmd = adapted.lower()
-            if "-m " not in low_cmd and "--max-time" not in low_cmd:
-                adapted = re.sub(curl_pattern, r"\g<1>curl -m 25", adapted, count=1)
-                notes.append("Injected '-m 25' network timeout safety on curl")
+        # Safeguard: NEVER inject or append flags to compound commands, pipelines, loops, scripts, or inspection calls!
+        # Appending flags to compound scripts (e.g. 'for t in ...; do ...; done') causes fatal bash syntax errors
+        # (e.g. 'done -rate-limit 20 -c 5').
+        is_compound = bool(re.search(r"(?:[;\n|&]{1,2}|\$\(|\`|<|>)", adapted))
+        is_inspection = bool(re.match(
+            r"^\s*(?:which|where|where\.exe|type|command|test|echo|cat|grep|ls|find|head|tail|for|while|if|export|set|source|sh|bash|python|python3|pip|pip3|pipx|go|git|docker)\b",
+            adapted,
+            re.IGNORECASE
+        ))
 
         low_cmd = adapted.lower()
-        # ffuf: throttle request burst to avoid instant 429 IP bans
-        if low_cmd.startswith("ffuf") or " ffuf " in low_cmd:
-            if "-rate" not in low_cmd and " -p " not in low_cmd:
-                adapted += " -rate 20 -p 0.05"
-                notes.append("Injected '-rate 20 -p 0.05' anti-WAF pacing on ffuf")
+        if not is_compound and not is_inspection:
+            # curl: direct standalone invocation only
+            curl_pattern = r"^\s*(?:sudo\s+)?curl\b"
+            if re.search(curl_pattern, adapted, re.IGNORECASE):
+                low_cmd = adapted.lower()
+                if "-a " not in low_cmd and "--user-agent" not in low_cmd:
+                    adapted = re.sub(curl_pattern, r"\g<0> -A \"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36\"", adapted, count=1, flags=re.IGNORECASE)
+                    notes.append("Injected browser User-Agent to avoid default curl WAF blocks")
+                low_cmd = adapted.lower()
+                if "-m " not in low_cmd and "--max-time" not in low_cmd:
+                    adapted = re.sub(curl_pattern, r"\g<0> -m 25", adapted, count=1, flags=re.IGNORECASE)
+                    notes.append("Injected '-m 25' network timeout safety on curl")
 
-        # nuclei: limit concurrency and rate to prevent edge WAF tripping
-        if low_cmd.startswith("nuclei") or " nuclei " in low_cmd:
-            if "-rate-limit" not in low_cmd and "-rl" not in low_cmd:
-                adapted += " -rate-limit 20 -c 5"
-                notes.append("Injected '-rate-limit 20 -c 5' anti-WAF pacing on nuclei")
+            low_cmd = adapted.lower()
+            # ffuf: throttle request burst to avoid instant 429 IP bans (direct standalone invocation only)
+            if re.match(r"^\s*(?:sudo\s+)?ffuf\b", adapted, re.IGNORECASE):
+                if "-rate" not in low_cmd and " -p " not in low_cmd:
+                    adapted += " -rate 20 -p 0.05"
+                    notes.append("Injected '-rate 20 -p 0.05' anti-WAF pacing on ffuf")
 
-        # sqlmap: inject delay and random-agent to evade simple signature blocks
-        if low_cmd.startswith("sqlmap") or " sqlmap " in low_cmd:
-            if "--delay" not in low_cmd:
-                adapted += " --delay 0.5"
-                notes.append("Injected '--delay 0.5' to prevent target throttling on sqlmap")
-            if "--random-agent" not in low_cmd:
-                adapted += " --random-agent"
-                notes.append("Injected '--random-agent' header evasion on sqlmap")
+            # nuclei: limit concurrency and rate to prevent edge WAF tripping (direct standalone invocation only)
+            if re.match(r"^\s*(?:sudo\s+)?nuclei\b", adapted, re.IGNORECASE):
+                if "-rate-limit" not in low_cmd and "-rl" not in low_cmd:
+                    adapted += " -rate-limit 20 -c 5"
+                    notes.append("Injected '-rate-limit 20 -c 5' anti-WAF pacing on nuclei")
 
-        # gobuster / dirsearch: add pacing if missing
-        if (low_cmd.startswith("gobuster") or " gobuster " in low_cmd) and "--delay" not in low_cmd:
-            adapted += " --delay 100ms"
-            notes.append("Injected '--delay 100ms' pacing on gobuster")
-        if (low_cmd.startswith("dirsearch") or " dirsearch " in low_cmd) and "-s " not in low_cmd and "--delay" not in low_cmd:
-            adapted += " -s 0.1"
-            notes.append("Injected '-s 0.1' pacing on dirsearch")
+            # sqlmap: inject delay and random-agent to evade simple signature blocks (direct standalone invocation only)
+            if re.match(r"^\s*(?:sudo\s+)?sqlmap(?:\.py)?\b", adapted, re.IGNORECASE):
+                if "--delay" not in low_cmd:
+                    adapted += " --delay 0.5"
+                    notes.append("Injected '--delay 0.5' to prevent target throttling on sqlmap")
+                if "--random-agent" not in low_cmd:
+                    adapted += " --random-agent"
+                    notes.append("Injected '--random-agent' header evasion on sqlmap")
+
+            # gobuster / dirsearch: add pacing if missing (direct standalone invocation only)
+            if re.match(r"^\s*(?:sudo\s+)?gobuster\b", adapted, re.IGNORECASE) and "--delay" not in low_cmd:
+                adapted += " --delay 100ms"
+                notes.append("Injected '--delay 100ms' pacing on gobuster")
+            if re.match(r"^\s*(?:sudo\s+)?dirsearch(?:\.py)?\b", adapted, re.IGNORECASE) and "-s " not in low_cmd and "--delay" not in low_cmd:
+                adapted += " -s 0.1"
+                notes.append("Injected '-s 0.1' pacing on dirsearch")
 
         # 3. Classify execution profile
         first_token = low_cmd.split()[0] if low_cmd.split() else ""
@@ -246,6 +258,24 @@ class CommandSupervisor:
         else:
             profile_name = "DEFAULT"
             base, stall, ext, max_t = cls.PROFILE_DEFAULT
+
+        # Respect caller's explicit timeout budget (e.g. timeout 90 python ... or timeout 120s ...)
+        m_timeout = re.search(r"\btimeout\s+(?:-k\s+\S+\s+)?(\d+)(?:s|m|h)?\b", adapted)
+        if m_timeout:
+            try:
+                explicit_secs = float(m_timeout.group(1))
+                if "m" in m_timeout.group(0):
+                    explicit_secs *= 60
+                elif "h" in m_timeout.group(0):
+                    explicit_secs *= 3600
+                if explicit_secs > stall:
+                    stall = max(stall, explicit_secs + 10.0)
+                if explicit_secs > base:
+                    base = max(base, explicit_secs + 15.0)
+                if explicit_secs > max_t:
+                    max_t = max(max_t, explicit_secs + 120.0)
+            except Exception:
+                pass
 
         config = {
             "profile_name": profile_name,

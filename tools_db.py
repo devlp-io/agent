@@ -28,8 +28,8 @@ TOOLS = {
     "shosubgo":    {"check": "command -v shosubgo",    "install": "go install -v github.com/incogbyte/shosubgo@latest", "category": "recon", "desc": "subdomain enum via shodan", "url": "https://github.com/incogbyte/shosubgo"},
     "github-subdomains": {"check": "command -v github-subdomains", "install": "go install -v github.com/gwen001/github-subdomains@latest", "category": "recon", "desc": "scrape github for subdomains", "url": "https://github.com/gwen001/github-subdomains"},
     "gotator":     {"check": "command -v gotator",     "install": "go install -v github.com/Josue87/gotator@latest", "category": "recon", "desc": "subdomain permutation", "url": "https://github.com/Josue87/gotator"},
-    "dnsgen":      {"check": "command -v dnsgen",      "install": "pipx install dnsgen || pip install --user dnsgen", "category": "recon", "desc": "subdomain permutation from wordlist", "url": "https://github.com/ProjectAnte/dnsgen"},
-    "altdns":      {"check": "command -v altdns",      "install": "pipx install altdns || pip install --user altdns", "category": "recon", "desc": "DNS mutation", "url": "https://github.com/infosec-au/altdns"},
+    "dnsgen":      {"check": "command -v dnsgen",      "install": "pipx install dnsgen || pip install --user --break-system-packages dnsgen || pip install --user dnsgen", "category": "recon", "desc": "subdomain permutation from wordlist", "url": "https://github.com/ProjectAnte/dnsgen"},
+    "altdns":      {"check": "command -v altdns",      "install": "pipx install py-altdns || pip install --user --break-system-packages py-altdns || pip install --user py-altdns", "category": "recon", "desc": "DNS mutation", "url": "https://github.com/infosec-au/altdns"},
     "puredns":     {"check": "command -v puredns",     "install": "go install -v github.com/d3mondev/puredns/v2@latest", "category": "recon", "desc": "mass DNS resolve with wildcard filter", "url": "https://github.com/d3mondev/puredns"},
     "shuffledns":  {"check": "command -v shuffledns",  "install": "go install -v github.com/projectdiscovery/shuffledns/cmd/shuffledns@latest", "category": "recon", "desc": "massdns wrapper", "url": "https://github.com/projectdiscovery/shuffledns"},
     "massdns":     {"check": "command -v massdns",     "install": "git clone --depth 1 https://github.com/blechschmidt/massdns ~/agent/tools/massdns && cd ~/agent/tools/massdns && make && ln -sf $(pwd)/bin/massdns ~/agent/tools/massdns-bin", "category": "recon", "desc": "fastest DNS resolver", "url": "https://github.com/blechschmidt/massdns"},
@@ -67,22 +67,22 @@ TOOLS = {
     "gxss":        {"check": "command -v gxss",        "install": "go install -v github.com/KathanP19/Gxss@latest", "category": "web", "desc": "reflected XSS detect", "url": "https://github.com/KathanP19/Gxss"},
     "kxss":        {"check": "command -v kxss",        "install": "go install -v github.com/Emoe/kxss@latest", "category": "web", "desc": "reflection detector", "url": "https://github.com/Emoe/kxss"},
     "sqlmap":      {"check": "command -v sqlmap",      "install": "apt install -y sqlmap || pip install --user sqlmap", "category": "web", "desc": "SQL injection", "url": "https://github.com/sqlmapproject/sqlmap"},
-    "ghauri":      {"check": "command -v ghauri",      "install": "pipx install ghauri || pip install --user ghauri", "category": "web", "desc": "modern SQLi (WAF-friendly)", "url": "https://github.com/r0oth3x49/ghauri"},
-    "nosqlmap":    {"check": "command -v nosqlmap",    "install": "git clone --depth 1 https://github.com/codingo/NoSQLMap ~/agent/tools/nosqlmap && chmod +x ~/agent/tools/nosqlmap/nosqlmap.py", "category": "web", "desc": "NoSQL injection", "url": "https://github.com/codingo/NoSQLMap"},
-    "commix":      {"check": "command -v commix",      "install": "apt install -y commix || pipx install commix", "category": "web", "desc": "command injection", "url": "https://github.com/commixproject/commix"},
-    "sstimap":     {"check": "command -v sstimap",     "install": "pipx install sstimap || pip install --user sstimap", "category": "web", "desc": "SSTI scanner (Jinja/Twig)", "url": "https://github.com/vladko312/SSTImap"},
-    "ppmap":       {"check": "command -v ppmap",       "install": "go install -v github.com/kleiton0x00/ppmap@latest", "category": "web", "desc": "prototype pollution", "url": "https://github.com/kleiton0x00/ppmap"},
-    "ssrfmap":     {"check": "command -v ssrfmap",     "install": "git clone --depth 1 https://github.com/swisskyrepo/SSRFmap ~/agent/tools/ssrfmap && pip install --user -r ~/agent/tools/ssrfmap/requirements.txt", "category": "web", "desc": "SSRF exploitation", "url": "https://github.com/swisskyrepo/SSRFmap"},
-    "gopherus":    {"check": "command -v gopherus",    "install": "pipx install gopherus || pip install --user gopherus", "category": "web", "desc": "SSRF -> gopher RCE", "url": "https://github.com/tarunkant/Gopherus"},
-    "smuggler":    {"check": "command -v smuggler",    "install": "git clone --depth 1 https://github.com/defparam/smuggler ~/agent/tools/smuggler", "category": "web", "desc": "HTTP request smuggling", "url": "https://github.com/defparam/smuggler"},
-    "h2csmuggler": {"check": "command -v h2csmuggler", "install": "pipx install h2csmuggler || pip install --user h2csmuggler", "category": "web", "desc": "h2c smuggling", "url": "https://github.com/BishopFox/h2csmuggler"},
-    "corsy":       {"check": "command -v corsy",       "install": "git clone --depth 1 https://github.com/s0md3v/Corsy ~/agent/tools/corsy && pip install --user -r ~/agent/tools/corsy/requirements.txt", "category": "web", "desc": "CORS misconfig scanner", "url": "https://github.com/s0md3v/Corsy"},
+    "ghauri":      {"check": "command -v ghauri",      "install": "pipx install git+https://github.com/r0oth3x49/ghauri.git || pipx install ghauri || pip install --user --break-system-packages ghauri", "category": "web", "desc": "modern SQLi (WAF-friendly)", "url": "https://github.com/r0oth3x49/ghauri"},
+    "nosqlmap":    {"check": "command -v nosqlmap",    "install": "git clone --depth 1 https://github.com/codingo/NoSQLMap ~/agent/tools/nosqlmap_repo && pip install --user --break-system-packages -r ~/agent/tools/nosqlmap_repo/requirements.txt", "category": "web", "desc": "NoSQL injection", "url": "https://github.com/codingo/NoSQLMap"},
+    "commix":      {"check": "command -v commix",      "install": "pipx install git+https://github.com/commixproject/commix.git || apt install -y commix || pipx install commix", "category": "web", "desc": "command injection", "url": "https://github.com/commixproject/commix"},
+    "sstimap":     {"check": "command -v sstimap",     "install": "git clone --depth 1 https://github.com/vladko312/SSTImap ~/agent/tools/sstimap_repo && pip install --user --break-system-packages -r ~/agent/tools/sstimap_repo/requirements.txt", "category": "web", "desc": "SSTI scanner (Jinja/Twig)", "url": "https://github.com/vladko312/SSTImap"},
+    "ppmap":       {"check": "command -v ppmap",       "install": "curl -sL https://github.com/kleiton0x00/ppmap/releases/download/v1.2.0/ppmap -o ~/.local/bin/ppmap && chmod +x ~/.local/bin/ppmap", "category": "web", "desc": "prototype pollution", "url": "https://github.com/kleiton0x00/ppmap"},
+    "ssrfmap":     {"check": "command -v ssrfmap",     "install": "git clone --depth 1 https://github.com/swisskyrepo/SSRFmap ~/agent/tools/ssrfmap_repo && pip install --user --break-system-packages -r ~/agent/tools/ssrfmap_repo/requirements.txt", "category": "web", "desc": "SSRF exploitation", "url": "https://github.com/swisskyrepo/SSRFmap"},
+    "gopherus":    {"check": "command -v gopherus",    "install": "git clone --depth 1 https://github.com/tarunkant/Gopherus ~/agent/tools/gopherus_repo", "category": "web", "desc": "SSRF -> gopher RCE", "url": "https://github.com/tarunkant/Gopherus"},
+    "smuggler":    {"check": "command -v smuggler",    "install": "git clone --depth 1 https://github.com/defparam/smuggler ~/agent/tools/smuggler_repo", "category": "web", "desc": "HTTP request smuggling", "url": "https://github.com/defparam/smuggler"},
+    "h2csmuggler": {"check": "command -v h2csmuggler", "install": "git clone --depth 1 https://github.com/BishopFox/h2csmuggler ~/agent/tools/h2csmuggler_repo && pip install --user --break-system-packages h2", "category": "web", "desc": "h2c smuggling", "url": "https://github.com/BishopFox/h2csmuggler"},
+    "corsy":       {"check": "command -v corsy",       "install": "git clone --depth 1 https://github.com/s0md3v/Corsy ~/agent/tools/corsy_repo && pip install --user --break-system-packages -r ~/agent/tools/corsy_repo/requirements.txt", "category": "web", "desc": "CORS misconfig scanner", "url": "https://github.com/s0md3v/Corsy"},
     "crlfuzz":     {"check": "command -v crlfuzz",     "install": "go install -v github.com/dwisiswant0/crlfuzz/cmd/crlfuzz@latest", "category": "web", "desc": "CRLF injection", "url": "https://github.com/dwisiswant0/crlfuzz"},
-    "x8":          {"check": "command -v x8",          "install": "cargo install x8", "category": "web", "desc": "hidden param discoverer", "url": "https://github.com/Sh1Yo/x8"},
-    "arjun":       {"check": "command -v arjun",       "install": "pipx install arjun || pip install --user arjun", "category": "web", "desc": "param discoverer", "url": "https://github.com/s0md3v/Arjun"},
-    "paramspider": {"check": "command -v paramspider", "install": "pipx install paramspider || pip install --user paramspider", "category": "web", "desc": "params from wayback", "url": "https://github.com/devanshbatham/ParamSpider"},
-    "jwt_tool":    {"check": "command -v jwt_tool",    "install": "git clone --depth 1 https://github.com/ticarpi/jwt_tool ~/agent/tools/jwt_tool && chmod +x ~/agent/tools/jwt_tool/jwt_tool.py", "category": "web", "desc": "JWT forgery / alg attacks", "url": "https://github.com/ticarpi/jwt_tool"},
-    "jwt-cracker": {"check": "command -v jwt-cracker", "install": "npm install -g jwt-cracker", "category": "web", "desc": "HS256 weak secret brute", "url": "https://github.com/lmammino/jwt-cracker"},
+    "x8":          {"check": "command -v x8",          "install": "curl -sL https://github.com/Sh1Yo/x8/releases/download/v4.3.0/x86_64-linux-x8.gz | gzip -d > ~/.local/bin/x8 && chmod +x ~/.local/bin/x8 || cargo install x8", "category": "web", "desc": "hidden param discoverer", "url": "https://github.com/Sh1Yo/x8"},
+    "arjun":       {"check": "command -v arjun",       "install": "pipx install git+https://github.com/s0md3v/Arjun.git || pipx install arjun || pip install --user --break-system-packages arjun", "category": "web", "desc": "param discoverer", "url": "https://github.com/s0md3v/Arjun"},
+    "paramspider": {"check": "command -v paramspider", "install": "pipx install git+https://github.com/devanshbatham/ParamSpider.git || pipx install paramspider || pip install --user --break-system-packages paramspider", "category": "web", "desc": "params from wayback", "url": "https://github.com/devanshbatham/ParamSpider"},
+    "jwt_tool":    {"check": "command -v jwt_tool",    "install": "git clone --depth 1 https://github.com/ticarpi/jwt_tool ~/agent/tools/jwt_tool_repo && (test ! -f ~/agent/tools/jwt_tool_repo/requirements.txt || pip install --user --break-system-packages -r ~/agent/tools/jwt_tool_repo/requirements.txt)", "category": "web", "desc": "JWT forgery / alg attacks", "url": "https://github.com/ticarpi/jwt_tool"},
+    "jwt-cracker": {"check": "command -v jwt-cracker", "install": "npm install -g --prefix ~/.local jwt-cracker || npm install -g jwt-cracker", "category": "web", "desc": "HS256 weak secret brute", "url": "https://github.com/lmammino/jwt-cracker"},
     "interactsh-client": {"check": "command -v interactsh-client", "install": "go install -v github.com/projectdiscovery/interactsh/cmd/interactsh-client@latest", "category": "web", "desc": "OOB callback (DNS/HTTP/SMTP)", "url": "https://github.com/projectdiscovery/interactsh"},
 
     # ═══════════════════════════════════════════════════════════════════
@@ -90,8 +90,8 @@ TOOLS = {
     # ═══════════════════════════════════════════════════════════════════
     "ffuf":        {"check": "command -v ffuf",        "install": "go install -v github.com/ffuf/ffuf/v2@latest", "category": "fuzz", "desc": "fuzzer", "url": "https://github.com/ffuf/ffuf"},
     "gobuster":    {"check": "command -v gobuster",    "install": "go install -v github.com/OJ/gobuster/v3@latest", "category": "fuzz", "desc": "dir/dns/vhost fuzz", "url": "https://github.com/OJ/gobuster"},
-    "feroxbuster": {"check": "command -v feroxbuster", "install": "cargo install feroxbuster --locked", "category": "fuzz", "desc": "recursive dir fuzz", "url": "https://github.com/epi052/feroxbuster"},
-    "dirsearch":   {"check": "command -v dirsearch",   "install": "pipx install dirsearch || pip install --user dirsearch", "category": "fuzz", "desc": "python dir fuzz", "url": "https://github.com/maurosoria/dirsearch"},
+    "feroxbuster": {"check": "command -v feroxbuster", "install": "curl -sL https://github.com/epi052/feroxbuster/releases/latest/download/x86_64-linux-feroxbuster.tar.gz | tar -xz -C ~/.local/bin && chmod +x ~/.local/bin/feroxbuster || cargo install feroxbuster --locked", "category": "fuzz", "desc": "recursive dir fuzz", "url": "https://github.com/epi052/feroxbuster"},
+    "dirsearch":   {"check": "command -v dirsearch",   "install": "pipx install git+https://github.com/maurosoria/dirsearch.git || pipx install dirsearch || pip install --user --break-system-packages dirsearch", "category": "fuzz", "desc": "python dir fuzz", "url": "https://github.com/maurosoria/dirsearch"},
     "wfuzz":       {"check": "command -v wfuzz",       "install": "pipx install wfuzz || pip install --user wfuzz", "category": "fuzz", "desc": "fuzzer", "url": "https://github.com/xmendez/wfuzz"},
     "kr":          {"check": "command -v kr",          "install": "go install -v github.com/assetnote/kiterunner/cmd/kr@latest", "category": "fuzz", "desc": "API route bruter", "url": "https://github.com/assetnote/kiterunner"},
     "radamsa":     {"check": "command -v radamsa",     "install": "apt install -y radamsa || git clone --depth 1 https://github.com/aoh/radamsa ~/agent/tools/radamsa && cd ~/agent/tools/radamsa && make && make install PREFIX=~/agent/tools", "category": "fuzz", "desc": "mutation fuzzer", "url": "https://github.com/aoh/radamsa"},
@@ -256,6 +256,19 @@ def list_categories():
     for name, t in TOOLS.items():
         cats.setdefault(t.get("category", "misc"), []).append(name)
     return cats
+
+
+def get_all_categories():
+    return sorted(list(set(t.get("category", "misc") for t in TOOLS.values())))
+
+
+def get_tools_by_category(category: str):
+    cat = (category or "").lower().strip()
+    return {k: v for k, v in TOOLS.items() if v.get("category", "misc").lower() == cat}
+
+
+def get_tool_info(name: str):
+    return TOOLS.get(name.lower().strip())
 
 
 def find(query):

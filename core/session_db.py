@@ -5,6 +5,7 @@ Persists chat sessions, messages, assessment findings, and execution history acr
 
 import sqlite3
 import os
+import contextlib
 import json
 import pathlib
 import uuid
@@ -15,11 +16,23 @@ DB_DIR = pathlib.Path(os.environ.get("AG_DATA_DIR", pathlib.Path.home() / ".soms
 DB_PATH = DB_DIR / "sessions.db"
 
 
-def _get_db() -> sqlite3.Connection:
+@contextlib.contextmanager
+def _get_db():
     DB_DIR.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False)
+    conn = sqlite3.connect(str(DB_PATH), check_same_thread=False, timeout=10.0)
+    try:
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA busy_timeout=5000;")
+    except Exception:
+        pass
     conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        yield conn
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 def init_db():

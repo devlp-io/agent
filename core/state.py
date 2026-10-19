@@ -13,7 +13,11 @@ HEARTBEAT_INTERVAL = 5.0
 KILL_SWITCH_PATHS = [
     "/tmp/ag.stop",
     os.path.expanduser("~/agent/.stop"),
+    os.path.expanduser("~/.somscan/.stop"),
+    os.path.join(os.getcwd(), ".stop"),
 ]
+if os.environ.get("AG_STOP_FILE"):
+    KILL_SWITCH_PATHS.insert(0, os.environ["AG_STOP_FILE"])
 
 STATE_VERSION = 2
 

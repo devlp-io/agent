@@ -13,7 +13,9 @@ from datetime import datetime, timezone
 # try to import original reporter for markdown fallback
 try:
     import sys
-    sys.path.insert(0, str(pathlib.Path.home() / "agent"))
+    _root = pathlib.Path(__file__).resolve().parent.parent
+    if str(_root) not in sys.path:
+        sys.path.insert(0, str(_root))
     import reporter as _orig_reporter
     _HAVE_REPORTER = True
 except Exception:

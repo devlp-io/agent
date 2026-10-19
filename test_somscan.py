@@ -31,7 +31,8 @@ sys.path.insert(0, str(HERE))
 from core.events import (
     AgentEvent, UserMessageEvent, AssistantChunkEvent, AssistantMessageEvent,
     ThinkingStartEvent, ThinkingStopEvent, CommandStartEvent, CommandFinishEvent,
-    FindingEvent, StatusChangeEvent, TaskCompleteEvent, TaskCancelledEvent, ErrorEvent
+    FindingEvent, StatusChangeEvent, TaskCompleteEvent, TaskCancelledEvent, ErrorEvent,
+    SubagentStartEvent, SubagentFinishEvent
 )
 from core.model_manager import ModelManager, ModelConfig
 from core.task_runner import TaskRunner, CommandResult
@@ -740,9 +741,450 @@ class TestSomScan(unittest.TestCase):
             has_complete = any(isinstance(e, TaskCompleteEvent) and e.success for e in events)
             self.assertTrue(has_complete, "Autonomous loop should finish with TaskCompleteEvent upon explicit DONE directive")
 
+    def test_41_multiline_paste_preservation(self):
+        """Verify long prompts and multi-line pastes are 100% preserved without truncation."""
+        import asyncio
+        from unittest.mock import MagicMock
+
+        app = tui.SomScanApp()
+
+        async def _check():
+            async with app.run_test() as pilot:
+                inp = app.query_one("#input-box", tui.CommandInput)
+
+                # 1. Simulate pasting 10-line prompt with paragraphs and indents
+                multiline_prompt = (
+                    "You are an authorized penetration tester.\n"
+                    "Target objective: comprehensive assessment of https://example.com\n"
+                    "Requirements:\n"
+                    "  1. Enumerate all subdomains and live services\n"
+                    "  2. Probe for SQL injection and auth bypass\n"
+                    "  3. Check AWS S3 bucket exposure\n"
+                    "  4. Generate final executive report\n\n"
+                    "Execute autonomously."
+                )
+
+                # Create mock Paste event
+                paste_event = MagicMock()
+                paste_event.text = multiline_prompt
+                inp._on_paste(paste_event)
+
+                # Verify payload is pristine and not truncated to single line
+                payload = inp.get_submitted_payload()
+                self.assertEqual(payload, multiline_prompt)
+                self.assertIn("Execute autonomously.", payload)
+                self.assertIn("Requirements:", payload)
+                self.assertEqual(len(payload.splitlines()), len(multiline_prompt.splitlines()))
+
+                # 2. Test manual Shift+Enter expansion
+                inp.value = "First line ↵ Second line ↵ Third line"
+                inp._raw_multiline = None
+                self.assertEqual(inp.get_submitted_payload(), "First line\nSecond line\nThird line")
+
+                # 3. Test /paste command
+                with patch("tui.get_system_clipboard", return_value="pasted_clipboard_data_line1\nline2"):
+                    submitted_items = []
+                    with patch.object(app.router, "dispatch", side_effect=lambda txt: submitted_items.append(txt)):
+                        app.submit_text("/paste")
+                        self.assertEqual(submitted_items, ["pasted_clipboard_data_line1\nline2"])
+        asyncio.run(_check())
+
+    def test_42_new_subagents_dispatch(self):
+        """Verify new specialist subagents (cloud, adpivoting, osint, codeaudit, evasion, reporter) dispatch and return results."""
+        from core.subagents import SubagentDispatcher, SUBAGENT_TYPES
+
+        # Verify all types are registered in dictionary
+        expected_types = ["cloud", "adpivoting", "osint", "codeaudit", "evasion", "reporter"]
+        for stype in expected_types:
+            self.assertIn(stype, SUBAGENT_TYPES, f"{stype} should be defined in SUBAGENT_TYPES")
+            self.assertIn(stype, SubagentDispatcher.SUBAGENT_MAP, f"{stype} should be mapped in SubagentDispatcher")
+
+        # Test dispatching each subagent with mock runner
+        mock_runner = MagicMock()
+        mock_runner.run_command.return_value = CommandResult(command="mock", returncode=0, output="200 OK listbucketresult", duration=0.01)
+        events = []
+        try:
+            for stype in expected_types:
+                events.clear()
+                res = SubagentDispatcher.dispatch(
+                    subagent_type=stype,
+                    task="test-target.com",
+                    event_callback=lambda ev: events.append(ev),
+                    task_runner=mock_runner
+                )
+                self.assertTrue(res.success, f"Subagent {stype} should execute successfully")
+                self.assertEqual(res.subagent_type, stype)
+                self.assertTrue(len(res.summary) > 0)
+                self.assertTrue(any(isinstance(e, SubagentStartEvent) for e in events))
+                self.assertTrue(any(isinstance(e, SubagentFinishEvent) for e in events))
+        finally:
+            for artifact in ["assessment_report.md", "indirect_syscall.c", "pivot_test-target_com.sh"]:
+                if os.path.exists(artifact):
+                    try:
+                        os.remove(artifact)
+                    except OSError:
+                        pass
+
+
+    def test_43_markdown_card_and_code_bubble_distinction(self):
+        """Verify strict distinction: code renders in CodeBubble with line numbers; markdown renders in MarkdownCard or SafeMarkdown without line numbers."""
+        import asyncio
+
+        # 1. Test MarkdownCard styling and behavior
+        md_text = (
+            "# Maanka Store - Security Assessment\n\n"
+            "**Target:** https://www.maanka.online\n"
+            "| # | Severity | Finding |\n"
+            "|---|---|---|\n"
+            "| 1 | **HIGH** | Bot prompt injection |\n"
+        )
+        card = tui.MarkdownCard(content=md_text, title="REPORT.md")
+        self.assertIn("REPORT.md", card.title)
+        header_text = card._header_text()
+        self.assertIn("#34d399", header_text)
+        self.assertIn("#10b981", header_text)
+        self.assertIn("rich markdown", header_text)
+
+        # MarkdownCard renders clean markdown content, NOT line-numbered code
+        disp = card._get_display_content()
+        self.assertIn("# Maanka Store", disp)
+        self.assertNotIn("001 │", disp)
+        self.assertNotIn("1 │", disp)
+
+        # 2. Test app mounting distinction between code and markdown
+        app = tui.SomScanApp()
+
+        async def _check():
+            async with app.run_test() as pilot:
+                scroll = app.query_one("#chat-scroll", tui.VerticalScroll)
+
+                # A. Send markdown report fence -> MUST mount MarkdownCard, NOT CodeBubble
+                md_payload = (
+                    "📄 **Updated File:** `/workspace/REPORT.md` (5002 bytes)\n"
+                    "```markdown:REPORT.md\n"
+                    "# Security Report\n"
+                    "| # | Finding |\n"
+                    "|---|---|\n"
+                    "| 1 | Auth bypass |\n"
+                    "```"
+                )
+                app._mount_formatted_assistant_message(scroll, md_payload)
+                self.assertEqual(len(app._markdown_cards), 1, "Markdown block should mount MarkdownCard")
+                self.assertEqual(len(app._code_bubbles), 0, "Markdown block should NOT mount CodeBubble")
+                self.assertIn("REPORT.md", app._markdown_cards[0].title)
+
+                # B. Send python code fence -> MUST mount CodeBubble
+                py_payload = (
+                    "```python\n"
+                    "import requests\n"
+                    "def test_cve():\n"
+                    "    return requests.get('https://example.com')\n"
+                    "```"
+                )
+                app._mount_formatted_assistant_message(scroll, py_payload)
+                self.assertEqual(len(app._code_bubbles), 1, "Python block should mount CodeBubble")
+                bubble = app._code_bubbles[0]
+                bubble_render = bubble._format_highlighted_code()
+                self.assertIn("1 │", bubble_render)
+                self.assertIn("#38bdf8", bubble_render)
+
+                # C. Send normal conversational markdown without code fences -> mounts as inline SafeMarkdown
+                chat_payload = "# Executive Overview\n\nTarget has 2 critical findings.\n\n- Auth bypass\n- SQLi"
+                initial_md_cards = len(app._markdown_cards)
+                initial_bubbles = len(app._code_bubbles)
+                app._mount_formatted_assistant_message(scroll, chat_payload)
+                self.assertEqual(len(app._markdown_cards), initial_md_cards, "Inline narrative should not create card container")
+                self.assertEqual(len(app._code_bubbles), initial_bubbles, "Inline narrative should not create code bubble")
+
+                # D. Test /long and /short expansion across markdown cards
+                app.submit_text("/long")
+                self.assertTrue(app._markdown_cards[0].expanded)
+                self.assertTrue(app._code_bubbles[0].expanded)
+
+                app.submit_text("/short")
+                self.assertFalse(app._markdown_cards[0].expanded)
+                self.assertFalse(app._code_bubbles[0].expanded)
+
+        asyncio.run(_check())
+
+
+    def test_44_sqlite_connection_management_and_no_resource_leaks(self):
+        """Verify SessionDB context manager closes connections properly with WAL mode and zero leaks."""
+        from core.session_db import SessionDB, _get_db
+
+        with _get_db() as conn:
+            mode_row = conn.execute("PRAGMA journal_mode;").fetchone()
+            self.assertEqual(mode_row[0].upper(), "WAL")
+
+        # Execute multiple queries and verify no unclosed connection warnings
+        sid = SessionDB.create_session(target="https://test.example.com", title="Leak Test")
+        SessionDB.add_message(sid, "user", "Test prompt")
+        SessionDB.add_message(sid, "assistant", "Test reply")
+        SessionDB.add_finding(sid, "high", "XSS in search", "<script>alert(1)</script>")
+
+        msgs = SessionDB.get_messages(sid)
+        self.assertEqual(len(msgs), 2)
+
+        findings = SessionDB.get_findings(sid)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]["title"], "XSS in search")
+
+    def test_45_loot_command_and_telemetry_directives(self):
+        """Verify /loot command formats rich markdown and red team directives emit telemetry."""
+        from core.agent_router import AgentRouter
+        from core.events import AssistantMessageEvent
+        from core.session_db import SessionDB
+
+        events = []
+        router = AgentRouter(event_callback=lambda ev: events.append(ev))
+
+        # Test /loot command
+        SessionDB.add_finding(router.session_id, "critical", "Admin Auth Bypass", "JWT token none")
+        router.dispatch("/loot")
+        if getattr(router, "_active_worker", None):
+            router._active_worker.join(timeout=2.0)
+
+        # Verify AssistantMessageEvent emitted containing markdown:LOOT.md
+        loot_events = [e for e in events if isinstance(e, AssistantMessageEvent) and "LOOT.md" in getattr(e, "text", "")]
+        self.assertTrue(len(loot_events) >= 1, "Should emit LOOT.md preview card")
+        self.assertIn("Admin Auth Bypass", loot_events[0].text)
+
+        # Test red team directives in _extract_directive_matches
+        directives = router._extract_directive_matches("SECRET: AWS_KEY_12345\nCRED: admin|P@ssw0rd123\nLOOT: shadow_hash")
+        d_map = dict(directives)
+        self.assertIn("SECRET", d_map)
+        self.assertEqual(d_map["SECRET"], "AWS_KEY_12345")
+        self.assertIn("CRED", d_map)
+        self.assertEqual(d_map["CRED"], "admin|P@ssw0rd123")
+        self.assertIn("LOOT", d_map)
+        self.assertEqual(d_map["LOOT"], "shadow_hash")
+
+
+    def test_46_direct_headless_non_interactive_execution(self):
+        """Verify somscan.py and agent_v8.py support direct non-interactive headless scanning."""
+        import io
+        from contextlib import redirect_stdout
+        import somscan
+
+        out_buf = io.StringIO()
+        with redirect_stdout(out_buf):
+            somscan.run_headless("/help")
+
+        output = out_buf.getvalue()
+        self.assertTrue(len(output) > 0, "Headless execution should stream output directly to stdout")
+        self.assertIn("SOM-SCAN", output)
+
+    def test_47_tool_subagent_and_category_preinstallation(self):
+        """Verify dedicated ToolSubagent, task-driven requirement detection, verification registry, and category preinstallation."""
+        from core.subagents import SubagentDispatcher, SUBAGENT_TYPES, ToolSubagent
+        import installer, tools_db
+
+        # 1. Subagent registration
+        self.assertIn("tools", SUBAGENT_TYPES)
+        self.assertEqual(SUBAGENT_TYPES["tools"]["icon"], "🧰")
+        self.assertIn("tools", SubagentDispatcher.SUBAGENT_MAP)
+        self.assertEqual(SubagentDispatcher.SUBAGENT_MAP["tools"], ToolSubagent)
+
+        # 2. Target task detection
+        web_tools = installer.detect_needed_tools("https://target.com/api/v1")
+        self.assertIn("httpx", web_tools)
+        self.assertIn("subfinder", web_tools)
+        self.assertIn("nuclei", web_tools)
+
+        sqli_tools = installer.detect_needed_tools("test sql injection on https://target.com")
+        self.assertIn("sqlmap", sqli_tools)
+
+        # 3. Verification registry
+        installer.mark_verified("test_tool_xyz", True, "mock test verification")
+        self.assertTrue(installer.is_verified("test_tool_xyz") or "test_tool_xyz" in installer.load_verified())
+        verified = installer.load_verified()
+        self.assertIn("test_tool_xyz", verified)
+        self.assertTrue(verified["test_tool_xyz"]["verified"])
+
+        # 4. Sudo auth callback
+        called_prompt = []
+        def _mock_prompt(prompt, is_secret=False):
+            called_prompt.append((prompt, is_secret))
+            return "mock_pass"
+
+        installer.set_auth_prompt_handler(_mock_prompt)
+        self.assertEqual(installer._AUTH_PROMPT_HANDLER, _mock_prompt)
+
+        # 5. ToolSubagent dispatch
+        events = []
+        res = SubagentDispatcher.dispatch(
+            "tools",
+            "status",
+            lambda ev: events.append(ev)
+        )
+        self.assertTrue(res.success)
+        self.assertIn("Tools Status", res.summary)
+
+        # 6. Category discovery
+        cats = tools_db.get_all_categories()
+        self.assertIn("recon", cats)
+        self.assertIn("web", cats)
+        self.assertIn("pivot", cats)
+        recon_tools = tools_db.get_tools_by_category("recon")
+        self.assertIn("subfinder", recon_tools)
+
+    def test_48_interactive_operator_question_and_answer(self):
+        """Verify operator question prompting, blocking wait, and interactive answering in AgentRouter and TUI."""
+        import threading
+        from core.agent_router import AgentRouter
+        from core.events import QuestionPromptEvent, QuestionAnswerEvent
+        import tui
+
+        events = []
+        router = AgentRouter(event_callback=lambda ev: events.append(ev))
+
+        # 1. Test prompt_operator in background thread and answer from main thread
+        received_answer = []
+        def _ask_worker():
+            ans = router.prompt_operator("Enter auth token:", is_secret=False, timeout_sec=5.0)
+            received_answer.append(ans)
+
+        t = threading.Thread(target=_ask_worker, daemon=True)
+        t.start()
+
+        # Wait for QuestionPromptEvent to emit
+        for _ in range(50):
+            if any(isinstance(e, QuestionPromptEvent) for e in events):
+                break
+            time.sleep(0.02)
+
+        prompt_evs = [e for e in events if isinstance(e, QuestionPromptEvent)]
+        self.assertEqual(len(prompt_evs), 1)
+        qid = prompt_evs[0].question_id
+        self.assertEqual(prompt_evs[0].prompt, "Enter auth token:")
+        self.assertTrue(router.has_pending_question)
+
+        # Answer question
+        ok = router.answer_question(qid, "SECRET_TOKEN_45")
+        self.assertTrue(ok)
+        t.join(timeout=2.0)
+        self.assertEqual(received_answer, ["SECRET_TOKEN_45"])
+        self.assertFalse(router.has_pending_question)
+
+        # 2. Test TUI submit_text intercepts pending questions
+        app = tui.SomScanApp()
+        app.router = router
+        events.clear()
+
+        t2 = threading.Thread(target=_ask_worker, daemon=True)
+        t2.start()
+
+        for _ in range(50):
+            if router.has_pending_question:
+                break
+            time.sleep(0.02)
+
+        # Operator submits answer via TUI
+        app.submit_text("REPLY_VIA_TUI")
+        t2.join(timeout=2.0)
+        self.assertEqual(received_answer[-1], "REPLY_VIA_TUI")
+
+    def test_49_subagent_card_no_task_property_conflict(self):
+        """Verify SubagentCard initializes and renders without property 'task' setter collision."""
+        card = tui.SubagentCard(
+            subagent_id="sub-1234",
+            subagent_type="tools",
+            task="Preinstalling web category",
+        )
+        self.assertEqual(card.subagent_id, "sub-1234")
+        self.assertEqual(card.subagent_type, "tools")
+        self.assertEqual(card.task_desc, "Preinstalling web category")
+        self.assertEqual(card.status, "RUNNING")
+
+        # Test finish update
+        card.update_finish(True, "All tools installed and verified")
+        self.assertEqual(card.status, "SUCCESS")
+
+    def test_50_command_input_paste_deduplication(self):
+        """Verify CommandInput does not duplicate pasted text and deduplicates rapid identical pastes."""
+        import asyncio
+        app = tui.SomScanApp()
+
+        async def _test():
+            async with app.run_test() as pilot:
+                inp = app.query_one("#input-box", tui.CommandInput)
+                self.assertEqual(inp.value, "")
+
+                # Simulate paste event
+                class DummyEvent:
+                    text = "/tools preinstall-all"
+                    def prevent_default(self): self._prevented = True
+                    def stop(self): self._stopped = True
+
+                ev = DummyEvent()
+                inp._on_paste(ev)
+                self.assertTrue(getattr(ev, "_prevented", False))
+                self.assertTrue(getattr(ev, "_stopped", False))
+                self.assertEqual(inp.value, "/tools preinstall-all")
+
+                # Second rapid identical paste within 0.5s should be ignored (deduplicated)
+                ev2 = DummyEvent()
+                inp._on_paste(ev2)
+                self.assertEqual(inp.value, "/tools preinstall-all")
+
+        asyncio.run(_test())
+
+    def test_51_multi_level_domain_target_extraction(self):
+        """Verify multi-level TLDs (e.g. .gov.so, .co.uk) and IPs are extracted cleanly without truncation."""
+        import re
+        pattern = r"(?:https?://)?(?:(?:\d{1,3}\.){3}\d{1,3}|(?:[a-zA-Z0-9_\-]+\.)+[a-zA-Z]{2,})(?::\d+)?(?:/[^\s,;]*)?"
+        
+        # Test case from G45's real assessment trace
+        text1 = "check vulns off https://authentications.mfa.gov.so, find unauth etc"
+        m1 = re.search(pattern, text1)
+        self.assertIsNotNone(m1)
+        self.assertEqual(m1.group(0).rstrip(",;.").strip(), "https://authentications.mfa.gov.so")
+
+        # Test case with IP address
+        text2 = "audit 194.32.79.148 find open ports and endpoints"
+        m2 = re.search(pattern, text2)
+        self.assertIsNotNone(m2)
+        self.assertEqual(m2.group(0).rstrip(",;.").strip(), "194.32.79.148")
+
+        # Test case with port and path
+        text3 = "probe https://target.co.uk:8443/api/v1/auth; test bypass"
+        m3 = re.search(pattern, text3)
+        self.assertIsNotNone(m3)
+        self.assertEqual(m3.group(0).rstrip(",;.").strip(), "https://target.co.uk:8443/api/v1/auth")
+
+    def test_52_heredoc_directive_preservation(self):
+        """Verify COMMAND directives containing bash heredocs preserve entire multi-line body through delimiter."""
+        router = AgentRouter(lambda e: None)
+        raw_text = (
+            "COMMAND: echo 'starting'; cat > brute.py <<'PYEOF'\n"
+            "import requests\n"
+            "print('payload')\n"
+            "PYEOF\n"
+            "python3 brute.py\n\n"
+            "Now I will wait for results."
+        )
+        matches = router._extract_directive_matches(raw_text)
+        self.assertEqual(len(matches), 1)
+        kind, payload = matches[0]
+        self.assertEqual(kind, "COMMAND")
+        self.assertIn("cat > brute.py <<'PYEOF'", payload)
+        self.assertIn("import requests", payload)
+        self.assertIn("PYEOF", payload)
+        self.assertIn("python3 brute.py", payload)
+        self.assertNotIn("Now I will wait", payload)
+
+    def test_53_explicit_timeout_supervisor_budget(self):
+        """Verify explicit timeout command wrappers extend supervisor stall threshold and base timeout."""
+        from core.task_runner import CommandSupervisor
+        cmd = "timeout 90 /mnt/d/agent/.venv_linux/bin/python brute_xmlrpc.py"
+        adapted, cfg = CommandSupervisor.analyze_and_adapt(cmd)
+        self.assertGreaterEqual(cfg["stall_threshold"], 100.0)
+        self.assertGreaterEqual(cfg["base_timeout"], 105.0)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

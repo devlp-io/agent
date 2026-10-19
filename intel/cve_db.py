@@ -20,7 +20,7 @@ try:
 except Exception:
     _HAVE_HTTPX = False
 
-DATA_DIR = pathlib.Path(os.path.expanduser("~/agent/data"))
+DATA_DIR = pathlib.Path(os.environ.get("AG_DATA_DIR", pathlib.Path.home() / ".somscan" / "data")).resolve()
 DB_PATH = DATA_DIR / "cve.db"
 NVD_BASE = "https://services.nvd.nist.gov/rest/json/cves/2.0"
 PAGE_SIZE = 2000
@@ -29,8 +29,12 @@ RATE_SLEEP = 6.0  # NVD allows 5 req/30s without key
 
 def _conn():
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    c = sqlite3.connect(str(DB_PATH))
+    c = sqlite3.connect(str(DB_PATH), timeout=10.0)
     c.execute("PRAGMA journal_mode=WAL")
+    try:
+        c.execute("PRAGMA busy_timeout=5000")
+    except Exception:
+        pass
     return c
 
 

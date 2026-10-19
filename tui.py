@@ -40,7 +40,8 @@ from core.events import (
     ThinkingStartEvent, ThinkingStopEvent, CommandStartEvent, CommandOutputEvent,
     CommandFinishEvent, FindingEvent, StatusChangeEvent, TaskCompleteEvent,
     TaskCancelledEvent, ErrorEvent, PhaseTransitionEvent, SubagentStartEvent,
-    SubagentFinishEvent, PayloadCardEvent, ExploitCardEvent
+    SubagentFinishEvent, PayloadCardEvent, ExploitCardEvent,
+    QuestionPromptEvent, QuestionAnswerEvent
 )
 from core.model_manager import ModelManager
 from core.agent_router import AgentRouter, strip_directives
@@ -54,14 +55,16 @@ SLASH_COMMANDS: List[Tuple[str, str]] = [
     ("/resume [target]", "Resume previous assessment from last saved state"),
     ("/attack [target]", "Launch post-scan exploit/attack phase on findings"),
     ("/phase", "Inspect active assessment phase: what's done, what's next move"),
-    ("/subagent <type> <task>", "Dispatch autonomous specialist subagent (recon/exploit/malware/reversing/webaudit)"),
+    ("/subagent <type> <task>", "Dispatch specialist (recon/exploit/malware/reversing/webaudit/cloud/adpivoting/osint/codeaudit/evasion/reporter/tools)"),
     ("/malware <spec>", "Malware Lab: craft weaponized shellcode, loaders, stagers, and cross-compile"),
     ("/payload <type>", "Generate evasive payload (xss/sqli/ssrf/rce/ssti/nosqli/crlf)"),
+    ("/paste", "Paste entire multi-line text or script from clipboard without truncation"),
     ("/copy", "Copy entire session (chat, commands, findings) to clipboard"),
     ("/cancel", "Interrupt active task, scan, or command"),
     ("/pause", "Pause running scan and open operator control menu"),
     ("/status", "Inspect active scan phase, findings, and live statistics"),
-    ("/tools [status|install]", "Inspect installed and missing security tools"),
+    ("/loot", "Display extracted credentials, API tokens, and findings matrix"),
+    ("/tools [status|check|preinstall|install-all]", "Pre-flight check, verify & category pre-install tools"),
     ("/install <tool>", "Platform-aware security tool installer"),
     ("/model [name]", "Switch or view active AI model profile"),
     ("/key [key]", "Configure API keys in memory and save to .env"),
@@ -156,6 +159,87 @@ def copy_to_system_clipboard(text: str) -> bool:
                 continue
 
     return False
+
+
+def get_system_clipboard() -> str:
+    """Read full text from system clipboard across Windows, macOS, Linux, and WSL without truncation."""
+    # 1. Native Windows Win32 API via ctypes
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            CF_UNICODETEXT = 13
+            if user32.OpenClipboard(None):
+                try:
+                    h_mem = user32.GetClipboardData(CF_UNICODETEXT)
+                    if h_mem:
+                        kernel32.GlobalLock.restype = ctypes.c_void_p
+                        kernel32.GlobalLock.argtypes = [ctypes.c_void_p]
+                        kernel32.GlobalUnlock.argtypes = [ctypes.c_void_p]
+                        ptr = kernel32.GlobalLock(h_mem)
+                        if ptr:
+                            try:
+                                return ctypes.wstring_at(ptr)
+                            finally:
+                                kernel32.GlobalUnlock(h_mem)
+                finally:
+                    user32.CloseClipboard()
+        except Exception:
+            pass
+
+        # Windows PowerShell fallback
+        try:
+            res = subprocess.run(
+                ["powershell.exe", "-NoProfile", "-Command", "Get-Clipboard"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=3,
+                creationflags=0x08000000 if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+            )
+            if res.returncode == 0 and res.stdout:
+                return res.stdout
+        except Exception:
+            pass
+
+    # 2. Try pyperclip if installed
+    try:
+        import pyperclip
+        val = pyperclip.paste()
+        if val:
+            return val
+    except Exception:
+        pass
+
+    # 3. macOS pbpaste
+    if sys.platform == "darwin":
+        try:
+            res = subprocess.run(["pbpaste"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=True)
+            return res.stdout
+        except Exception:
+            pass
+
+    # 4. Linux xclip / wl-paste / xsel / WSL Windows PowerShell
+    if sys.platform.startswith("linux"):
+        # WSL fallback: read from Windows host clipboard
+        for wsl_ps in ("/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe", "powershell.exe"):
+            try:
+                res = subprocess.run([wsl_ps, "-NoProfile", "-Command", "Get-Clipboard"], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=3)
+                if res.returncode == 0 and res.stdout:
+                    return res.stdout
+            except Exception:
+                pass
+        for cmd in (["wl-paste"], ["xclip", "-selection", "clipboard", "-o"], ["xsel", "--clipboard", "--output"]):
+            try:
+                res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=True)
+                if res.stdout:
+                    return res.stdout
+            except Exception:
+                continue
+
+    return ""
 
 
 
@@ -318,7 +402,7 @@ Screen {
     text-wrap: wrap;
 }
 
-/* Code Bubble — Compact Container with Cyan & Pink Palette */
+/* Code Bubble — Compact Container with Cyan & Blue Code Editor Palette */
 .code-bubble {
     width: 100%;
     height: auto;
@@ -329,12 +413,12 @@ Screen {
 }
 
 .code-bubble:hover {
-    border: round #ec4899;
+    border: round #38bdf8;
 }
 
 .code-bubble-header {
     width: 100%;
-    color: #ec4899;
+    color: #38bdf8;
     text-style: bold;
     border-bottom: solid #1e293b;
     margin-bottom: 0;
@@ -346,6 +430,43 @@ Screen {
     color: #38bdf8;
     text-wrap: wrap;
     padding: 0 1;
+}
+
+/* Markdown Document Card — Emerald & Forest Obsidian Document Container */
+.markdown-card {
+    width: 100%;
+    height: auto;
+    background: #040d12;
+    border: round #10b981;
+    margin: 0 0 1 0;
+    padding: 0 1;
+}
+
+.markdown-card:hover {
+    border: round #34d399;
+}
+
+.markdown-card-header {
+    width: 100%;
+    color: #34d399;
+    text-style: bold;
+    border-bottom: solid #064e3b;
+    margin-bottom: 0;
+}
+
+.markdown-card-content {
+    width: 100%;
+    height: auto;
+    color: #e2e8f0;
+    padding: 0 1;
+    text-wrap: wrap;
+}
+
+.markdown-card-footer {
+    width: 100%;
+    color: #64748b;
+    padding: 0 1;
+    margin-top: 0;
 }
 
 /* Finding Card */
@@ -739,7 +860,7 @@ class CommandCard(Static):
 class CodeBubble(Static):
     """
     Visual bubble for plain codes, scripts, and syntax blocks.
-    Styled with vivid Neon Cyan (#38bdf8) and Hot Pink (#ec4899 / #f472b6).
+    Styled with vivid Neon Cyan (#38bdf8) and Blue (#0284c7) palette.
     Supports collapsible short view (default: 5 lines) and full expansion via /long.
     """
 
@@ -747,7 +868,22 @@ class CodeBubble(Static):
         super().__init__(classes="code-bubble", **kwargs)
         self.code = code.strip()
         self.language = (language or "code").strip()
-        self.title = title or f"◈ {self.language.upper()} CODE BUBBLE"
+        lang_upper = self.language.upper()
+        if not title:
+            if lang_upper in ("PY", "PYTHON"):
+                self.title = "⚡ PYTHON CODE"
+            elif lang_upper in ("SH", "BASH", "SHELL"):
+                self.title = "⚡ BASH SCRIPT"
+            elif lang_upper in ("JS", "JAVASCRIPT", "TS", "TYPESCRIPT"):
+                self.title = f"⚡ {lang_upper} CODE"
+            elif lang_upper in ("JSON", "YAML", "YML", "SQL", "C", "CPP", "GO", "RUST"):
+                self.title = f"⚡ {lang_upper} CODE"
+            elif lang_upper == "TRACEBACK":
+                self.title = "◈ TRACEBACK EXCEPTION LOG"
+            else:
+                self.title = f"⚡ {lang_upper} CODE"
+        else:
+            self.title = title
         self.expanded = False
         self._header_label = Label(self._header_text(), classes="code-bubble-header")
         self._content_static = Static(self._format_highlighted_code(), classes="code-bubble-content")
@@ -760,8 +896,8 @@ class CodeBubble(Static):
         lines = self.code.splitlines()
         count = len(lines)
         return (
-            f"[bold #ec4899]{self.title}[/]  "
-            f"[dim #38bdf8]── plain code ──[/]  "
+            f"[bold #38bdf8]{self.title}[/]  "
+            f"[dim #0284c7]── source code ──[/]  "
             f"[dim #64748b]({count} line{'s' if count != 1 else ''})[/]"
         )
 
@@ -777,7 +913,7 @@ class CodeBubble(Static):
                 formatted.append(f"[dim #f472b6]{i:3d} │[/] [bold #38bdf8]{safe_line}[/]")
             hidden = len(lines) - 5
             formatted.append(
-                f"[dim #64748b]... ({hidden} more line{'s' if hidden != 1 else ''} — type [/][bold #38bdf8]/long[/][dim #64748b] to expand, [/][bold #ec4899]/short[/][dim #64748b] to collapse)[/]"
+                f"[dim #64748b]... ({hidden} more line{'s' if hidden != 1 else ''} — type [/][bold #38bdf8]/long[/][dim #64748b] to expand, [/][bold #38bdf8]/short[/][dim #64748b] to collapse)[/]"
             )
         else:
             for i, line in enumerate(lines, start=1):
@@ -785,7 +921,7 @@ class CodeBubble(Static):
                 formatted.append(f"[dim #f472b6]{i:3d} │[/] [bold #38bdf8]{safe_line}[/]")
             if len(lines) > 6:
                 formatted.append(
-                    f"[dim #64748b](all {len(lines)} lines displayed — type [/][bold #ec4899]/short[/][dim #64748b] to collapse)[/]"
+                    f"[dim #64748b](all {len(lines)} lines displayed — type [/][bold #38bdf8]/short[/][dim #64748b] to collapse)[/]"
                 )
         return "\n".join(formatted)
 
@@ -793,6 +929,66 @@ class CodeBubble(Static):
         self.expanded = expand
         try:
             self._content_static.update(self._format_highlighted_code())
+        except Exception:
+            pass
+
+
+class MarkdownCard(Static):
+    """
+    Visual container for formatted Markdown documents, assessment reports, and notes.
+    Styled with Deep Obsidian (#040d12) and Vibrant Emerald (#10b981 / #34d399) palette,
+    clearly distinguished from executable code bubbles.
+    Renders Rich Markdown (headers, tables, lists, bold text) WITHOUT line numbers.
+    Supports collapsible preview (default: 14 lines) and full expansion via /long.
+    """
+
+    def __init__(self, content: str, title: Optional[str] = None, **kwargs):
+        super().__init__(classes="markdown-card", **kwargs)
+        self.raw_content = content.strip()
+        raw_title = title or "MARKDOWN DOCUMENT"
+        self.title = raw_title if raw_title.startswith("📄") else f"📄 {raw_title}"
+        self.expanded = False
+        self._header_label = Label(self._header_text(), classes="markdown-card-header")
+        self._content_widget = SafeMarkdown(self._get_display_content(), classes="markdown-card-content")
+        self._footer_label = Label(self._footer_text(), classes="markdown-card-footer")
+
+    def compose(self) -> ComposeResult:
+        yield self._header_label
+        yield self._content_widget
+        yield self._footer_label
+
+    def _header_text(self) -> str:
+        lines = self.raw_content.splitlines()
+        count = len(lines)
+        return (
+            f"[bold #34d399]{self.title}[/]  "
+            f"[dim #10b981]── rich markdown ──[/]  "
+            f"[dim #64748b]({count} line{'s' if count != 1 else ''})[/]"
+        )
+
+    def _get_display_content(self) -> str:
+        lines = self.raw_content.splitlines()
+        if not lines:
+            return "_Empty markdown document._"
+        if not self.expanded and len(lines) > 16:
+            return "\n".join(lines[:14])
+        return self.raw_content
+
+    def _footer_text(self) -> str:
+        lines = self.raw_content.splitlines()
+        if len(lines) <= 16:
+            return ""
+        if not self.expanded:
+            hidden = len(lines) - 14
+            return f"[dim #64748b]... ({hidden} more lines — type [/][bold #10b981]/long[/][dim #64748b] to expand document, [/][bold #10b981]/short[/][dim #64748b] to collapse)[/]"
+        else:
+            return f"[dim #64748b](full {len(lines)} lines displayed — type [/][bold #10b981]/short[/][dim #64748b] to collapse)[/]"
+
+    def toggle_expand(self, expand: bool):
+        self.expanded = expand
+        try:
+            self._content_widget.update_content(self._get_display_content())
+            self._footer_label.update(self._footer_text())
         except Exception:
             pass
 
@@ -831,14 +1027,14 @@ class SubagentCard(Static):
         super().__init__(classes="subagent-card", **kwargs)
         self.subagent_id = subagent_id
         self.subagent_type = subagent_type
-        self.task = task
+        self.task_desc = task
         self.status = "RUNNING"
         self._header_label = Label(
             f"⚡ SUBAGENT [{self.subagent_type.upper()}] ── ID: {self.subagent_id}",
             classes="subagent-header",
             markup=False,
         )
-        self._task_label = Label(f"🎯 TASK: {self.task}", classes="subagent-task", markup=False)
+        self._task_label = Label(f"🎯 TASK: {self.task_desc}", classes="subagent-task", markup=False)
         self._status_label = Label("Status: In progress...", classes="subagent-status", markup=False)
 
     def compose(self) -> ComposeResult:
@@ -925,11 +1121,98 @@ class SafeMarkdown(Static):
 
 
 class CommandInput(Input):
-    """Custom input box with unblocked scrolling, command history, and suggestions navigation."""
+    """Custom input box with unblocked scrolling, command history, suggestions navigation, and full multiline paste support."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._raw_multiline: Optional[str] = None
+        self._last_pasted_text: Optional[str] = None
+        self._last_pasted_time: float = 0.0
+
+    def _insert_pasted_text(self, text: str) -> None:
+        if not text:
+            return
+        self._raw_multiline = text
+        if "\n" in text or "\r" in text:
+            display_text = " ↵ ".join(line.strip() for line in text.splitlines() if line.strip())
+        else:
+            display_text = text
+
+        try:
+            selection = self.selection
+            if selection and not selection.is_empty:
+                self.replace(display_text, *selection)
+            else:
+                self.insert_text_at_cursor(display_text)
+        except Exception:
+            self.value = display_text
+
+    def _on_paste(self, event) -> None:
+        """
+        Handle paste events of arbitrary length and line count without truncation.
+        CRITICAL: prevent_default() prevents Textual MRO traversal to Input._on_paste (which causes duplication).
+        """
+        event.prevent_default()
+        event.stop()
+        raw_text = getattr(event, "text", "") or ""
+        if not raw_text:
+            return
+
+        now = time.monotonic()
+        if raw_text == self._last_pasted_text and (now - self._last_pasted_time) < 0.5:
+            return
+        self._last_pasted_text = raw_text
+        self._last_pasted_time = now
+
+        self._insert_pasted_text(raw_text)
+
+    def action_paste(self) -> None:
+        """Override Input.action_paste to use system clipboard with multiline and deduplication."""
+        clip_text = get_system_clipboard() or getattr(self.app, "clipboard", "") or ""
+        if not clip_text:
+            return
+        now = time.monotonic()
+        if clip_text == self._last_pasted_text and (now - self._last_pasted_time) < 0.5:
+            return
+        self._last_pasted_text = clip_text
+        self._last_pasted_time = now
+        self._insert_pasted_text(clip_text)
+
+    def get_submitted_payload(self) -> str:
+        """
+        Retrieve the exact prompt text to submit.
+        If a multiline paste occurred and the operator didn't completely retype the line,
+        return the pristine raw multiline text with original newlines and indentation.
+        """
+        current_val = self.value or ""
+        if self._raw_multiline:
+            norm_raw = " ↵ ".join(line.strip() for line in self._raw_multiline.splitlines() if line.strip())
+            if current_val == norm_raw or current_val == self._raw_multiline:
+                res = self._raw_multiline
+                self._raw_multiline = None
+                return res
+        if " ↵ " in current_val:
+            return current_val.replace(" ↵ ", "\n")
+        return current_val
 
     def on_key(self, event) -> None:
         try:
             app: "SomScanApp" = self.app  # type: ignore
+
+            # Handle direct clipboard paste via Ctrl+V or Shift+Insert
+            if event.key in ("ctrl+v", "shift+insert"):
+                self.action_paste()
+                event.prevent_default()
+                event.stop()
+                return
+
+            # Shift+Enter or Ctrl+J to insert multiline break marker without submitting
+            if event.key in ("shift+enter", "ctrl+j"):
+                self.insert_text_at_cursor(" ↵ ")
+                event.prevent_default()
+                event.stop()
+                return
+
             if event.key == "ctrl+c":
                 # If text is selected, let native copy handle it
                 if getattr(self, "selection", None):
@@ -940,6 +1223,7 @@ class CommandInput(Input):
                 # If operator typed text in the box and task is idle: clear the line (standard CLI ^C)
                 if self.value and not app.router.is_busy:
                     self.value = ""
+                    self._raw_multiline = None
                     event.prevent_default()
                     event.stop()
                     return
@@ -1163,6 +1447,7 @@ class SomScanApp(App):
         self._thinking_widget: Optional[Label] = None
         self._command_cards: List[CommandCard] = []
         self._code_bubbles: List[CodeBubble] = []
+        self._markdown_cards: List[MarkdownCard] = []
         self._subagent_cards: Dict[str, SubagentCard] = {}
         self._input_history: List[str] = []
         self._input_history_idx: int = -1
@@ -1203,7 +1488,7 @@ class SomScanApp(App):
                 id="input-box"
             )
             with Horizontal(id="footer-bar"):
-                yield Label("/help · /resume · /scan · /tools · /new · /copy · /focus · /quit", id="shortcut-hints")
+                yield Label("/help · /scan · /subagent · /loot · /paste · /tools · /model · /quit", id="shortcut-hints")
                 yield Label(f"[bold #0284c7]v{__version__}[/]", id="version-pill")
                 yield Label("READY", id="status-pill")
 
@@ -1513,22 +1798,48 @@ class SomScanApp(App):
 
         is_continuation = (self._last_emitter == "assistant")
 
-        # 1. Parse fenced code blocks ```lang ... ```
+        # 1. Parse fenced blocks ```lang[:title] ... ```
         if "```" in text:
-            parts = re.split(r"(```[a-zA-Z0-9_\-]*\n.*?```)", text, flags=re.DOTALL)
+            parts = re.split(r"(```[^\n]*\n.*?```)", text, flags=re.DOTALL)
+            last_preceding_text = ""
             for part in parts:
                 p = part.strip()
                 if not p:
                     continue
                 if p.startswith("```") and p.endswith("```"):
                     lines = p.splitlines()
-                    lang = lines[0][3:].strip() or "code"
+                    first_line = lines[0][3:].strip()
+                    if ":" in first_line:
+                        lang, custom_title = first_line.split(":", 1)
+                        lang = lang.strip().lower()
+                        custom_title = custom_title.strip()
+                    else:
+                        lang = first_line.lower()
+                        custom_title = None
+
                     code_body = "\n".join(lines[1:-1])
-                    bubble = CodeBubble(code=code_body, language=lang)
-                    self._code_bubbles.append(bubble)
-                    scroll.mount(bubble)
-                    self._last_emitter = "code_bubble"
+
+                    # Extract filename from preceding text if available (e.g. "Updated File: .../REPORT.md")
+                    if not custom_title and last_preceding_text:
+                        m_file = re.search(r"File:\*\*\s*`?([^\n`\(\)]+)`?", last_preceding_text)
+                        if m_file:
+                            custom_title = pathlib.Path(m_file.group(1).strip()).name
+
+                    if lang in ("md", "markdown", "mdown", "mkdn"):
+                        doc_title = custom_title or "MARKDOWN DOCUMENT"
+                        md_card = MarkdownCard(content=code_body, title=doc_title)
+                        self._markdown_cards.append(md_card)
+                        scroll.mount(md_card)
+                        self._last_emitter = "markdown_card"
+                    else:
+                        code_lang = lang or "code"
+                        c_title = f"⚡ {code_lang.upper()} CODE — {custom_title}" if custom_title else None
+                        bubble = CodeBubble(code=code_body, language=code_lang, title=c_title)
+                        self._code_bubbles.append(bubble)
+                        scroll.mount(bubble)
+                        self._last_emitter = "code_bubble"
                 else:
+                    last_preceding_text = p
                     if self._last_emitter == "assistant":
                         a_box = Vertical(
                             SafeMarkdown(p, classes="assistant-sub-text"),
@@ -1551,8 +1862,9 @@ class SomScanApp(App):
         )
         lines = text.strip().splitlines()
         first_line = lines[0].strip() if lines else ""
-        if len(lines) >= 3 and any(first_line.startswith(m) for m in code_markers):
-            bubble = CodeBubble(code=text, language="code", title="◈ PLAIN CODE BUBBLE")
+        is_markdown = any(l.strip().startswith(("# ", "## ", "### ", "| ", "- ", "* ", "> ")) for l in lines[:5])
+        if len(lines) >= 3 and not is_markdown and any(first_line.startswith(m) for m in code_markers):
+            bubble = CodeBubble(code=text, language="code", title="⚡ CODE SNIPPET")
             self._code_bubbles.append(bubble)
             scroll.mount(bubble)
             self._last_emitter = "code_bubble"
@@ -1837,6 +2149,46 @@ class SomScanApp(App):
                 f"[Exploit: {event.vuln_name}] Target: {event.target} Status: {event.status}"
             )
 
+        elif isinstance(event, QuestionPromptEvent):
+            self._last_emitter = "question"
+            self._handle_event(ThinkingStopEvent())
+            self._active_question_id = event.question_id
+            self._question_is_secret = event.is_secret
+
+            icon = "🔐" if event.is_secret else "❓"
+            title = "OPERATOR AUTHENTICATION REQUIRED" if event.is_secret else "OPERATOR QUESTION"
+            q_card = Vertical(
+                Label(f"{icon} [bold #f59e0b]{title}[/]", classes="finding-title"),
+                Static(event.prompt, classes="finding-evidence", markup=False),
+                classes="finding-card"
+            )
+            if scroll is not None:
+                scroll.mount(q_card)
+            self._conversation_history.append(f"[{title}] {event.prompt}")
+
+            try:
+                inp_box = self.query_one("#input-box", CommandInput)
+                if event.is_secret:
+                    inp_box.password = True
+                    inp_box.placeholder = "Enter password / secret (input masked)..."
+                else:
+                    inp_box.password = False
+                    inp_box.placeholder = f"Reply: {event.prompt[:40]}..."
+                inp_box.focus()
+            except Exception:
+                pass
+            self._handle_event(StatusChangeEvent("AWAITING OPERATOR INPUT", "yellow"))
+
+        elif isinstance(event, QuestionAnswerEvent):
+            self._active_question_id = None
+            self._question_is_secret = False
+            try:
+                inp_box = self.query_one("#input-box", CommandInput)
+                inp_box.password = False
+                inp_box.placeholder = "Ask anything, give instructions, /help..."
+            except Exception:
+                pass
+
         elif isinstance(event, StatusChangeEvent):
             self._current_status_text = event.status
             self._current_status_color = event.color
@@ -1875,7 +2227,16 @@ class SomScanApp(App):
             self._show_error_boundary(e, traceback.format_exc())
 
     def _safe_input_submitted(self, event: Input.Submitted):
-        self.submit_text(event.value)
+        inp = getattr(event, "input", None)
+        if isinstance(inp, CommandInput):
+            payload = inp.get_submitted_payload()
+        else:
+            try:
+                inp_box = self.query_one("#input-box", CommandInput)
+                payload = inp_box.get_submitted_payload()
+            except Exception:
+                payload = event.value
+        self.submit_text(payload)
 
     def submit_text(self, text: str):
         text = (text or "").strip()
@@ -1887,8 +2248,32 @@ class SomScanApp(App):
         try:
             inp = self.query_one("#input-box", CommandInput)
             inp.value = ""
+            inp._raw_multiline = None
         except Exception:
             pass
+
+        # Intercept input if an operator question or auth prompt is active
+        if getattr(self, "_active_question_id", None) or (hasattr(self, "router") and self.router and getattr(self.router, "has_pending_question", False)):
+            qid = getattr(self, "_active_question_id", "")
+            self._active_question_id = None
+            is_secret = getattr(self, "_question_is_secret", False)
+            self._question_is_secret = False
+            try:
+                inp_box = self.query_one("#input-box", CommandInput)
+                inp_box.password = False
+                inp_box.placeholder = "Ask anything, give instructions, /help..."
+            except Exception:
+                pass
+
+            if qid:
+                answered = self.router.answer_question(qid, text)
+            else:
+                answered = self.router.answer_active_question(text)
+
+            if answered:
+                masked_display = "***" if is_secret else text
+                self._handle_event(AssistantMessageEvent(f"💬 **Operator replied:** `{masked_display}`"))
+                return
 
         if text:
             if not self._input_history or self._input_history[-1] != text:
@@ -1896,6 +2281,17 @@ class SomScanApp(App):
             self._input_history_idx = -1
 
         # 1. Local Immediate Commands (always execute, never blocked)
+        if text in ("/paste", "/clip"):
+            clip_text = get_system_clipboard()
+            if not clip_text or not clip_text.strip():
+                self._handle_event(AssistantMessageEvent("System clipboard is empty or inaccessible."))
+                return
+            lines_cnt = len(clip_text.splitlines())
+            chars_cnt = len(clip_text)
+            self._handle_event(AssistantMessageEvent(f"📋 Ingested {lines_cnt} lines ({chars_cnt} chars) from system clipboard."))
+            self.submit_text(clip_text)
+            return
+
         if text in ("/new", "/reset", "/fresh"):
             self._archive_and_reset_session()
             return
@@ -1909,6 +2305,7 @@ class SomScanApp(App):
             self._conversation_history.clear()
             self._command_cards.clear()
             self._code_bubbles.clear()
+            self._markdown_cards.clear()
             return
 
         if text in ("/quit", "/q"):
@@ -1933,6 +2330,8 @@ class SomScanApp(App):
                 c.toggle_expand(True)
             for b in self._code_bubbles:
                 b.toggle_expand(True)
+            for m in self._markdown_cards:
+                m.toggle_expand(True)
             self._handle_event(StatusChangeEvent("READY", "green"))
             return
 
@@ -1941,6 +2340,8 @@ class SomScanApp(App):
                 c.toggle_expand(False)
             for b in self._code_bubbles:
                 b.toggle_expand(False)
+            for m in self._markdown_cards:
+                m.toggle_expand(False)
             self._handle_event(StatusChangeEvent("READY", "green"))
             return
 
@@ -1981,6 +2382,7 @@ class SomScanApp(App):
         self._conversation_history.clear()
         self._command_cards.clear()
         self._code_bubbles.clear()
+        self._markdown_cards.clear()
         archived = self.router.reset_session()
         greeting = (
             f"🔄 **Fresh Assessment Session Started**\n\n"

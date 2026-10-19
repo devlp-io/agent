@@ -2943,12 +2943,22 @@ def do_tools(spec):
             return "installer not loaded"
         s = _tool_status()
         return (f"platform: {s['platform']}\n"
-                f"installed: {s['installed']}/{s['total_in_db']}\n"
+                f"installed: {s['installed']}/{s['total_in_db']} (verified: {s.get('verified_count', 0)})\n"
                 f"missing: {', '.join(s['missing_list'][:40])}")
+    if spec.startswith("preinstall"):
+        cat = spec.replace("preinstall", "").strip() or "all"
+        import installer as _inst, json as _j
+        if cat in ("all", "*"):
+            return _j.dumps(_inst.preinstall_all_categories(), indent=2)
+        return _j.dumps(_inst.preinstall_category(cat), indent=2)
+    if spec.startswith("check"):
+        tgt = spec.replace("check", "").strip() or (STATE.get("target") if isinstance(STATE, dict) else "") or "https://target.com"
+        import installer as _inst, json as _j
+        return _j.dumps(_inst.ensure_tools_for_task(tgt), indent=2)
     if spec.startswith("install "):
         name = spec[8:].strip()
         return install_any(name)
-    return "usage: TOOLS: list | TOOLS: search <q> | TOOLS: status | TOOLS: install <name>"
+    return "usage: TOOLS: list | TOOLS: search <q> | TOOLS: status | TOOLS: check [target] | TOOLS: preinstall [cat] | TOOLS: install <name>"
 
 
 def do_goal(spec):
@@ -4571,6 +4581,20 @@ def agent_loop(task, target, resume_dir=None, resume_history=None):
     except Exception:
         os.environ["AG_ENV_RECON"] = ""
 
+    # Target Pre-flight Tooling & Dependency Auto-Provisioning
+    try:
+        import installer as _inst
+        print(f"  {C['cyan']}[*] Pre-flight checking required tools for target...{C['rst']}")
+        tool_status = _inst.ensure_tools_for_task(
+            target or task,
+            auto_install=True,
+            on_status=lambda msg: print(f"    {C['gray']}|{C['rst']} {msg}")
+        )
+        STATE["tools_provisioned"] = tool_status
+        _state.save(RUN_DIR, STATE)
+    except Exception as e:
+        print(f"  {C['yellow']}[!] Pre-flight tool check warning: {e}{C['rst']}")
+
     hr()
     banner(f">> task: {task}")
     banner(f"   target: {target}")
@@ -4982,6 +5006,11 @@ def main():
     args = sys.argv[1:]
     resume = False
     auto_attack = False
+    non_interactive = False
+    for nif in ("--non-interactive", "-n", "--batch", "--headless"):
+        if nif in args:
+            non_interactive = True
+            args.remove(nif)
     if "--resume" in args:
         resume = True
         args.remove("--resume")
@@ -5076,6 +5105,12 @@ def main():
             attack_phase(target)
         except KeyboardInterrupt:
             print(f"\n{C['yellow']}[attack interrupted]{C['rst']}")
+        _finalize()
+        _summary()
+        return
+
+    # Non-interactive / headless execution: finalize and exit cleanly without prompting
+    if non_interactive or not sys.stdin.isatty():
         _finalize()
         _summary()
         return

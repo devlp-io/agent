@@ -232,3 +232,37 @@ class ExploitCardEvent(AgentEvent):
         self.output_snippet = output_snippet
         self.proof = proof
 
+
+class QuestionPromptEvent(AgentEvent):
+    """Event emitted when the agent requests input or credentials from the operator."""
+    def __init__(
+        self,
+        question_id: str = "",
+        prompt: str = "",
+        is_secret: bool = False,
+        choices: Optional[List[str]] = None,
+        default: Optional[str] = None,
+        timeout_sec: float = 120.0,
+        timestamp: Optional[float] = None,
+    ):
+        super().__init__(timestamp)
+        self.question_id = question_id
+        self.prompt = prompt
+        self.is_secret = is_secret
+        self.choices = choices or []
+        self.default = default
+        self.timeout_sec = timeout_sec
+
+
+class QuestionAnswerEvent(AgentEvent):
+    """Event emitted when an operator responds to an agent's question."""
+    def __init__(
+        self,
+        question_id: str = "",
+        answer: str = "",
+        timestamp: Optional[float] = None,
+    ):
+        super().__init__(timestamp)
+        self.question_id = question_id
+        self.answer = answer
+

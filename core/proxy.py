@@ -27,10 +27,15 @@ class ProxyPool:
         env = os.environ.get("AG_PROXIES", "").strip()
         if env:
             return [x.strip() for x in env.split(",") if x.strip()]
-        p = pathlib.Path(os.path.expanduser("~/agent/proxies.txt"))
-        if p.exists():
-            return [ln.strip() for ln in p.read_text().splitlines()
-                    if ln.strip() and not ln.strip().startswith("#")]
+        candidates = [
+            pathlib.Path.cwd() / "proxies.txt",
+            pathlib.Path.home() / ".somscan" / "proxies.txt",
+            pathlib.Path(os.path.expanduser("~/agent/proxies.txt")),
+        ]
+        for p in candidates:
+            if p.exists():
+                return [ln.strip() for ln in p.read_text(encoding="utf-8", errors="replace").splitlines()
+                        if ln.strip() and not ln.strip().startswith("#")]
         return []
 
     def add(self, proxy):
