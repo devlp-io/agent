@@ -202,14 +202,24 @@ class PayloadCardEvent(AgentEvent):
         code: str = "",
         evasion_notes: str = "",
         compilation_cmd: str = "",
+        target: str = "",
+        payload_code: str = "",
         timestamp: Optional[float] = None,
     ):
         super().__init__(timestamp)
         self.payload_type = payload_type
-        self.target_platform = target_platform
-        self.code = code
+        self.target_platform = target or target_platform
+        self.code = payload_code or code
         self.evasion_notes = evasion_notes
         self.compilation_cmd = compilation_cmd
+
+    @property
+    def target(self) -> str:
+        return self.target_platform
+
+    @property
+    def payload_code(self) -> str:
+        return self.code
 
 
 class ExploitCardEvent(AgentEvent):
@@ -222,15 +232,33 @@ class ExploitCardEvent(AgentEvent):
         success: bool = False,
         output_snippet: str = "",
         proof: str = "",
+        vuln_name: str = "",
+        status: str = "",
+        details: str = "",
         timestamp: Optional[float] = None,
     ):
         super().__init__(timestamp)
-        self.title = title
+        self.title = title or vuln_name
         self.target = target
         self.tool = tool
-        self.success = success
-        self.output_snippet = output_snippet
+        self.success = success if success is not False else (status.upper() == "VERIFIED" if status else False)
+        self.output_snippet = output_snippet or details
         self.proof = proof
+        self._vuln_name = vuln_name or title
+        self._status = status or ("VERIFIED" if self.success else "FAILED")
+        self._details = details or output_snippet or proof
+
+    @property
+    def vuln_name(self) -> str:
+        return self._vuln_name or self.title or self.tool or "Exploit"
+
+    @property
+    def status(self) -> str:
+        return self._status or ("VERIFIED" if self.success else "FAILED")
+
+    @property
+    def details(self) -> str:
+        return self._details or self.output_snippet or self.proof or ""
 
 
 class ReversingCardEvent(AgentEvent):

@@ -2204,44 +2204,60 @@ class SomScanApp(App):
         elif isinstance(event, PayloadCardEvent):
             self._last_emitter = "payload"
             self._handle_event(ThinkingStopEvent())
+            p_type = getattr(event, "payload_type", "exploit")
+            p_target = getattr(event, "target", getattr(event, "target_platform", ""))
+            p_code = getattr(event, "payload_code", getattr(event, "code", ""))
+            p_evasion = getattr(event, "evasion_notes", "")
             card = PayloadCard(
-                payload_type=event.payload_type,
-                target=event.target,
-                payload_code=event.payload_code,
-                evasion_notes=event.evasion_notes,
+                payload_type=p_type,
+                target=p_target,
+                payload_code=p_code,
+                evasion_notes=p_evasion,
             )
             if scroll is not None:
                 scroll.mount(card)
             self._conversation_history.append(
-                f"[Payload {event.payload_type.upper()}] Target: {event.target}\n{event.payload_code}"
+                f"[Payload {p_type.upper()}] Target: {p_target}\n{p_code}"
             )
 
         elif isinstance(event, ExploitCardEvent):
             self._last_emitter = "exploit"
             self._handle_event(ThinkingStopEvent())
+            vuln_name = getattr(event, "vuln_name", getattr(event, "title", getattr(event, "tool", "Exploit")))
+            target = getattr(event, "target", "")
+            status = getattr(
+                event,
+                "status",
+                "VERIFIED" if getattr(event, "success", False) else "FAILED",
+            )
+            details = getattr(
+                event,
+                "details",
+                getattr(event, "output_snippet", getattr(event, "proof", "")),
+            )
             card = ExploitCard(
-                vuln_name=event.vuln_name,
-                target=event.target,
-                status=event.status,
-                details=event.details,
+                vuln_name=vuln_name,
+                target=target,
+                status=status,
+                details=details,
             )
             if scroll is not None:
                 scroll.mount(card)
             self._conversation_history.append(
-                f"[Exploit: {event.vuln_name}] Target: {event.target} Status: {event.status}"
+                f"[Exploit: {vuln_name}] Target: {target} Status: {status}"
             )
 
         elif isinstance(event, ReversingCardEvent):
             self._last_emitter = "reversing"
             self._handle_event(ThinkingStopEvent())
             card = ReversingCard(
-                target=event.target,
-                arch=event.arch,
-                tool=event.tool,
-                mitigations=event.mitigations,
-                findings_count=event.findings_count,
-                decompiled_snippet=event.decompiled_snippet,
-                summary=event.summary,
+                target=getattr(event, "target", ""),
+                arch=getattr(event, "arch", "unknown"),
+                tool=getattr(event, "tool", "REA / radare2"),
+                mitigations=getattr(event, "mitigations", ""),
+                findings_count=getattr(event, "findings_count", 0),
+                decompiled_snippet=getattr(event, "decompiled_snippet", ""),
+                summary=getattr(event, "summary", ""),
             )
             if scroll is not None:
                 scroll.mount(card)
