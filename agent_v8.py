@@ -3271,6 +3271,24 @@ def do_reverse(payload):
         return f"[REVERSE ENG ERROR]: {e}"
 
 
+def do_attack(payload):
+    target = payload.strip()
+    try:
+        from attack.redteam import RedTeamAttackEngine
+        from core.task_runner import TaskRunner
+        runner = TaskRunner()
+        engine = RedTeamAttackEngine(
+            target=target,
+            task_runner=runner,
+            emit_fn=lambda e: None,
+            run_dir=RUN_DIR
+        )
+        res = engine.run()
+        return f"[REDTEAM ATTACK]: {res['summary']}"
+    except Exception as e:
+        return f"[REDTEAM ATTACK ERROR]: {e}"
+
+
 DISPATCH = {
     "COMMAND": do_command,
     "PARALLEL": do_parallel,
@@ -3335,6 +3353,8 @@ DISPATCH = {
     "MALWARE": do_malware,
     "REVERSE": do_reverse,
     "REA": do_reverse,
+    "ATTACK": do_attack,
+    "REDTEAM": do_attack,
 }
 
 

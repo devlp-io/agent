@@ -152,6 +152,7 @@ Autonomous Directives (emit line-anchored on column 0):
   PAYLOAD: <xss|sqli|ssrf|lfi|rce|ssti|crlf|nosqli>
   MALWARE: <payload-type|target-platform|spec>
   REVERSE: <target-path-or-spec> (Reverse Engineer Anything: REA, radare2, checksec, decompilation)
+  ATTACK: <target-or-vector> (Autonomous Red Team exploitation mode with or without prior findings)
   SUBAGENT: <recon|exploit|malware|reversing|webaudit|cloud|adpivoting|osint|codeaudit|evasion|reporter>|<task>
   SECRET: <text-or-path>
   CRED: <user>|<pass>[|where]
@@ -1068,7 +1069,8 @@ class AgentRouter:
         valid_single_line = {
             "COMMAND", "INSTALL", "TOOLS", "LIST", "PROBE", "PARALLEL",
             "WALK", "WAF", "STACK", "CVE", "METHOD", "EXPLOIT", "PAYLOAD",
-            "SECRET", "CRED", "ENDPOINT", "NOTE", "SUBAGENT", "MALWARE", "REVERSE", "REA", "PHASE",
+            "SECRET", "CRED", "ENDPOINT", "NOTE", "SUBAGENT", "MALWARE", "REVERSE", "REA",
+            "ATTACK", "REDTEAM", "PHASE",
             "LOOT", "PROOF", "CHAIN", "PIVOT", "BROWSER", "GRAPHQL", "SHELL",
             "CRACK", "SEARCH", "FETCH", "PARAMFIND", "APIMAP", "HARVEST", "STATUS", "PLAN"
         }
@@ -2035,76 +2037,62 @@ class AgentRouter:
         self.emit(StatusChangeEvent("READY", "green"))
 
     def _execute_attack_phase(self, target: str):
-        """Execute post-scan exploitation / attack phase targeting discovered findings."""
-        self.emit(StatusChangeEvent("RUNNING…", "red"))
-        state = agent_v8.STATE
-        if not state or not isinstance(state, dict):
-            valid_runs = find_valid_scan_runs(target)
-            if valid_runs:
-                run_dir = valid_runs[-1]
-                state = _state.load(run_dir)
-                agent_v8.RUN_DIR = run_dir
-                agent_v8.STATE = state
+        """Execute dedicated autonomous Red Team attack phase with or without prior findings."""
+        self.emit(StatusChangeEvent("ATTACKING…", "red"))
+        self._last_scan_target = target
+        self._active_scan_target = target
 
-        attackables = agent_v8.collect_attackables(state) if state else []
-        if not attackables:
-            self.emit(AssistantMessageEvent(
-                f"No attackable findings recorded yet for `{target}`.\n"
-                f"Run `/scan {target}` first to discover vulnerabilities, then trigger `/attack {target}`."
-            ))
-            self.emit(StatusChangeEvent("READY", "green"))
-            return
+        from attack.redteam import RedTeamAttackEngine
 
-        self.emit(AssistantMessageEvent(
-            f"⚔️ **Launching Attack Phase against target:** `{target}`\n"
-            f"Targeting **{len(attackables)}** attackable vectors..."
-        ))
-
-        for aid, desc, sev, ev in attackables[:5]:
-            if self._is_cancelled:
-                break
-            self.emit(AssistantMessageEvent(f"🎯 **Verifying Attack Vector [{aid}]** `{desc}` ({sev})"))
-
-            # Extract any endpoint or URL from finding evidence
-            urls_in_ev = re.findall(r"https?://[^\s\"\'<>`)]+", ev)
-            target_url = urls_in_ev[0] if urls_in_ev else target
-            if not target_url.startswith("http"):
-                target_url = f"https://{target_url}"
-
-            desc_low = desc.lower()
-            ev_low = ev.lower()
-
-            if "directory listing" in desc_low or "uploads" in desc_low or "autoindex" in ev_low:
-                probe_cmd = f"curl -sS -I --max-time 15 {target_url}"
-            elif "user enum" in desc_low or "users" in ev_low:
-                probe_cmd = f"curl -sS --max-time 15 {target_url}"
-            elif "post" in ev_low:
-                probe_cmd = f"curl -sS --max-time 15 -X POST {target_url} -d 'test=1'"
-            else:
-                probe_cmd = f"curl -sS -I --max-time 15 {target_url}"
-
-            cmd_res = self.task_runner.run_command(probe_cmd, cwd=str(run_dir))
-            r_str = cmd_res.output or f"Exit {cmd_res.returncode}"
-            self.emit(AssistantMessageEvent(
-                f"💥 **Attack Vector Verification [{aid}]:**\n"
-                f"Command: `$ {probe_cmd}`\n"
-                f"```\n{r_str[:400]}\n```"
-            ))
-            state.setdefault("attacks", []).append({
-                "aid": aid,
-                "target": target,
-                "sev": sev,
-                "command": probe_cmd,
-                "result": r_str[:1000]
-            })
-
+        # Harvest findings from SessionDB and memory
+        findings = []
         try:
-            agent_v8._finalize()
+            findings.extend(SessionDB.get_findings(self.session_id))
         except Exception:
             pass
+        if agent_v8.STATE and isinstance(agent_v8.STATE, dict):
+            findings.extend(agent_v8.STATE.get("findings", []))
 
-        self.emit(TaskCompleteEvent(status=f"Attack phase completed for {target}", success=True))
-        self.emit(StatusChangeEvent("READY", "green"))
+        # Check latest scan run directory if available
+        run_dir = None
+        valid_runs = find_valid_scan_runs(target)
+        if valid_runs:
+            run_dir = valid_runs[-1]
+            agent_v8.RUN_DIR = run_dir
+            if not findings:
+                try:
+                    state = _state.load(run_dir)
+                    findings.extend(state.get("findings", []))
+                except Exception:
+                    pass
+
+        # Also search session database for target findings if current session is empty
+        if not findings:
+            try:
+                with SessionDB._get_db() as conn:
+                    safe_q = f"%{target}%"
+                    rows = conn.execute("""
+                        SELECT f.severity, f.title, f.evidence, f.timestamp
+                        FROM findings f
+                        JOIN sessions s ON f.session_id = s.session_id
+                        WHERE s.target LIKE ? OR s.title LIKE ? OR f.title LIKE ? OR f.evidence LIKE ?
+                        ORDER BY f.id DESC LIMIT 30
+                    """, (safe_q, safe_q, safe_q, safe_q)).fetchall()
+                    for r in rows:
+                        findings.append(dict(r))
+            except Exception:
+                pass
+
+        engine = RedTeamAttackEngine(
+            target=target,
+            task_runner=self.task_runner,
+            emit_fn=self.emit,
+            findings=findings,
+            run_dir=run_dir,
+            session_id=self.session_id
+        )
+
+        engine.run()
 
     # ────────────────────────────────────────────────────────────────
     # Slash Commands Handler
@@ -2151,9 +2139,21 @@ class AgentRouter:
             else:
                 self._execute_security_scan(target, f"resume scan {target}", resume=True)
         elif cmd in ("/attack", "/exploit"):
-            target = arg or self._last_scan_target
+            target = arg or self._active_scan_target or self._last_scan_target
             if not target:
-                self.emit(ErrorEvent("Usage: /attack <target-url-or-domain>"))
+                valid_runs = find_valid_scan_runs()
+                if valid_runs:
+                    latest = valid_runs[-1]
+                    target = latest.parent.name.replace("_", ".")
+            if not target:
+                try:
+                    sessions = SessionDB.list_sessions(1)
+                    if sessions and sessions[0].get("target"):
+                        target = sessions[0]["target"]
+                except Exception:
+                    pass
+            if not target:
+                self.emit(ErrorEvent("Usage: `/attack <target-url-or-domain>` (e.g. `/attack mop.gov.so` or `/attack https://aimsapis.mop.gov.so`)"))
             else:
                 self._execute_attack_phase(target)
         elif cmd in ("/key", "/setkey"):

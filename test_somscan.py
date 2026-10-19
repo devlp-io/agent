@@ -1231,6 +1231,57 @@ class TestSomScan(unittest.TestCase):
         from core.events import AssistantMessageEvent
         self.assertTrue(any("Reverse Engineering Specialist (REA)" in getattr(e, "text", "") for e in events))
 
+    def test_56_redteam_attack_engine_with_and_without_findings(self):
+        """Verify RedTeamAttackEngine operates successfully with findings and without prior findings."""
+        from attack.redteam import RedTeamAttackEngine
+        from core.task_runner import TaskRunner
+        from core.events import ExploitCardEvent, PhaseTransitionEvent
+
+        runner = TaskRunner()
+
+        # 1. Test WITH specific findings (e.g. Swagger and directory exposure as in user session)
+        events_with = []
+        findings_sample = [
+            {
+                "severity": "medium",
+                "title": "Unauthenticated Swagger/OpenAPI spec disclosure (281 endpoints)",
+                "evidence": "https://aimsapis.mop.gov.so/swagger/v1/swagger.json returns 200"
+            },
+            {
+                "severity": "medium",
+                "title": "Unauthenticated organization directory exposure (714 records)",
+                "evidence": "GET https://aimsapis.mop.gov.so/api/Organization returns 200"
+            }
+        ]
+        engine_with = RedTeamAttackEngine(
+            target="mop.gov.so",
+            task_runner=runner,
+            emit_fn=lambda e: events_with.append(e),
+            findings=findings_sample
+        )
+        res_with = engine_with.run()
+        self.assertIn("Red team assault completed", res_with["summary"])
+        self.assertTrue(any(isinstance(e, ExploitCardEvent) for e in events_with))
+        self.assertTrue(any(isinstance(e, PhaseTransitionEvent) for e in events_with))
+
+        # 2. Test WITHOUT any findings (zero-findings autonomous assault)
+        events_without = []
+        engine_without = RedTeamAttackEngine(
+            target="example.com",
+            task_runner=runner,
+            emit_fn=lambda e: events_without.append(e),
+            findings=[]
+        )
+        res_without = engine_without.run()
+        self.assertIn("Red team assault completed", res_without["summary"])
+        self.assertTrue(any(isinstance(e, ExploitCardEvent) for e in events_without))
+
+        # 3. Test router /attack command execution without crashing or refusing
+        router_events = []
+        r = AgentRouter(lambda e: router_events.append(e))
+        r._execute_attack_phase("mop.gov.so")
+        self.assertFalse(any("No attackable findings recorded yet" in getattr(e, "text", "") for e in router_events))
+
 
 if __name__ == "__main__":
     unittest.main()

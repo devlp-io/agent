@@ -237,7 +237,11 @@ class ReconSubagent(BaseSubagent):
 
 
 class ExploitSubagent(BaseSubagent):
-    """Autonomous exploit weaponization and vulnerability verification subagent."""
+    """
+    Autonomous Red Team Exploit & Attack Subagent.
+    Drives full-spectrum exploitation with or without prior findings:
+    OpenAPI/Swagger attacks, IDOR dumps, SQLi extraction, auth bypasses, and Nuclei weaponization.
+    """
 
     def run(self) -> SubagentResult:
         t0 = time.time()
@@ -248,67 +252,34 @@ class ExploitSubagent(BaseSubagent):
         ))
 
         target = self.task.strip()
-        findings = []
+        from attack.redteam import RedTeamAttackEngine
 
-        # 1. Run targeted Nuclei vulnerability scan
-        cmd_nuclei = f"nuclei -u {target} -tags cve,rce,sqli,ssrf,lfi,auth-bypass -severity high,critical -silent -stats=false 2>/dev/null"
-        res_nuclei = self.task_runner.run_command(cmd_nuclei, cwd=str(self.work_dir))
-
-        nuclei_hits = [l.strip() for l in res_nuclei.output.splitlines() if l.strip() and "[" in l]
-        for hit in nuclei_hits:
-            sev = "critical" if "critical" in hit.lower() else ("high" if "high" in hit.lower() else "medium")
-            findings.append({
-                "sev": sev,
-                "title": f"Verified Exploit Vector: {hit[:80]}",
-                "evidence": hit
-            })
-            self.emit(FindingEvent(severity=sev, title=f"Verified Exploit Vector: {hit[:80]}", evidence=hit))
-
-        # 2. Targeted SQLi probe if target includes query parameters
-        if "?" in target:
-            cmd_sqli = f"ghauri -u '{target}' --batch --level=1 --dbs 2>/dev/null || sqlmap -u '{target}' --batch --risk=1 --level=1 --current-db 2>/dev/null"
-            res_sqli = self.task_runner.run_command(cmd_sqli, cwd=str(self.work_dir))
-            if any(term in res_sqli.output.lower() for term in ("is vulnerable", "injection point", "sql injection found")):
-                findings.append({
-                    "sev": "critical",
-                    "title": f"Verified SQL Injection on {target.split('?')[0]}",
-                    "evidence": res_sqli.output[:300]
-                })
-                self.emit(FindingEvent(
-                    severity="critical",
-                    title=f"Verified SQL Injection on {target.split('?')[0]}",
-                    evidence=res_sqli.output[:300]
-                ))
-
-        dur = time.time() - t0
-        summary_text = f"Exploit testing completed on {target}. Found {len(findings)} confirmed vectors."
-
-        self.emit(ExploitCardEvent(
-            title=f"Exploit Subagent Run: {target}",
+        engine = RedTeamAttackEngine(
             target=target,
-            tool="nuclei / ghauri / custom-poc",
-            success=len(findings) > 0,
-            output_snippet=res_nuclei.output[:350] or "No direct exploits confirmed.",
-            proof="Captured verified PoC output in findings log" if findings else "Surface resilient"
-        ))
+            task_runner=self.task_runner,
+            emit_fn=self.emit,
+            run_dir=self.work_dir
+        )
+        res = engine.run()
+        dur = time.time() - t0
 
         self.emit(SubagentFinishEvent(
             subagent_type="exploit",
-            summary=summary_text,
+            summary=res["summary"],
             subagent_id=self.subagent_id,
             success=True,
             duration_sec=dur,
-            findings_discovered=len(findings),
-            details=res_nuclei.output
+            findings_discovered=res["findings_confirmed"],
+            details=f"Attacks Executed: {res['attacks_executed']} | Breaches Confirmed: {res['findings_confirmed']}"
         ))
 
         return SubagentResult(
             subagent_type="exploit",
             task=self.task,
             success=True,
-            summary=summary_text,
-            details=res_nuclei.output,
-            findings=findings,
+            summary=res["summary"],
+            details=f"Target: {target} | Attacks: {res['attacks_executed']}",
+            findings=engine.discovered_findings,
             duration=dur
         )
 
