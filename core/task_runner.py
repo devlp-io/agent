@@ -390,8 +390,6 @@ class TaskRunner:
         py_dir = os.path.dirname(real_py)
         py_scripts = os.path.join(py_dir, "Scripts")
         curr_path = run_env.get("PATH", "")
-        extra_paths = [py_dir, py_scripts]
-
         home_dir = os.path.expanduser("~")
         candidate_paths = [
             os.path.join(home_dir, "go", "bin"),
@@ -417,9 +415,13 @@ class TaskRunner:
                 os.path.expandvars(r"%LOCALAPPDATA%\bin"),
                 os.path.expandvars(r"%APPDATA%\npm"),
             ])
+        extra_paths = []
         for extra in candidate_paths:
             if os.path.exists(extra) and extra not in extra_paths:
                 extra_paths.append(extra)
+        for p in (py_dir, py_scripts):
+            if os.path.exists(p) and p not in extra_paths:
+                extra_paths.append(p)
 
         run_env["PATH"] = f"{os.pathsep.join(extra_paths)}{os.pathsep}{curr_path}"
 
