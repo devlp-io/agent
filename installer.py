@@ -926,7 +926,7 @@ def ensure_tools_for_task(task_or_target: str, auto_install: bool = True, on_sta
 
 REDTEAM_CATEGORIES = [
     "recon", "web", "fuzz", "network", "pivot", "creds",
-    "api", "secrets", "cloud", "util", "wordlist", "misc"
+    "api", "secrets", "cloud", "util", "wordlist", "reversing", "misc"
 ]
 
 

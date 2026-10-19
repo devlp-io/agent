@@ -9,6 +9,9 @@ while [ -h "$SOURCE" ]; do
 done
 DIR="$(cd -P "$(dirname "$SOURCE")" >/dev/null 2>&1 && pwd)"
 
+# Export toolchain paths for all red team and reversing tools
+export PATH="$HOME/go/bin:$HOME/.local/bin:$HOME/agent/tools:/home/devlp/go/bin:/home/devlp/.local/bin:/usr/local/go/bin:/usr/local/bin:$PATH"
+
 # Prioritize local virtual environments
 if [ -f "$DIR/.venv_linux/bin/python" ]; then
     PY_BIN="$DIR/.venv_linux/bin/python"

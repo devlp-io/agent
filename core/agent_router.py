@@ -23,6 +23,7 @@ import sys
 import time
 import uuid
 import shutil
+import shlex
 import pathlib
 import platform
 import threading
@@ -773,49 +774,8 @@ class AgentRouter:
                     cmd_res = self._exec_directive_command(payload)
                     output_text = cmd_res.output or "(no output)"
                     diagnostic_tip = ""
-                    out_low = output_text.lower()
-                    cmd_low = payload.lower()
-
-                    if cmd_res.returncode != 0:
-                        if any(err in out_low for err in ("unexpected eof", "syntax error", "unterminated", "syntaxerror", "quote")) or ("python -c" in cmd_low and cmd_res.returncode != 0):
-                            diagnostic_tip = (
-                                "\n[Supervisor Diagnostic]: Bash quoting/syntax error detected. "
-                                "Inline multi-line python/bash commands with single/double quotes frequently fail in shell execution. "
-                                "Instead, write your script cleanly into a file via FILE: <script_name>.py|<code_here> and run it via COMMAND: python <script_name>.py."
-                            )
-                        elif cmd_res.returncode == 127 or any(err in out_low for err in ("command not found", "not recognized", "no such file or directory")):
-                            diagnostic_tip = (
-                                "\n[Supervisor Diagnostic]: Tool or binary not found. "
-                                "You have full autonomy to install or pull tools: use INSTALL: <tool>, apt-get / pip / go install, or clone via git. "
-                                "Alternatively, write your own custom Python/Bash replacement using FILE:."
-                            )
-                        elif any(err in out_low for err in ("permission denied", "access is denied")):
-                            diagnostic_tip = (
-                                "\n[Supervisor Diagnostic]: Permission denied. Use chmod +x on scripts, ensure correct workspace directory, "
-                                "or run with required permissions."
-                            )
-                        elif any(w in out_low for w in ("403 forbidden", "cloudflare", "imunify360", "bot protection", "captcha", "cf-chl")):
-                            diagnostic_tip = (
-                                "\n[Supervisor Diagnostic]: Security gate / WAF challenge detected. Do not repeat the identical raw request. "
-                                "Rotate User-Agent and headers, test for origin IP bypass, craft a bypass script (FILE:), or use METHOD: waf-bypass."
-                            )
-                        elif any(r in out_low for r in ("429 too many", "rate limit", "too many attempts", "5 daqiiqo")):
-                            diagnostic_tip = (
-                                "\n[Supervisor Diagnostic]: Rate limit / throttling detected. "
-                                "Pivot to alternative endpoints or subdomains, add request delay/jitter, rotate source IPs or client headers (X-Forwarded-For), "
-                                "or explore untracked routes."
-                            )
-                    else:
-                        if "429 too many" in out_low or "status\":429" in out_low:
-                            diagnostic_tip = (
-                                "\n[Supervisor Diagnostic]: HTTP 429 Rate Limit returned by server. "
-                                "Throttle/cooldown is active. Pivot to other endpoints, rotate IPs/headers, or add backoff."
-                            )
-                        elif "400 bad request" in out_low:
-                            diagnostic_tip = (
-                                "\n[Supervisor Diagnostic]: HTTP 400 Bad Request returned by server. "
-                                "Check request payload syntax, Content-Type headers, or parameters."
-                            )
+                    if cmd_res.returncode != 0 or self._is_command_soft_failure(payload, cmd_res):
+                        diagnostic_tip = self._build_alternative_retry_guidance(payload, output_text, cmd_res.returncode)
 
                     obs_lines.append(
                         f"[Command: {payload}]\nExit code: {cmd_res.returncode}\nOutput:\n{output_text}{diagnostic_tip}"
@@ -1175,6 +1135,12 @@ class AgentRouter:
                 duration=0.0
             )
 
+        # Autonomous Self-Correction & Smart Remediation loop
+        if res.returncode != 0 or self._is_command_soft_failure(cmd, res):
+            corrected_res = self._attempt_command_self_correction(cmd, res, work_dir, _on_sup_event)
+            if corrected_res is not None:
+                res = corrected_res
+
         self.emit(CommandFinishEvent(
             command=cmd,
             returncode=res.returncode,
@@ -1182,6 +1148,201 @@ class AgentRouter:
             duration_sec=res.duration,
         ))
         return res
+
+    def _is_command_soft_failure(self, cmd: str, res: CommandResult) -> bool:
+        """Detect errors where returncode was 0 but the request/tool actually failed or was blocked."""
+        out_low = (res.output or "").lower()
+        if "curl " in cmd.lower():
+            if any(w in out_low for w in ("403 forbidden", "429 too many", "access denied", "cloudflare", "cf-chl")):
+                return True
+        if any(err in out_low for err in ("traceback (most recent call last):", "syntaxerror:", "modulenotfounderror:")):
+            return True
+        return False
+
+    def _attempt_command_self_correction(
+        self,
+        cmd: str,
+        res: CommandResult,
+        work_dir: pathlib.Path,
+        on_sup_event: Callable[[str], None],
+    ) -> Optional[CommandResult]:
+        """
+        Autonomous Smart Self-Correction & Alternative Retry Engine:
+        1. Identifies root cause of failure (missing binary, quoting/syntax error, WAF 403, 429 rate limit, timeout).
+        2. Proactively remediates and executes alternative retries.
+        3. Returns corrected CommandResult if successful, or None to fall back to supervisor guidance.
+        """
+        out_low = (res.output or "").lower()
+        cmd_strip = cmd.strip()
+
+        # ── 1. Quoting / Syntax Error in Inline Python Script ─────────────────────
+        if any(err in out_low for err in ("syntaxerror", "unexpected eof", "unterminated string", "invalid syntax")) and ("python" in cmd_strip or "python3" in cmd_strip):
+            m = re.search(r'python[3]?\s+-c\s+([\'"])(.*?)\1(?:\s+|$)', cmd_strip, re.DOTALL)
+            if not m:
+                m = re.search(r'python[3]?\s+-c\s+(.*)', cmd_strip, re.DOTALL)
+            if m:
+                code_snippet = m.group(2) if len(m.groups()) >= 2 and m.group(2) is not None else m.group(1)
+                code_snippet = code_snippet.replace(r'\"', '"').replace(r"\'", "'")
+                scratch_file = work_dir / "_agent_autofix.py"
+                try:
+                    scratch_file.write_text(code_snippet, encoding="utf-8")
+                    self.emit(AssistantMessageEvent(
+                        "🔧 **Self-Correcting:** Shell quoting syntax error detected. "
+                        "Transcribed inline code into `_agent_autofix.py` and retrying cleanly..."
+                    ))
+                    alt_cmd = f"python {scratch_file.name}"
+                    new_res = self.task_runner.run_command(alt_cmd, cwd=str(work_dir), on_supervisor_event=on_sup_event)
+                    if new_res.returncode == 0:
+                        self.emit(AssistantMessageEvent("✓ **Self-Correction Succeeded:** Script executed cleanly without quoting errors."))
+                        return new_res
+                except Exception:
+                    pass
+
+        # ── 2. Missing Tool / Binary (Returncode 127 or 'command not found') ─────
+        if res.returncode == 127 or any(err in out_low for err in ("command not found", "not recognized as an internal", "no such file or directory")):
+            tokens = shlex.split(cmd_strip) if sys.platform != "win32" else cmd_strip.split()
+            bin_name = ""
+            for tok in tokens:
+                if tok.lower() in ("sudo", "env", "nohup", "time", "exec") or "=" in tok:
+                    continue
+                bin_name = os.path.basename(tok).lower()
+                break
+
+            if bin_name:
+                home_dir = pathlib.Path.home()
+                candidate_dirs = [
+                    home_dir / "go" / "bin",
+                    home_dir / ".local" / "bin",
+                    home_dir / "agent" / "tools",
+                    pathlib.Path("/home/devlp/go/bin"),
+                    pathlib.Path("/home/devlp/.local/bin"),
+                    pathlib.Path("/home/devlp/agent/tools"),
+                    pathlib.Path("/usr/local/bin"),
+                    pathlib.Path("/usr/bin"),
+                ]
+                found_bin = None
+                for cd in candidate_dirs:
+                    if cd.exists():
+                        target_f = cd / bin_name
+                        if target_f.exists() and os.access(target_f, os.X_OK):
+                            found_bin = str(target_f)
+                            break
+                        if sys.platform == "win32" and (cd / f"{bin_name}.exe").exists():
+                            found_bin = str(cd / f"{bin_name}.exe")
+                            break
+
+                if found_bin:
+                    self.emit(AssistantMessageEvent(
+                        f"🔧 **Self-Correcting:** Found `{bin_name}` at `{found_bin}`. Retrying with resolved absolute path..."
+                    ))
+                    alt_cmd = re.sub(rf"\b{re.escape(bin_name)}\b", f"'{found_bin}'", cmd_strip, count=1)
+                    new_res = self.task_runner.run_command(alt_cmd, cwd=str(work_dir), on_supervisor_event=on_sup_event)
+                    if new_res.returncode == 0:
+                        self.emit(AssistantMessageEvent(f"✓ **Self-Correction Succeeded:** `{bin_name}` executed with resolved binary path."))
+                        return new_res
+
+                # Proactively install missing tool if known
+                try:
+                    import installer
+                    if bin_name in installer.TOOLS or bin_name in ("rea", "radare2", "checksec", "wafw00f", "httpx", "nuclei", "katana", "ffuf", "sqlmap"):
+                        self.emit(AssistantMessageEvent(f"🔧 **Self-Correcting:** Tool `{bin_name}` missing. Auto-provisioning via installer..."))
+                        installer.set_auth_prompt_handler(self.prompt_operator)
+                        inst_out = installer.install_any(bin_name)
+                        if "installed" in str(inst_out).lower() or installer.is_verified(bin_name):
+                            self.emit(AssistantMessageEvent(f"✓ **Tool Provisioned:** `{bin_name}` installed. Re-executing command..."))
+                            new_res = self.task_runner.run_command(cmd_strip, cwd=str(work_dir), on_supervisor_event=on_sup_event)
+                            if new_res.returncode == 0:
+                                return new_res
+                except Exception:
+                    pass
+
+        # ── 3. WAF Security Gate / 403 Forbidden ──────────────────────────────────
+        if "curl " in cmd_strip.lower() and any(w in out_low for w in ("403 forbidden", "cloudflare", "access denied", "imunify360", "bot protection")):
+            if "-H \"X-Forwarded-For" not in cmd_strip and "-H 'X-Forwarded-For" not in cmd_strip:
+                bypass_headers = (
+                    '-A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36" '
+                    '-H "X-Forwarded-For: 127.0.0.1" '
+                    '-H "X-Real-IP: 127.0.0.1" '
+                    '-H "X-Originating-IP: 127.0.0.1" '
+                    '-H "X-Client-IP: 127.0.0.1" '
+                    '--compressed '
+                )
+                alt_cmd = cmd_strip.replace("curl ", f"curl {bypass_headers} ", 1)
+                self.emit(AssistantMessageEvent("🛡️ **Self-Correcting:** HTTP 403 / WAF detected. Retrying with browser user-agent and origin spoof headers..."))
+                new_res = self.task_runner.run_command(alt_cmd, cwd=str(work_dir), on_supervisor_event=on_sup_event)
+                if new_res.returncode == 0 and "403 forbidden" not in (new_res.output or "").lower():
+                    self.emit(AssistantMessageEvent("✓ **Self-Correction Succeeded:** WAF bypass headers successfully unblocked the request."))
+                    return new_res
+
+        # ── 4. HTTP 429 Rate Limiting ─────────────────────────────────────────────
+        if any(r in out_low for r in ("429 too many", "rate limit", "too many attempts")):
+            self.emit(AssistantMessageEvent("⏳ **Self-Correcting:** 429 Rate Limit encountered. Cooling down (3.0s delay) before retry..."))
+            time.sleep(3.0)
+            new_res = self.task_runner.run_command(cmd_strip, cwd=str(work_dir), on_supervisor_event=on_sup_event)
+            if new_res.returncode == 0 and "429 too many" not in (new_res.output or "").lower():
+                self.emit(AssistantMessageEvent("✓ **Self-Correction Succeeded:** Request succeeded after cooldown."))
+                return new_res
+
+        return None
+
+    def _build_alternative_retry_guidance(self, cmd: str, output: str, returncode: int) -> str:
+        """Construct structured intelligence and exact alternative commands when a tool fails."""
+        out_low = output.lower()
+        cmd_low = cmd.lower()
+        tokens = cmd.strip().split()
+        tool_name = tokens[0].lower() if tokens else ""
+
+        alternatives = []
+        root_cause = "Non-zero exit code"
+
+        if returncode == 127 or any(err in out_low for err in ("command not found", "not recognized as an internal", "no such file or directory")):
+            root_cause = f"Binary `{tool_name}` not found in system or toolchain PATH"
+            alternatives.append(f"Auto-install tool: `INSTALL: {tool_name}`")
+            alternatives.append(f"Write custom Python harness: `FILE: test_{tool_name}.py|<script>`")
+            if tool_name in ("nmap", "masscan"):
+                alternatives.append("Alternative network scanner: `COMMAND: rustscan -a <target> -- -sV` or `COMMAND: naabu -host <target>`")
+            elif tool_name in ("nuclei", "dalfox"):
+                alternatives.append("Alternative exploit check: `COMMAND: curl -sSLI <target> -H 'X-Forwarded-For: 127.0.0.1'` or custom CVE script")
+            elif tool_name in ("sqlmap", "ghauri"):
+                alternatives.append("Alternative SQLi tool: `COMMAND: ghauri -u <target> --batch` or direct manual SQL injection verification")
+            elif tool_name in ("ffuf", "gobuster", "dirsearch"):
+                alternatives.append("Alternative endpoint discovery: `COMMAND: katana -u <target> -d 3` or `COMMAND: dirsearch -u <target>`")
+            elif tool_name in ("rea", "radare2", "r2"):
+                alternatives.append("Alternative binary reversing: `COMMAND: checksec --file=<file>` or `COMMAND: objdump -d -M intel <file>` or python `pwn`")
+        elif any(err in out_low for err in ("unexpected eof", "syntax error", "unterminated", "syntaxerror", "quote")) or ("python -c" in cmd_low and returncode != 0):
+            root_cause = "Shell quoting/escape syntax error in inline command"
+            alternatives.append("Write script cleanly to workspace: `FILE: script.py|<code_content>` then `COMMAND: python script.py`")
+        elif any(w in out_low for w in ("403 forbidden", "cloudflare", "imunify360", "bot protection", "captcha", "cf-chl")):
+            root_cause = "Security Gate / WAF Challenge (HTTP 403)"
+            alternatives.append("Rotate headers & spoof proxy: `COMMAND: curl -sS -A 'Mozilla/5.0...' -H 'X-Forwarded-For: 127.0.0.1' ...`")
+            alternatives.append("Probe alternative routes: test `/api/v1/`, origin direct IP, or trailing slash mutations")
+            alternatives.append("Load methodology: `METHOD: waf-bypass`")
+        elif any(r in out_low for r in ("429 too many", "rate limit", "too many attempts", "5 daqiiqo")):
+            root_cause = "Rate Limit / Throttling (HTTP 429)"
+            alternatives.append("Pivot immediately to unthrottled endpoints or subdomains")
+            alternatives.append("Rotate source client IP / headers (`X-Forwarded-For: 10.x.x.x`)")
+            alternatives.append("Introduce random delay jitter in custom Python probe script (`FILE:`)")
+        elif any(err in out_low for err in ("permission denied", "access is denied")):
+            root_cause = "Permission Denied (filesystem or port binding)"
+            alternatives.append("Ensure target file has executable permissions (`chmod +x <file>`)")
+            alternatives.append("Ensure target path is inside workspace directory (`scans/workspace`)")
+        elif any(err in out_low for err in ("connection refused", "could not resolve host", "name or service not known")):
+            root_cause = "Target host unreachable or DNS resolution failure"
+            alternatives.append("Verify hostname resolution with `COMMAND: nslookup <domain>` or `COMMAND: dig <domain>`")
+            alternatives.append("Test port reachability on alternate scheme (`http://` vs `https://`)")
+
+        if not alternatives:
+            alternatives.append("Pivot attack surface to secondary endpoints, alternate parameters, or different HTTP methods (POST/PUT/OPTIONS)")
+            alternatives.append("Write custom targeted verification script via `FILE:`")
+
+        alt_lines = "\n".join(f"  • {a}" for a in alternatives)
+        return (
+            f"\n\n[Supervisor Self-Correction & Alternative Retries]:\n"
+            f"• Issue Identified: {root_cause}\n"
+            f"• Autonomous Next Move (DO NOT repeat the exact failing command):\n"
+            f"{alt_lines}\n"
+            f"Select one of the alternatives above and execute now."
+        )
 
     def _exec_directive_file(self, payload: str) -> str:
         parts = payload.split("|", maxsplit=1)

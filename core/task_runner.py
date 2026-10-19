@@ -385,22 +385,42 @@ class TaskRunner:
         if env:
             run_env.update(env)
 
-        # Prepend Python executable dir, Scripts dir, and Git bin/usr-bin to PATH
+        # Prepend Python executable dir, Scripts dir, and all toolchain paths
         real_py = get_real_python()
         py_dir = os.path.dirname(real_py)
         py_scripts = os.path.join(py_dir, "Scripts")
         curr_path = run_env.get("PATH", "")
         extra_paths = [py_dir, py_scripts]
+
+        home_dir = os.path.expanduser("~")
+        candidate_paths = [
+            os.path.join(home_dir, "go", "bin"),
+            os.path.join(home_dir, ".local", "bin"),
+            os.path.join(home_dir, "agent", "tools"),
+            "/home/devlp/go/bin",
+            "/home/devlp/.local/bin",
+            "/home/devlp/agent/tools",
+            "/usr/local/go/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+            "/snap/bin",
+        ]
         if IS_WIN:
-            for extra in (
+            candidate_paths.extend([
                 r"C:\Program Files\Git\bin",
                 r"C:\Program Files\Git\usr\bin",
                 r"C:\Program Files\Git\cmd",
                 os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python\Python312\Scripts"),
                 os.path.expandvars(r"%LOCALAPPDATA%\Programs\Python\Python312"),
-            ):
-                if os.path.exists(extra) and extra not in extra_paths:
-                    extra_paths.append(extra)
+                os.path.expandvars(r"%USERPROFILE%\go\bin"),
+                os.path.expandvars(r"%LOCALAPPDATA%\bin"),
+                os.path.expandvars(r"%APPDATA%\npm"),
+            ])
+        for extra in candidate_paths:
+            if os.path.exists(extra) and extra not in extra_paths:
+                extra_paths.append(extra)
+
         run_env["PATH"] = f"{os.pathsep.join(extra_paths)}{os.pathsep}{curr_path}"
 
         popen_kwargs = {

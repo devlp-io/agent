@@ -684,9 +684,57 @@ class RedTeamAttackEngine:
             target=base_url,
             tool="Nuclei Red-Team Engine",
             success=len(hits) > 0,
-            output_snippet=f"Confirmed {len(hits)} attack vector(s):\n" + "\n".join(hits[:5]) if hits else "Surface fortified against known CVEs.",
-            proof="PoC output captured" if hits else "Clean"
+            output_snippet=f"Confirmed {len(hits)} attack vector(s):\n" + "\n".join(hits[:5]) if hits else "Surface fortified against standard CVE signatures. Engaging alternative vectors.",
+            proof="PoC output captured" if hits else "Pivoting to alternatives"
         ))
+
+        # Autonomous Alternative Retry: When standard Nuclei returns zero findings, pivot immediately
+        if not hits and not self.is_cancelled:
+            self._run_alternative_exploitation_vectors(base_url)
+
+    def _run_alternative_exploitation_vectors(self, base_url: str):
+        """Proactively launch alternative offensive vectors when primary scanner yields 0 findings."""
+        self.emit(AssistantMessageEvent(f"⚡ **Alternative Attack Strategy:** Pivoting to deep tech probes, REST APIs, and config leaks on `{base_url}`..."))
+        alt_probes = [
+            ("/wp-json/wp/v2/users", "WordPress REST API User Enumeration", "users"),
+            ("/.env", "Exposed Environment Configuration", "DB_"),
+            ("/.git/HEAD", "Exposed Git Repository", "ref: refs/"),
+            ("/actuator/env", "Spring Boot Actuator Environment Leak", "activeProfiles"),
+            ("/api/v1/users", "REST User Directory Endpoint", "id"),
+            ("/server-status", "Apache Server Status Exposure", "Apache Server Status"),
+            ("/robots.txt", "Robots Disallow Exposure", "Disallow"),
+        ]
+
+        verified_alts = []
+        for path, desc, needle in alt_probes:
+            if self.is_cancelled:
+                break
+            target_url = f"{base_url.rstrip('/')}{path}"
+            cmd = f"curl -sS --max-time 6 -A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' '{target_url}'"
+            res = self.task_runner.run_command(cmd, cwd=str(self.work_dir))
+            out = res.output or ""
+            if needle in out:
+                verified_alts.append((desc, target_url, out[:250]))
+                sev = "critical" if ".env" in path or ".git" in path else ("high" if "wp-json" in path or "actuator" in path else "medium")
+                title = f"Breach Verified: {desc}"
+                self.emit(FindingEvent(severity=sev, title=title, evidence=f"Target: {target_url}\n{out[:300]}"))
+                SessionDB.add_finding(self.session_id, sev, title, f"Target: {target_url}\n{out[:300]}")
+                self.discovered_findings.append({
+                    "severity": sev,
+                    "title": title,
+                    "evidence": out[:300]
+                })
+
+        if verified_alts:
+            for desc, t_url, snip in verified_alts:
+                self.emit(ExploitCardEvent(
+                    title=desc,
+                    target=t_url,
+                    tool="Alternative Deep Probe",
+                    success=True,
+                    output_snippet=snip,
+                    proof="Confirmed exposure"
+                ))
 
     def _save_attack_report(self, summary: str, duration: float):
         """Save structured markdown attack report to disk."""
