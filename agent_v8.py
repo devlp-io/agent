@@ -3262,6 +3262,15 @@ def do_malware(payload):
         return f"[MALWARE LAB ERROR]: {e}"
 
 
+def do_reverse(payload):
+    try:
+        from core.subagents import SubagentDispatcher
+        res = SubagentDispatcher.dispatch("reversing", payload, lambda e: None, work_dir=RUN_DIR)
+        return f"[REVERSE ENG / REA]: {res.summary}\n{res.details[:1200]}"
+    except Exception as e:
+        return f"[REVERSE ENG ERROR]: {e}"
+
+
 DISPATCH = {
     "COMMAND": do_command,
     "PARALLEL": do_parallel,
@@ -3324,6 +3333,8 @@ DISPATCH = {
     "REPLAN": do_replan,
     "SUBAGENT": do_subagent,
     "MALWARE": do_malware,
+    "REVERSE": do_reverse,
+    "REA": do_reverse,
 }
 
 

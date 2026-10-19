@@ -233,6 +233,29 @@ class ExploitCardEvent(AgentEvent):
         self.proof = proof
 
 
+class ReversingCardEvent(AgentEvent):
+    """Event emitted when binary reverse engineering or REA analysis produces findings."""
+    def __init__(
+        self,
+        target: str = "",
+        arch: str = "",
+        tool: str = "rea / radare2",
+        mitigations: str = "",
+        findings_count: int = 0,
+        decompiled_snippet: str = "",
+        summary: str = "",
+        timestamp: Optional[float] = None,
+    ):
+        super().__init__(timestamp)
+        self.target = target
+        self.arch = arch
+        self.tool = tool
+        self.mitigations = mitigations
+        self.findings_count = findings_count
+        self.decompiled_snippet = decompiled_snippet
+        self.summary = summary
+
+
 class QuestionPromptEvent(AgentEvent):
     """Event emitted when the agent requests input or credentials from the operator."""
     def __init__(

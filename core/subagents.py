@@ -19,7 +19,8 @@ from typing import Callable, Optional, Dict, Any, List, Tuple
 
 from core.events import (
     AgentEvent, AssistantMessageEvent, SubagentStartEvent, SubagentFinishEvent,
-    PayloadCardEvent, ExploitCardEvent, FindingEvent, CommandStartEvent, CommandFinishEvent
+    PayloadCardEvent, ExploitCardEvent, ReversingCardEvent, FindingEvent,
+    CommandStartEvent, CommandFinishEvent
 )
 from core.task_runner import TaskRunner, CommandResult
 from core.model_manager import ModelManager
@@ -45,10 +46,10 @@ SUBAGENT_TYPES = {
         "tools": ["msfvenom", "donut", "gcc", "mingw-w64", "nasm", "upx", "sliver"]
     },
     "reversing": {
-        "title": "Reverse Engineering Specialist",
+        "title": "Reverse Engineering Specialist (REA)",
         "icon": "🔬",
-        "description": "Binary analysis, disassembly, deobfuscation, checksec, ROP gadget hunting",
-        "tools": ["radare2", "objdump", "strings", "ropper", "ROPgadget", "gdb", "ghidra"]
+        "description": "Reverse Engineer Anything: Native binary decompilation, Electron/JS apps, APKs, checksec, gadget hunting, behavior tracing",
+        "tools": ["rea", "radare2", "ghidra", "jadx", "checksec", "ropper", "ROPgadget", "binwalk", "frida", "gdb"]
     },
     "webaudit": {
         "title": "Web Application Auditor",
@@ -486,7 +487,12 @@ class WebAuditSubagent(BaseSubagent):
 
 
 class ReverseEngineeringSubagent(BaseSubagent):
-    """Autonomous binary disassembly and reverse engineering subagent."""
+    """
+    Autonomous reverse engineering and binary analysis subagent.
+    Integrates REA (Reverse Engineer Anything - github.com/morluto/rea),
+    radare2, ghidra headless, checksec, jadx, ROPgadget, ropper, binwalk,
+    and dynamic API/symbol tracing.
+    """
 
     def run(self) -> SubagentResult:
         t0 = time.time()
@@ -496,19 +502,162 @@ class ReverseEngineeringSubagent(BaseSubagent):
             subagent_id=self.subagent_id
         ))
 
-        target_bin = self.task.strip()
+        raw_task = self.task.strip()
+        parts = raw_task.split()
+        mode = "auto"
+        target = raw_task
+
+        if len(parts) >= 2 and parts[0].lower() in ("rea", "asm", "checksec", "rop", "strings", "apk", "decompile"):
+            mode = parts[0].lower()
+            target = " ".join(parts[1:]).strip()
+
         findings = []
+        details_sections = []
+        arch_desc = "Unknown / Multi-target"
+        mitigations_desc = "N/A"
+        decompiled_snippet = ""
+        rea_output = ""
 
-        # Run checksec, strings, and radare2 disassembly if available
-        cmd_strings = f"strings -a {target_bin} | grep -Ei 'password|secret|key|api|token|sh|bash|http' | head -n 30 2>/dev/null"
-        res_strings = self.task_runner.run_command(cmd_strings, cwd=str(self.work_dir))
+        # 1. Target identification & classification
+        target_path = pathlib.Path(target)
+        cmd_file = f"file -b '{target}' 2>/dev/null || stat '{target}' 2>/dev/null || echo 'Target: {target}'"
+        res_file = self.task_runner.run_command(cmd_file, cwd=str(self.work_dir))
+        file_info = res_file.output.strip()
+        if file_info:
+            arch_desc = file_info.split(",")[0]
+            details_sections.append(f"### Target Identification\n- **Target**: `{target}`\n- **Format**: {file_info}")
 
-        cmd_checksec = f"checksec --file={target_bin} 2>/dev/null || readelf -l {target_bin} | grep -i stack 2>/dev/null"
+        # 2. Check for REA (Reverse Engineer Anything) execution
+        # Used for JS/Electron apps, ASAR bundles, directories, or when mode == 'rea'
+        is_js_or_app = (
+            mode == "rea" or
+            target.endswith(".asar") or
+            target.endswith(".js") or
+            target.endswith(".html") or
+            (target_path.exists() and target_path.is_dir()) or
+            "directory" in file_info.lower()
+        )
+
+        if is_js_or_app:
+            # Execute REA engine
+            cmd_rea = (
+                f"rea analyze '{target}' 2>/dev/null || "
+                f"npx -y rea-agents@latest analyze-javascript-application '{target}' --json 2>/dev/null || "
+                f"node ~/agent/tools/rea/dist/cli.js analyze '{target}' 2>/dev/null || "
+                f"grep -rEi 'ipcRenderer|ipcMain|nodeIntegration|contextIsolation|shell.openExternal' '{target}' 2>/dev/null | head -n 40"
+            )
+            res_rea = self.task_runner.run_command(cmd_rea, cwd=str(self.work_dir))
+            rea_output = res_rea.output.strip()
+            if rea_output:
+                details_sections.append(f"### REA (Reverse Engineer Anything) Analysis\n```json\n{rea_output[:2000]}\n```")
+                # Look for insecure Electron or API patterns
+                if "nodeintegration" in rea_output.lower() and "true" in rea_output.lower():
+                    findings.append({
+                        "sev": "critical",
+                        "title": f"Electron Insecure Configuration: nodeIntegration=true in {target}",
+                        "evidence": "REA discovered nodeIntegration enabled, allowing RCE from renderer process."
+                    })
+                    self.emit(FindingEvent(
+                        severity="critical",
+                        title=f"Electron Insecure Configuration: nodeIntegration=true in {target}",
+                        evidence="nodeIntegration=true verified by REA analysis."
+                    ))
+
+        # 3. Security Mitigations (checksec)
+        cmd_checksec = f"checksec --file='{target}' 2>/dev/null || readelf -l '{target}' 2>/dev/null | grep -i stack"
         res_checksec = self.task_runner.run_command(cmd_checksec, cwd=str(self.work_dir))
+        checksec_out = res_checksec.output.strip()
+        if checksec_out:
+            mitigations_desc = checksec_out.splitlines()[-1] if checksec_out.splitlines() else checksec_out[:120]
+            details_sections.append(f"### Binary Mitigations (checksec)\n```\n{checksec_out}\n```")
+            # Check for lack of canary or NX
+            if "no canary found" in checksec_out.lower():
+                findings.append({
+                    "sev": "high",
+                    "title": f"Missing Stack Canary in {target}",
+                    "evidence": "checksec confirmed binary lacks stack canary protection."
+                })
+            if "nx disabled" in checksec_out.lower():
+                findings.append({
+                    "sev": "critical",
+                    "title": f"Executable Stack (NX Disabled) in {target}",
+                    "evidence": "checksec confirmed stack memory is executable (RWX)."
+                })
+
+        # 4. High-Value Strings and Indicators of Attack
+        cmd_strings = (
+            f"strings -a '{target}' 2>/dev/null | grep -Ei "
+            f"'password|secret|apikey|token|private_key|aws_|bearer|BEGIN RSA|http[s]?://|/bin/sh|/bin/bash|system|popen|strcpy|sprintf' "
+            f"| sort -u | head -n 40"
+        )
+        res_strings = self.task_runner.run_command(cmd_strings, cwd=str(self.work_dir))
+        strings_out = res_strings.output.strip()
+        if strings_out:
+            details_sections.append(f"### High-Value Strings & Sensitive References\n```\n{strings_out}\n```")
+            for line in strings_out.splitlines():
+                if any(k in line.lower() for k in ("secret", "token", "password", "apikey", "bearer")):
+                    findings.append({
+                        "sev": "medium",
+                        "title": f"Embedded Credential / Key Candidate in {target}",
+                        "evidence": line[:150]
+                    })
+                    break
+
+        # 5. Native Disassembly & Control Flow (radare2 / objdump)
+        cmd_disasm = (
+            f"r2 -qc 'aaa; afl; pdf @ main' '{target}' 2>/dev/null || "
+            f"r2 -qc 'aaa; pd 30 @ entry0' '{target}' 2>/dev/null || "
+            f"objdump -d -M intel --no-show-raw-insn '{target}' 2>/dev/null | grep -A 40 '<main>:' || "
+            f"objdump -d -M intel '{target}' 2>/dev/null | head -n 45"
+        )
+        res_disasm = self.task_runner.run_command(cmd_disasm, cwd=str(self.work_dir))
+        disasm_out = res_disasm.output.strip()
+        if disasm_out:
+            decompiled_snippet = disasm_out[:800]
+            details_sections.append(f"### Disassembly & Control Flow\n```nasm\n{disasm_out[:2500]}\n```")
+
+        # 6. ROP Gadget Hunting
+        if mode in ("auto", "rop") and not is_js_or_app:
+            cmd_rop = (
+                f"ROPgadget --binary '{target}' --only 'pop|ret|syscall|int' 2>/dev/null | head -n 25 || "
+                f"ropper --file '{target}' --nocolor --search 'pop' 2>/dev/null | head -n 25"
+            )
+            res_rop = self.task_runner.run_command(cmd_rop, cwd=str(self.work_dir))
+            rop_out = res_rop.output.strip()
+            if rop_out:
+                details_sections.append(f"### ROP Exploitation Gadgets\n```\n{rop_out[:1500]}\n```")
+
+        # 7. Unpacking & Entropy (UPX / Binwalk)
+        cmd_upx = f"strings -a '{target}' 2>/dev/null | grep -i 'UPX!' | head -n 1"
+        res_upx = self.task_runner.run_command(cmd_upx, cwd=str(self.work_dir))
+        if res_upx.output.strip():
+            findings.append({
+                "sev": "medium",
+                "title": f"UPX Packed Binary Detected: {target}",
+                "evidence": "Binary matches UPX signature; can be unpacked via `upx -d`."
+            })
+            details_sections.append("### Unpacking\n- **Status**: Binary is UPX-packed. Execute `upx -d` to extract native payload.")
 
         dur = time.time() - t0
-        summary_text = f"Binary analysis completed on {target_bin}. Extracted key strings and security mitigations."
+        summary_text = (
+            f"Reverse engineering complete for {target} ({arch_desc}). "
+            f"Extracted mitigations, strings, disassembly, and {len(findings)} vulnerability indicator(s)."
+        )
 
+        full_details = "\n\n".join(details_sections) if details_sections else "No disassembly or metadata could be recovered."
+
+        # Emit visual reversing card
+        self.emit(ReversingCardEvent(
+            target=target,
+            arch=arch_desc,
+            tool="REA / radare2 / checksec",
+            mitigations=mitigations_desc[:150],
+            findings_count=len(findings),
+            decompiled_snippet=decompiled_snippet or (rea_output[:400] if rea_output else strings_out[:400]),
+            summary=summary_text
+        ))
+
+        # Emit completion
         self.emit(SubagentFinishEvent(
             subagent_type="reversing",
             summary=summary_text,
@@ -516,7 +665,7 @@ class ReverseEngineeringSubagent(BaseSubagent):
             success=True,
             duration_sec=dur,
             findings_discovered=len(findings),
-            details=f"Mitigations:\n{res_checksec.output}\n\nHigh-Value Strings:\n{res_strings.output}"
+            details=full_details
         ))
 
         return SubagentResult(
@@ -524,7 +673,8 @@ class ReverseEngineeringSubagent(BaseSubagent):
             task=self.task,
             success=True,
             summary=summary_text,
-            details=res_strings.output,
+            details=full_details,
+            findings=findings,
             duration=dur
         )
 

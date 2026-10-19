@@ -1181,6 +1181,56 @@ class TestSomScan(unittest.TestCase):
         self.assertGreaterEqual(cfg["stall_threshold"], 100.0)
         self.assertGreaterEqual(cfg["base_timeout"], 105.0)
 
+    def test_54_rea_reversing_subagent_and_tools(self):
+        """Verify rea and reversing tool definitions, ReverseEngineeringSubagent execution, and ReversingCardEvent."""
+        from tools_db import TOOLS, get_tools_by_category
+        self.assertIn("rea", TOOLS)
+        self.assertEqual(TOOLS["rea"]["category"], "reversing")
+        self.assertIn("radare2", TOOLS)
+        self.assertEqual(TOOLS["radare2"]["category"], "reversing")
+        self.assertIn("ghidra", TOOLS)
+        self.assertIn("jadx", TOOLS)
+
+        re_tools = get_tools_by_category("reversing")
+        self.assertIn("rea", re_tools)
+        self.assertIn("checksec", re_tools)
+
+        from core.subagents import ReverseEngineeringSubagent, SubagentDispatcher, SUBAGENT_TYPES
+        self.assertIn("reversing", SUBAGENT_TYPES)
+        self.assertIn("rea", SUBAGENT_TYPES["reversing"]["tools"])
+
+        events = []
+        dispatcher_res = SubagentDispatcher.dispatch(
+            "reversing", "rea ./test_app", lambda e: events.append(e)
+        )
+        self.assertTrue(dispatcher_res.success)
+        self.assertIn("Reverse engineering complete", dispatcher_res.summary)
+
+        from core.events import ReversingCardEvent, SubagentFinishEvent
+        has_card = any(isinstance(e, ReversingCardEvent) for e in events)
+        has_finish = any(isinstance(e, SubagentFinishEvent) for e in events)
+        self.assertTrue(has_card)
+        self.assertTrue(has_finish)
+
+    def test_55_reversing_directives_and_slash_commands(self):
+        """Verify REVERSE directive extraction, agent_v8 dispatch, and router /reverse slash command."""
+        import agent_v8
+        self.assertIn("REVERSE", agent_v8.DISPATCH)
+        self.assertIn("REA", agent_v8.DISPATCH)
+
+        router = AgentRouter(lambda e: None)
+        text = "REVERSE: rea /path/to/target.asar\nREA: /bin/ls\nDONE: finished"
+        matches = router._extract_directive_matches(text)
+        kinds = [m[0] for m in matches]
+        self.assertIn("REVERSE", kinds)
+        self.assertIn("REA", kinds)
+
+        events = []
+        r = AgentRouter(lambda e: events.append(e))
+        r._handle_slash_command("/reverse")
+        from core.events import AssistantMessageEvent
+        self.assertTrue(any("Reverse Engineering Specialist (REA)" in getattr(e, "text", "") for e in events))
+
 
 if __name__ == "__main__":
     unittest.main()

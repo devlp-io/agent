@@ -151,6 +151,7 @@ Autonomous Directives (emit line-anchored on column 0):
   EXPLOIT: <tool>|<target>|<args>
   PAYLOAD: <xss|sqli|ssrf|lfi|rce|ssti|crlf|nosqli>
   MALWARE: <payload-type|target-platform|spec>
+  REVERSE: <target-path-or-spec> (Reverse Engineer Anything: REA, radare2, checksec, decompilation)
   SUBAGENT: <recon|exploit|malware|reversing|webaudit|cloud|adpivoting|osint|codeaudit|evasion|reporter>|<task>
   SECRET: <text-or-path>
   CRED: <user>|<pass>[|where]
@@ -205,7 +206,7 @@ Agentic Workflow Rules:
     - `recon`: Subdomain discovery, port scans, WAF, stack fingerprinting.
     - `exploit`: Vulnerability weaponization, CVE PoCs, SQLi, SSRF, RCE.
     - `malware`: Weaponized payload lab, shellcode runners, evasion, loaders, C2 stagers.
-    - `reversing`: Binary disassembly, decompilation, checksec, ROP gadget hunting.
+    - `reversing`: Reverse Engineer Anything (REA), native binary disassembly, Electron/JS apps, APKs, checksec, ROP gadget hunting, behavior tracing.
     - `webaudit`: Deep web assessment, GraphQL, IDOR, parameter fuzzing.
     - `cloud`: Cloud infra audit (AWS/Azure/GCP), IAM privesc, open bucket discovery, K8s probes.
     - `adpivoting`: Active Directory enumeration, SMB/LDAP anonymous binds, Kerberoasting, pivoting tunnels.
@@ -891,6 +892,16 @@ class AgentRouter:
                     )
                     obs_lines.append(f"[Malware Lab]: {sub_res.summary}\n{sub_res.details[:500]}")
 
+                elif kind in ("REVERSE", "REA"):
+                    sub_res = SubagentDispatcher.dispatch(
+                        "reversing", payload, self.emit,
+                        model_manager=self.model_manager,
+                        task_runner=self.task_runner,
+                        work_dir=self.get_active_work_dir(),
+                        prompt_callback=self.prompt_operator
+                    )
+                    obs_lines.append(f"[Reverse Engineering / REA]: {sub_res.summary}\n{sub_res.details[:600]}")
+
 
                 else:
                     # Dispatch through agent_v8 engine (PROBE, WALK, WAF, STACK, CVE, METHOD, EXPLOIT, etc.)
@@ -1057,7 +1068,7 @@ class AgentRouter:
         valid_single_line = {
             "COMMAND", "INSTALL", "TOOLS", "LIST", "PROBE", "PARALLEL",
             "WALK", "WAF", "STACK", "CVE", "METHOD", "EXPLOIT", "PAYLOAD",
-            "SECRET", "CRED", "ENDPOINT", "NOTE", "SUBAGENT", "MALWARE", "PHASE",
+            "SECRET", "CRED", "ENDPOINT", "NOTE", "SUBAGENT", "MALWARE", "REVERSE", "REA", "PHASE",
             "LOOT", "PROOF", "CHAIN", "PIVOT", "BROWSER", "GRAPHQL", "SHELL",
             "CRACK", "SEARCH", "FETCH", "PARAMFIND", "APIMAP", "HARVEST", "STATUS", "PLAN"
         }
@@ -2226,6 +2237,26 @@ class AgentRouter:
                     work_dir=self.get_active_work_dir()
                 )
                 self.emit(StatusChangeEvent("READY", "green"))
+        elif cmd in ("/reverse", "/rea", "/re"):
+            if not arg:
+                self.emit(AssistantMessageEvent(
+                    "🔬 **Reverse Engineering Specialist (REA)**\n\n"
+                    "Usage: `/reverse <target>` or `/rea <target>`\n"
+                    "- Reverse engineer native binaries (ELF/PE/Mach-O), Electron/JS apps, ASAR bundles, APKs, and ROMs.\n"
+                    "- Examples:\n"
+                    "  - `/reverse /path/to/binary` (automated disassembly & checksec)\n"
+                    "  - `/reverse rea /path/to/app` (REA behavior tracing & IPC audit)\n"
+                    "  - `/reverse rop /path/to/binary` (ROP gadget search)\n"
+                    "  - `/reverse asm /path/to/binary` (radare2 / objdump control flow)"
+                ))
+            else:
+                SubagentDispatcher.dispatch(
+                    "reversing", arg, self.emit,
+                    model_manager=self.model_manager,
+                    task_runner=self.task_runner,
+                    work_dir=self.get_active_work_dir()
+                )
+                self.emit(StatusChangeEvent("READY", "green"))
         elif cmd == "/payload":
             p_type = arg or "xss"
             res = agent_v8.dispatch("PAYLOAD", p_type)
@@ -2386,6 +2417,7 @@ class AgentRouter:
             "- `/phase` — Display current phase breakdown: what's done & what's next\n"
             "- `/subagent <type> <task>` — Dispatch autonomous specialist subagent (recon/exploit/malware/reversing/webaudit)\n"
             "- `/malware <spec>` — Malware Lab: generate weaponized shellcode, loaders, stagers\n"
+            "- `/reverse <target>` or `/rea <target>` — Reverse Engineer Anything: Native binary disassembly, Electron/JS apps, APKs, checksec, ROP gadgets\n"
             "- `/payload <type>` — Generate evasive payload (xss/sqli/ssrf/rce/ssti/nosqli/crlf)\n"
             "- `/cancel` or `Ctrl+C` — Cancel active task or command\n\n"
             "**Developer & Tools:**\n"

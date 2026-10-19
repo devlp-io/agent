@@ -40,7 +40,7 @@ from core.events import (
     ThinkingStartEvent, ThinkingStopEvent, CommandStartEvent, CommandOutputEvent,
     CommandFinishEvent, FindingEvent, StatusChangeEvent, TaskCompleteEvent,
     TaskCancelledEvent, ErrorEvent, PhaseTransitionEvent, SubagentStartEvent,
-    SubagentFinishEvent, PayloadCardEvent, ExploitCardEvent,
+    SubagentFinishEvent, PayloadCardEvent, ExploitCardEvent, ReversingCardEvent,
     QuestionPromptEvent, QuestionAnswerEvent
 )
 from core.model_manager import ModelManager
@@ -57,6 +57,8 @@ SLASH_COMMANDS: List[Tuple[str, str]] = [
     ("/phase", "Inspect active assessment phase: what's done, what's next move"),
     ("/subagent <type> <task>", "Dispatch specialist (recon/exploit/malware/reversing/webaudit/cloud/adpivoting/osint/codeaudit/evasion/reporter/tools)"),
     ("/malware <spec>", "Malware Lab: craft weaponized shellcode, loaders, stagers, and cross-compile"),
+    ("/reverse <target>", "Reverse Engineer Anything (REA): native disassembly, Electron/JS apps, APKs, checksec, ROP gadgets"),
+    ("/rea <target>", "REA: Reverse Engineer Anything toolkit (analyze apps, binaries, behavior)"),
     ("/payload <type>", "Generate evasive payload (xss/sqli/ssrf/rce/ssti/nosqli/crlf)"),
     ("/paste", "Paste entire multi-line text or script from clipboard without truncation"),
     ("/copy", "Copy entire session (chat, commands, findings) to clipboard"),
@@ -664,6 +666,35 @@ Screen {
     text-wrap: wrap;
 }
 
+/* Reverse Engineering Card (REA & radare2) */
+.reversing-card {
+    width: 100%;
+    height: auto;
+    background: #09131f;
+    border: solid #06b6d4;
+    margin: 1 0 1 0;
+    padding: 0 1;
+}
+
+.reversing-header {
+    width: 100%;
+    color: #22d3ee;
+    text-style: bold;
+    text-wrap: wrap;
+}
+
+.reversing-meta {
+    width: 100%;
+    color: #38bdf8;
+    text-wrap: wrap;
+}
+
+.reversing-body {
+    width: 100%;
+    color: #a5f3fc;
+    text-wrap: wrap;
+}
+
 
 /* Fixed Bottom Composer with margin and top border divider */
 #composer-container {
@@ -1096,6 +1127,57 @@ class ExploitCard(Static):
 
     def compose(self) -> ComposeResult:
         yield self._header_label
+        yield self._body_label
+
+
+class ReversingCard(Static):
+    """Visual card for reverse engineering analysis and REA results."""
+
+    def __init__(
+        self,
+        target: str,
+        arch: str,
+        tool: str = "REA / radare2",
+        mitigations: str = "",
+        findings_count: int = 0,
+        decompiled_snippet: str = "",
+        summary: str = "",
+        **kwargs
+    ):
+        super().__init__(classes="reversing-card", **kwargs)
+        self.target = target
+        self.arch = arch
+        self.tool = tool
+        self.mitigations = mitigations
+        self.findings_count = findings_count
+        self.decompiled_snippet = decompiled_snippet
+        self.summary = summary
+
+        target_str = f" ── Target: {self.target}" if self.target else ""
+        self._header_label = Label(
+            f"🔬 REVERSE ENGINEERING [{self.tool.upper()}]{target_str}",
+            classes="reversing-header",
+            markup=False,
+        )
+        meta_lines = []
+        if self.arch:
+            meta_lines.append(f"📦 Architecture: {self.arch}")
+        if self.mitigations:
+            meta_lines.append(f"🛡️ Mitigations: {self.mitigations}")
+        if self.findings_count:
+            meta_lines.append(f"⚠️ Findings Discovered: {self.findings_count}")
+        if self.summary:
+            meta_lines.append(f"📋 Summary: {self.summary}")
+
+        meta_text = "\n".join(meta_lines) + "\n" if meta_lines else ""
+        self._meta_label = Label(meta_text, classes="reversing-meta", markup=False)
+        body_content = self.decompiled_snippet or "Analysis output generated."
+        self._body_label = Label(body_content[:2500], classes="reversing-body", markup=False)
+
+    def compose(self) -> ComposeResult:
+        yield self._header_label
+        if self.arch or self.mitigations or self.findings_count:
+            yield self._meta_label
         yield self._body_label
 
 
@@ -2147,6 +2229,24 @@ class SomScanApp(App):
                 scroll.mount(card)
             self._conversation_history.append(
                 f"[Exploit: {event.vuln_name}] Target: {event.target} Status: {event.status}"
+            )
+
+        elif isinstance(event, ReversingCardEvent):
+            self._last_emitter = "reversing"
+            self._handle_event(ThinkingStopEvent())
+            card = ReversingCard(
+                target=event.target,
+                arch=event.arch,
+                tool=event.tool,
+                mitigations=event.mitigations,
+                findings_count=event.findings_count,
+                decompiled_snippet=event.decompiled_snippet,
+                summary=event.summary,
+            )
+            if scroll is not None:
+                scroll.mount(card)
+            self._conversation_history.append(
+                f"[Reverse Engineering: {event.target}] Tool: {event.tool} Arch: {event.arch}\n{event.summary}"
             )
 
         elif isinstance(event, QuestionPromptEvent):
