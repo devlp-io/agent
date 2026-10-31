@@ -109,6 +109,17 @@ def run_gui(args: list[str]) -> int:
         return 0
 
     webgui = HERE / "webgui"
+    if not (webgui / "server.py").exists():
+        print("[gui] webgui/server.py is missing from this checkout.")
+        return 1
+    try:
+        import fastapi  # noqa: F401
+        import uvicorn  # noqa: F401
+        import multipart  # noqa: F401
+    except Exception:
+        print("[gui] web console packages are missing.")
+        print("      Run: somscan setup")
+        return 1
     dist = webgui / "dist" / "index.html"
     if not dist.exists():
         npm = shutil.which("npm")
@@ -165,6 +176,12 @@ def run_gui(args: list[str]) -> int:
                 pass
         return 0
     print(f"[gui] server did not become ready — see {log_path}")
+    try:
+        tail = log_path.read_text(errors="replace").splitlines()[-12:]
+        for ln in tail:
+            print("      " + ln)
+    except Exception:
+        pass
     return 1
 
 

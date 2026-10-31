@@ -17,13 +17,13 @@ from __future__ import annotations
 import json
 import os
 import pathlib
-import re
 import platform
+import queue
+import re
 import shutil
 import subprocess
 import sys
 import threading
-import queue
 import time
 
 ROOT = pathlib.Path(__file__).resolve().parent
@@ -38,33 +38,11 @@ CORE_PKGS = [
 WEB_PKGS = ["pydantic>=2.0.0", "fastapi>=0.100.0", "uvicorn>=0.22.0", "python-multipart>=0.0.9"]
 
 TTY = sys.stdout.isatty() and os.environ.get("NO_COLOR", "") == ""
-
-
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
-def term_width() -> int:
-    try:
-        cols = shutil.get_terminal_size((80, 24)).columns
-    except Exception:
-        cols = 80
-    return max(36, min(58, cols - 2))
-
-
-def panel_line(text: str, width: int | None = None) -> None:
-    width = width or term_width()
-    visible = ANSI_RE.sub("", text)
-    if len(visible) > width - 2:
-        text = text[: max(0, width - 5)] + "…"
-        visible = ANSI_RE.sub("", text)
-    pad = max(0, width - len(visible) - 2)
-    print(cyan("│") + "  " + text + " " * pad + cyan("│"))
-
-
 def c(code: str, text: str) -> str:
-    if not TTY:
-        return text
-    return f"\033[{code}m{text}\033[0m"
+    return f"\033[{code}m{text}\033[0m" if TTY else text
 
 
 def bold(t: str) -> str:
@@ -91,14 +69,26 @@ def cyan(t: str) -> str:
     return c("36", t)
 
 
+def cols() -> int:
+    try:
+        return max(40, shutil.get_terminal_size((80, 24)).columns)
+    except Exception:
+        return 80
+
+
+def truncate(text: str, limit: int | None = None) -> str:
+    limit = limit or max(20, cols() - 8)
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
+
+
 def termux() -> bool:
     return bool(os.environ.get("TERMUX_VERSION")) or "com.termux" in os.environ.get("PREFIX", "")
 
 
 def venv_python(venv: pathlib.Path) -> pathlib.Path:
-    if os.name == "nt":
-        return venv / "Scripts" / "python.exe"
-    return venv / "bin" / "python"
+    return venv / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
 
 
 def system_python() -> str:
@@ -118,47 +108,53 @@ def system_python() -> str:
     return ""
 
 
+def header() -> None:
+    print()
+    print(bold("SOM-SCAN  ·  SETUP"))
+    print(f"  {'platform':<9} {platform.system().lower()}" + (" / termux" if termux() else ""))
+    print(f"  {'python':<9} {sys.version.split()[0]}")
+    print(f"  {'env':<9} {VENV}")
+    print()
+
+
 def line(kind: str, text: str) -> None:
     marks = {"ok": green("✓"), "warn": yellow("!"), "err": red("✗"), "run": cyan("›"), "skip": dim("·")}
-    print(f"  {marks.get(kind, '·')} {text}")
+    print(f"  {marks.get(kind, '·')} {truncate(text, cols() - 4)}")
 
 
-def header() -> None:
-    title = "SOM-SCAN  ·  SETUP"
-    width = term_width()
-    if TTY:
-        print()
-        print(cyan("╭" + "─" * width + "╮"))
-        panel_line(bold(title))
-        print(cyan("├" + "─" * width + "┤"))
-        panel_line(f"{'platform':<10} {platform.system().lower()}"
-                   + (" / termux" if termux() else ""))
-        panel_line(f"{'python':<10} {sys.version.split()[0]}  ({sys.executable})")
-        panel_line(f"{'env':<10} {VENV}")
-        print(cyan("╰" + "─" * width + "╯"))
-    else:
-        print(f"\n{title}\nplatform: {platform.system().lower()}\n"
-              f"python: {sys.version.split()[0]}\nenv: {VENV}\n")
+def _show_pip_line(text: str) -> bool:
+    low = text.lower()
+    if not text or text.startswith(("Requirement already satisfied", "Using cached",
+                                    "Looking in indexes", "Obtaining ", "Preparing metadata")):
+        return False
+    if ("downloading" in low or "collecting" in low or "building" in low
+            or "installing collected" in low or "successfully installed" in low
+            or "error" in low or "failed" in low or "requires" in low):
+        return True
+    return False
 
 
-def run_cmd(cmd: list[str], label: str, timeout: int | None = None) -> tuple[bool, str]:
-    """Run a command with a live spinner, elapsed time, and latest output line."""
+def run_command(cmd: list[str], label: str, timeout: int | None = None) -> tuple[bool, str]:
+    """Run a command as a clean line-based log with periodic heartbeats.
+
+    No carriage-return spinner: on narrow Termux terminals that wraps and
+    leaves a growing stack of lines. Progress is printed one line at a time.
+    """
+    print(f"  {cyan('›')} {truncate(label, cols() - 4)}")
     if not TTY:
-        print(f"  › {label}…")
         try:
             p = subprocess.run(cmd, text=True, capture_output=True, timeout=timeout)
             return p.returncode == 0, (p.stdout or "") + (p.stderr or "")
         except Exception as e:
             return False, str(e)
 
-    frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
     try:
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                              text=True, errors="replace", bufsize=1)
     except Exception as e:
         return False, str(e)
 
-    lines: list[str] = []
+    all_lines: list[str] = []
     q: "queue.Queue[str | None]" = queue.Queue()
     eof = [False]
 
@@ -173,9 +169,11 @@ def run_cmd(cmd: list[str], label: str, timeout: int | None = None) -> tuple[boo
 
     threading.Thread(target=reader, daemon=True).start()
     start = time.time()
-    last = ""
-    i = 0
-    width = max(30, term_width() - 3)
+    last_beat = start
+    last_shown = ""
+    seen: set[str] = set()
+    warned_build = False
+
     while True:
         while True:
             try:
@@ -185,27 +183,39 @@ def run_cmd(cmd: list[str], label: str, timeout: int | None = None) -> tuple[boo
             if item is None:
                 eof[0] = True
                 continue
-            lines.append(item)
-            clean = item.strip()
-            if clean and not clean.startswith(("Requirement already", "Using cached")):
-                last = clean
-        elapsed = int(time.time() - start)
-        status = f"  {frames[i % len(frames)]} {label}… {elapsed}s"
-        if last:
-            room = max(10, width - len(label) - 14)
-            status += "  " + (last[:room] + "…" if len(last) > room else last)
-        sys.stdout.write("\r\033[K" + status)
-        sys.stdout.flush()
-        i += 1
+            all_lines.append(item)
+            clean = ANSI_RE.sub("", item.replace("\r", " ")).strip()
+            if not _show_pip_line(clean):
+                continue
+            if clean in seen:
+                continue
+            seen.add(clean)
+            elapsed = int(time.time() - start)
+            if "pydantic-core" in clean or "building wheel" in clean.lower():
+                if not warned_build and termux():
+                    print(dim("      note: pydantic-core compiles from source on Termux; "
+                              "this step can take several minutes."))
+                    warned_build = True
+            print(f"      [{elapsed:>4}s] {truncate(clean, cols() - 14)}")
+            last_shown = clean
+            last_beat = time.time()
+
         if p.poll() is not None and eof[0] and q.empty():
             break
+        if time.time() - last_beat >= 20:
+            elapsed = int(time.time() - start)
+            hint = ""
+            if "building" in last_shown.lower() or "pydantic-core" in last_shown.lower():
+                hint = "  (compiling pydantic-core — this can take several minutes)"
+            print(dim(f"      [{elapsed:>4}s] … still working{hint}"))
+            last_beat = time.time()
         if timeout and (time.time() - start) > timeout:
             try:
                 p.terminate()
             except Exception:
                 pass
             break
-        time.sleep(0.1)
+        time.sleep(0.2)
 
     rc = p.wait()
     while True:
@@ -214,10 +224,13 @@ def run_cmd(cmd: list[str], label: str, timeout: int | None = None) -> tuple[boo
         except queue.Empty:
             break
         if item:
-            lines.append(item)
-    sys.stdout.write("\r\033[K")
-    sys.stdout.flush()
-    return rc == 0, "".join(lines)
+            all_lines.append(item)
+    elapsed = int(time.time() - start)
+    if rc == 0:
+        print(dim(f"      ✓ done in {elapsed}s"))
+    else:
+        print(red(f"      ✗ failed after {elapsed}s"))
+    return rc == 0, "".join(all_lines)
 
 
 def imports_ok(py: pathlib.Path, modules: list[str]) -> tuple[bool, str]:
@@ -234,11 +247,15 @@ def imports_ok(py: pathlib.Path, modules: list[str]) -> tuple[bool, str]:
 def ensure_venv() -> pathlib.Path:
     py = venv_python(VENV)
     if py.exists():
-        line("ok", f"environment found  {dim(str(VENV))}")
-        return py
+        pip_ok, _ = imports_ok(py, ["pip"])
+        if pip_ok:
+            line("ok", f"[1/4] Environment — found  {dim(str(VENV))}")
+            return py
+        line("warn", "[1/4] Environment — venv is broken, rebuilding")
+        shutil.rmtree(VENV, ignore_errors=True)
     sys_py = system_python()
     if not sys_py:
-        line("err", "Python 3.10+ was not found.")
+        line("err", "[1/4] Environment — Python 3.10+ was not found.")
         if termux():
             print("      pkg install -y python")
         elif platform.system() == "Windows":
@@ -246,62 +263,60 @@ def ensure_venv() -> pathlib.Path:
         else:
             print("      sudo apt install -y python3 python3-venv   # Debian/Ubuntu")
         raise SystemExit(1)
-    line("run", f"creating environment  {dim(str(VENV))}")
-    ok, out = run_cmd([sys_py, "-m", "venv", str(VENV)], "creating venv")
+    ok, out = run_command([sys_py, "-m", "venv", str(VENV)], "creating environment")
     py = venv_python(VENV)
     if not ok or not py.exists():
-        print(out[-1500:])
-        line("err", "could not create the virtualenv.")
+        print(out[-1200:])
+        line("err", "[1/4] Environment — could not create the virtualenv.")
         if termux():
             print("      pkg install -y python")
         elif platform.system() == "Linux":
             print("      sudo apt install -y python3-venv")
         raise SystemExit(1)
-    line("ok", "environment created")
+    line("ok", "[1/4] Environment — created")
     return py
 
 
 def pip_install(py: pathlib.Path, packages: list[str], label: str) -> tuple[bool, str]:
-    return run_cmd([str(py), "-m", "pip", "install", "--disable-pip-version-check",
-                    "--prefer-binary", "--upgrade", *packages], label)
+    return run_command([str(py), "-m", "pip", "install", "--disable-pip-version-check",
+                        "--prefer-binary", "--upgrade", *packages], label)
 
 
 def install_group(py: pathlib.Path, modules: list[str], packages: list[str], label: str) -> bool:
     ok, _ = imports_ok(py, modules)
     if ok:
-        line("ok", f"{label} already installed")
+        line("ok", f"{label} — already installed")
         return True
-    ok, out = pip_install(py, packages, f"installing {label}")
+    ok, out = pip_install(py, packages, f"{label} — installing")
     if ok:
         ok, _ = imports_ok(py, modules)
     if not ok:
-        # One clean retry; interrupted/partial installs are the common failure.
-        ok, out = pip_install(py, packages,
-                              f"repairing {label}")
+        ok, out = pip_install(py, packages, f"{label} — repairing")
         if ok:
             ok, _ = imports_ok(py, modules)
     if not ok and termux() and any(k in out.lower() for k in
-                                    ("rust", "cargo", "pydantic-core", "cryptography", "maturin")):
-        line("warn", "Rust build required on Termux — installing rust…")
-        run_cmd(["pkg", "install", "-y", "rust"], "installing rust", timeout=None)
-        ok, out = pip_install(py, packages, f"repairing {label} with rust")
+                                   ("rust", "cargo", "pydantic-core", "cryptography", "maturin")):
+        line("warn", "Rust build required — installing rust, then retrying")
+        run_command(["pkg", "install", "-y", "rust"], "installing rust")
+        ok, out = pip_install(py, packages, f"{label} — retrying with rust")
         if ok:
             ok, _ = imports_ok(py, modules)
     if ok:
-        line("ok", f"{label} ready")
+        line("ok", f"{label} — ready")
         return True
-    line("err", f"{label} install failed")
-    tail = "\n".join([ln for ln in out.strip().splitlines() if ln.strip()][-12:])
+    line("err", f"{label} — failed")
+    tail = "\n".join([ln for ln in out.strip().splitlines() if ln.strip()][-10:])
     if tail:
-        print(dim("      " + tail.replace("\n", "\n      ")))
+        for ln in tail.splitlines():
+            print(dim("      " + truncate(ln, cols() - 8)))
     if termux():
-        print(yellow("      Termux hint: pkg install -y python clang rust openssl libffi rust"))
+        print(yellow("      Termux hint: pkg install -y python clang rust openssl libffi"))
     return False
 
 
 def install_toolkits(py: pathlib.Path, auto: bool, skip: bool) -> str:
     if skip:
-        line("skip", "toolkits skipped")
+        line("skip", "[4/4] Toolkits — skipped")
         return "skipped"
     if not auto:
         try:
@@ -309,20 +324,21 @@ def install_toolkits(py: pathlib.Path, auto: bool, skip: bool) -> str:
         except EOFError:
             answer = "n"
         if answer in ("n", "no"):
-            line("skip", "toolkits skipped")
+            line("skip", "[4/4] Toolkits — skipped")
             return "skipped"
     if not (ROOT / "installer.py").exists():
-        line("warn", "installer.py not found; toolkit install skipped")
+        line("warn", "[4/4] Toolkits — installer.py not found, skipped")
         return "missing"
-    ok, out = run_cmd([str(py), str(ROOT / "installer.py"), "preinstall", "core"],
-                      "installing core toolkits", timeout=None)
+    ok, out = run_command([str(py), str(ROOT / "installer.py"), "preinstall", "core"],
+                          "[4/4] Toolkits — installing")
     if ok:
-        line("ok", "core toolkits ready")
+        line("ok", "[4/4] Toolkits — ready")
         return "ok"
-    line("warn", "toolkit install did not finish (CLI still works)")
+    line("warn", "[4/4] Toolkits — did not finish (CLI still works)")
     tail = "\n".join([ln for ln in out.strip().splitlines() if ln.strip()][-6:])
     if tail:
-        print(dim("      " + tail.replace("\n", "\n      ")))
+        for ln in tail.splitlines():
+            print(dim("      " + truncate(ln, cols() - 8)))
     return "partial"
 
 
@@ -333,18 +349,17 @@ def run_setup(argv: list[str]) -> int:
     header()
 
     py = ensure_venv()
-    core_ok = install_group(py, CORE_IMPORTS, CORE_PKGS, "core CLI packages")
+    core_ok = install_group(py, CORE_IMPORTS, CORE_PKGS, "[2/4] Core CLI packages")
     if not core_ok:
         line("err", "core environment is not usable.")
-        print("\n  Run this again after fixing the error above:")
-        print("    ./somscan setup\n")
+        print("\n  Fix the error above, then run: ./somscan setup\n")
         return 1
 
     web_ok = False
     if no_web:
-        line("skip", "web console packages skipped")
+        line("skip", "[3/4] Web console — skipped")
     else:
-        web_ok = install_group(py, WEB_IMPORTS, WEB_PKGS, "web console packages")
+        web_ok = install_group(py, WEB_IMPORTS, WEB_PKGS, "[3/4] Web console packages")
         if not web_ok:
             line("warn", "web console unavailable; CLI is ready")
 
@@ -363,14 +378,11 @@ def run_setup(argv: list[str]) -> int:
     except Exception:
         pass
 
-    if TTY:
-        width = term_width()
-        print(cyan("╭" + "─" * width + "╮"))
-        panel_line(f"{green('READY')}  run {bold('somscan')} from any directory")
-        panel_line(f"web console: {bold('somscan gui')}")
-        print(cyan("╰" + "─" * width + "╯"))
-    else:
-        print("\nREADY — run: somscan\n")
+    print()
+    print(green("Setup complete.") + f"  Run {bold('somscan')} from any directory.")
+    if web_ok:
+        print(f"  Web console: {bold('somscan gui')}")
+    print()
     return 0
 
 

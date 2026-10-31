@@ -27,6 +27,8 @@ wheels/
 node_modules/
 webgui/dist/
 webgui/.vite/
+!webgui/dist/
+!webgui/dist/**
 
 # ── venv ───────────────────────────────────────────────────────────────────
 venv/
