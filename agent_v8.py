@@ -88,7 +88,7 @@ except Exception:
 # configuration
 # ────────────────────────────────────────────────────────────────────
 
-MODEL         = os.environ.get("AG_MODEL", "deepseek-chat")
+MODEL         = os.environ.get("AG_MODEL", "deepseek-flash")
 BASE          = os.environ.get("AG_BASE",  "https://api.deepseek.com/v1")
 APIK          = os.environ.get("AG_KEY",   os.environ.get("DEEPSEEK_KEY", ""))
 MAX_TURNS     = int(os.environ.get("AG_MAX_TURNS", "500"))

@@ -103,7 +103,7 @@ somscan
 | `/new` | Start a fresh assessment session, archive previous logs, and clear view |
 | `/key [token]` | Set or update model API key in runtime session and `.env` |
 | `/env` | Inspect active environment variables, model provider, and token status |
-| `/model [name]` | View active model or switch engine profile (`deepseek-chat`, `gemini-2.5-flash`, etc.) |
+| `/model [name]` | View active model or switch engine profile (`deepseek-flash`, `gemini-2.5-flash`, etc.) |
 | `/scan <target>` | Launch an autonomous security assessment against a URL or hostname |
 | `/resume [target]` | Resume previous assessment session from last turn |
 | `/phase [name]` | Inspect or switch active assessment phase (`RECON`, `PROBE`, `API_MAP`, `VULN_AUDIT`, `EXPLOIT`, `REPORT`) |
@@ -314,7 +314,7 @@ Follow these exact steps to set up an operational SOM-SCAN node from scratch:
    ```
    Set your model key (e.g., DeepSeek, Gemini, or OpenAI):
    ```ini
-   AG_MODEL=deepseek-chat
+   AG_MODEL=deepseek-flash
    AG_BASE=https://api.deepseek.com/v1
    DEEPSEEK_KEY=sk-your-key-here
    AG_KEY=sk-your-key-here
@@ -464,7 +464,7 @@ SOM-SCAN supports any OpenAI-compatible inference endpoint, hosted frontier mode
 # ==============================================================================
 
 # Option 1: DeepSeek (Recommended for high speed, reasoning, and cost efficiency)
-AG_MODEL=deepseek-chat
+AG_MODEL=deepseek-flash
 AG_BASE=https://api.deepseek.com/v1
 DEEPSEEK_KEY=sk-your-deepseek-key-here
 AG_KEY=sk-your-deepseek-key-here
@@ -542,7 +542,53 @@ python dashboard.py --port 8787
 ```
 Open `http://127.0.0.1:8787` in any browser to inspect live log streams, inspect finding tables, interact with the HTTP repeater, or dispatch operator directives.
 
-### 6. Local SQLite Session Database & Memory Recall
+### 6. Agent Web GUI (Antigravity-style)
+A production, mobile-first chat console for the agent: streaming replies, multi-thread history,
+media/file attachments, live tool cards with per-call approvals, model switching, scan control,
+and an artifacts/context panel.
+
+```bash
+# one-time build (needs Node 20+)
+make gui-build
+
+# serve the API + SPA on http://127.0.0.1:8788/gui
+make gui
+```
+
+Development (Vite HMR on :5173, API proxied to :8788):
+```bash
+make gui-dev
+```
+
+Key routes:
+- `http://127.0.0.1:8788/gui` — the SPA
+- `http://127.0.0.1:8788/api/v2/docs` — OpenAPI docs
+- `python3 webgui/test_api.py` — backend smoke tests (21 checks, no LLM needed)
+
+Behaviour notes:
+- Chat is stored in `~/.somscan/webgui/gui.db` (SQLite, WAL), uploads in `~/.somscan/webgui/uploads/`.
+- **Agent mode** drives the same brain as the TUI/CLI (`core.agent_router.AgentRouter`): it plans,
+  emits real `COMMAND:`/`FILE:`/scan directives, runs them through the supervised task runner,
+  self-corrects on failure, and shows each command as a live tool card. If a model leaks native
+  tool-call tokens instead, the console recovers the command, runs it, and feeds the result back.
+  Operator prompts (sudo, confirmations) surface as inline answer cards.
+- **Chat mode** answers without touching the machine.
+- Each chat keeps its own CLI agent session; delete the chat to drop the session.
+- Agent replies are an **activity feed**, not a code dump: collapsed "Thought for Ns", one row per
+  action (`Edited index.html`, `Ran shell command`, `Analyzed app.py L12-25`), the newest shell
+  expanded, and a short action summary. File code lives in the action card, never as plain text.
+- Chat mode keeps code visible in syntax-highlighted boxes with a language tag and copy button.
+- No "create chat" step: typing or dropping a file auto-creates a thread. The hero stays until the
+  first message.
+- Everything persists locally in `gui.db` — threads, messages, uploads **and** the CLI agent's full
+  memory per thread, so a server restart resumes the same conversation.
+- Bind is loopback by default. For remote access, set a shared secret and pass it once:
+  ```bash
+  AG_GUI_TOKEN=long-random-string python webgui/server.py --host 0.0.0.0 --port 8788
+  # open http://host:8788/gui?token=long-random-string  (cookie is set for media/SSE)
+  ```
+
+### 7. Local SQLite Session Database & Memory Recall
 SOM-SCAN automatically maintains an embedded SQLite database (`~/.somscan/sessions.db`) persisting every chat turn, finding, and scan across CLI sessions:
 - `/sessions` or `/history` — List saved sessions with targets, message counts, and timestamps.
 - `/load <session-id>` — Switch active session and restore full memory context into conversation history.

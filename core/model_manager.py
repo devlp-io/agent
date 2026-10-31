@@ -47,8 +47,10 @@ class ModelManager:
 
     def __init__(self):
         self.profiles: Dict[str, ModelConfig] = {}
+        self._reasoning_cb = None
         self._load_profiles()
-        self.active_profile_name = "deepseek"
+        self.active_profile_name = "deepseek-flash"
+        self.effort = os.environ.get("AG_REASONING_EFFORT", "high")
         self._sync_from_env()
 
     def _load_profiles(self):
@@ -64,13 +66,13 @@ class ModelManager:
                     self.profiles[name] = ModelConfig(name, model, base, key_var)
 
         # Fallback defaults if conf missing
-        if "deepseek" not in self.profiles:
-            self.profiles["deepseek"] = ModelConfig(
-                "deepseek", "deepseek-chat", "https://api.deepseek.com/v1", "DEEPSEEK_KEY"
+        if "deepseek-flash" not in self.profiles:
+            self.profiles["deepseek-flash"] = ModelConfig(
+                "deepseek-flash", "deepseek-flash", "https://api.deepseek.com/v1", "DEEPSEEK_KEY"
             )
-        if "deepseek-reasoner" not in self.profiles:
-            self.profiles["deepseek-reasoner"] = ModelConfig(
-                "deepseek-reasoner", "deepseek-reasoner", "https://api.deepseek.com/v1", "DEEPSEEK_KEY"
+        if "deepseek-pro" not in self.profiles:
+            self.profiles["deepseek-pro"] = ModelConfig(
+                "deepseek-pro", "deepseek-v4-pro", "https://api.deepseek.com/v1", "DEEPSEEK_KEY"
             )
         if "ollama" not in self.profiles:
             self.profiles["ollama"] = ModelConfig(
@@ -102,9 +104,29 @@ class ModelManager:
                 self.profiles[env_model] = custom_cfg
                 self.active_profile_name = env_model
 
+    def set_effort(self, effort: str) -> None:
+        """Reasoning effort for models that support it (low | high | max)."""
+        if effort in ("low", "high", "max"):
+            self.effort = effort
+
+    def set_reasoning_callback(self, cb) -> None:
+        """Register a callback receiving streamed reasoning_content (thinking)."""
+        self._reasoning_cb = cb
+
+    def _emit_reasoning(self, text: str) -> None:
+        cb = getattr(self, "_reasoning_cb", None)
+        if cb and text:
+            try:
+                cb(text)
+            except Exception:
+                pass
+
     @property
     def active_config(self) -> ModelConfig:
-        return self.profiles.get(self.active_profile_name) or self.profiles["deepseek"]
+        cfg = self.profiles.get(self.active_profile_name)
+        if cfg is not None:
+            return cfg
+        return self.profiles.get("deepseek-flash") or next(iter(self.profiles.values()))
 
     @property
     def display_name(self) -> str:
@@ -179,17 +201,29 @@ class ModelManager:
             max_retries = 2 if cfg_idx == 0 else 1
             for attempt in range(max_retries):
                 try:
+                    extra = {}
+                    if model in ("deepseek-flash", "deepseek-v4-pro"):
+                        extra["reasoning_effort"] = getattr(self, "effort", "high") or "high"
                     response = client.chat.completions.create(
                         model=model,
                         messages=messages,
                         stream=True,
                         temperature=temperature,
+                        **extra,
                     )
                     has_yielded = False
                     for chunk in response:
-                        if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
+                        if not chunk.choices:
+                            continue
+                        delta = chunk.choices[0].delta
+                        if delta is None:
+                            continue
+                        reasoning = getattr(delta, "reasoning_content", None)
+                        if reasoning:
+                            self._emit_reasoning(reasoning)
+                        if delta.content:
                             has_yielded = True
-                            yield chunk.choices[0].delta.content
+                            yield delta.content
                     if has_yielded:
                         return
                 except Exception as e:

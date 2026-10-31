@@ -23,6 +23,11 @@ wheels/
 .installed.cfg
 *.egg
 
+# ── Node / web GUI ────────────────────────────────────────────────────────
+node_modules/
+webgui/dist/
+webgui/.vite/
+
 # ── venv ───────────────────────────────────────────────────────────────────
 venv/
 env/

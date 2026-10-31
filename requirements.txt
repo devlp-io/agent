@@ -13,3 +13,4 @@ uvicorn>=0.22.0
 cryptography>=41.0.0
 anyio>=4.0.0
 Jinja2>=3.1.0
+python-multipart>=0.0.9
