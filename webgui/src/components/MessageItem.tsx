@@ -400,22 +400,19 @@ export function MessageItem({ m, showThinking }: { m: Message; showThinking: boo
     return null
   }
 
-  const actionIdx = parts
-    .map((p, i) => (p.type === 'tool' ? i : -1))
-    .filter(i => i >= 0)
-  const shellIdx = parts
-    .map((p, i) => (p.type === 'tool' && p.tool === 'shell' ? i : -1))
-    .filter(i => i >= 0)
+  const toolParts = parts
+    .map((p, i) => ({ p, i }))
+    .filter(({ p }) => p.type === 'tool') as Array<{ p: ToolPart; i: number }>
+  const textParts = parts
+    .map((p, i) => ({ p, i }))
+    .filter(({ p }) => p.type !== 'tool') as Array<{ p: Exclude<Part, ToolPart>; i: number }>
+  const shellIdx = toolParts
+    .filter(({ p }) => p.tool === 'shell')
+    .map(({ i }) => i)
   const lastShell = shellIdx.length ? shellIdx[shellIdx.length - 1] : -1
-  const activityIdx = parts
-    .map((p, i) => (p.type === 'tool' || p.type === 'note' ? i : -1))
-    .filter(i => i >= 0)
-  const firstActivity = activityIdx.length ? activityIdx[0] : -1
-  // Keep actions visible by default; only fold very long runs.
-  const doneCollapse = !m.streaming && activityIdx.length > 20 && !showAllSteps
-  const collapse = m.streaming && !showAllSteps && actionIdx.length > 20
-  const firstShownAction = collapse ? actionIdx[actionIdx.length - 3] : -1
-  const hiddenSteps = collapse ? actionIdx.length - 3 : 0
+  const hiddenActionCount = Math.max(0, toolParts.length - 3)
+  const expanded = showAllSteps || hiddenActionCount === 0
+  const shownActions = expanded ? toolParts : toolParts.slice(-3)
 
   return (
     <div className="rise px-0.5">
@@ -429,67 +426,11 @@ export function MessageItem({ m, showThinking }: { m: Message; showThinking: boo
       </div>
 
       <div className="pl-7">
-        {parts.map((p, i) => {
-          const activity = p.type === 'tool' || p.type === 'note'
-
-          if (doneCollapse && activity) {
-            if (i !== firstActivity) return null
-            return (
-              <button
-                key={`activity-${i}`}
-                onClick={() => setShowAllSteps(true)}
-                className="my-1.5 flex items-center gap-1.5 rounded-lg border border-line bg-panel2/40 px-2.5 py-1.5 text-[11px] text-faint transition hover:border-line2 hover:text-muted"
-              >
-                <ChevronRight size={11} />
-                Show {activityIdx.length} step{activityIdx.length === 1 ? '' : 's'}
-              </button>
-            )
-          }
-
-          if (showAllSteps && !m.streaming && activity && i === firstActivity) {
-            return (
-              <div key={`hide-${i}`}>
-                <button
-                  onClick={() => setShowAllSteps(false)}
-                  className="my-1.5 flex items-center gap-1.5 text-[11px] text-faint transition hover:text-muted"
-                >
-                  <ChevronRight size={11} className="rotate-90" />
-                  Hide steps
-                </button>
-                {p.type === 'tool'
-                  ? <ToolCard part={p} defaultOpen={p.tool === 'shell' && i === lastShell} />
-                  : (
-                    <div className="my-1 flex items-start gap-1.5 text-[11.5px] leading-snug text-faint">
-                      <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-faint/70" />
-                      <span className="min-w-0 break-words">{p.text.length > 220 ? p.text.slice(0, 217) + '…' : p.text}</span>
-                    </div>
-                  )}
-              </div>
-            )
-          }
-
-          if (p.type === 'tool') {
-            if (collapse && i < firstShownAction) return null
-            return (
-              <>
-                {collapse && i === firstShownAction && (
-                  <button
-                    key={`more-${i}`}
-                    onClick={() => setShowAllSteps(true)}
-                    className="my-1.5 flex items-center gap-1.5 text-[11px] text-faint transition hover:text-muted"
-                  >
-                    <ChevronRight size={11} />
-                    Show {hiddenSteps} earlier step{hiddenSteps === 1 ? '' : 's'}
-                  </button>
-                )}
-                <ToolCard key={p.call_id || i} part={p} defaultOpen={p.tool === 'shell' && i === lastShell} />
-              </>
-            )
-          }
+        {/* Reply / notes / thinking stay above the action log */}
+        {textParts.map(({ p, i }) => {
           if (p.type === 'ask') return <AskCard key={p.question_id || i} part={p} threadId={m.thread_id} />
           if (p.type === 'thought') return showThinking && p.text?.trim() ? <ThinkingBlock key={i} text={p.text} /> : null
           if (p.type === 'note') {
-            if (collapse && firstShownAction >= 0 && i < firstShownAction) return null
             return (
               <div key={i} className="my-1 flex items-start gap-1.5 text-[11.5px] leading-snug text-faint">
                 <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-faint/70" />
@@ -500,7 +441,28 @@ export function MessageItem({ m, showThinking }: { m: Message; showThinking: boo
           return p.text?.trim() ? <Markdown key={i} text={p.text} plain={m.meta?.engine === 'cli'} /> : null
         })}
 
-        <Footer m={m} actions={actionIdx.length} />
+        {/* Shell / file actions, grouped at the bottom; older ones fold past 3 */}
+        {toolParts.length > 0 && (
+          <div className="mt-2 border-t border-line/60 pt-1.5">
+            {hiddenActionCount > 0 && (
+              <button
+                type="button"
+                onClick={() => setShowAllSteps(v => !v)}
+                className="my-1.5 flex items-center gap-1.5 text-[11px] text-faint transition hover:text-muted"
+              >
+                <ChevronRight size={11} className={expanded ? 'rotate-90' : ''} />
+                {expanded
+                  ? 'Hide actions'
+                  : `Show ${hiddenActionCount} earlier action${hiddenActionCount === 1 ? '' : 's'}`}
+              </button>
+            )}
+            {shownActions.map(({ p, i }) => (
+              <ToolCard key={p.call_id || i} part={p} defaultOpen={p.tool === 'shell' && i === lastShell} />
+            ))}
+          </div>
+        )}
+
+        <Footer m={m} actions={toolParts.length} />
       </div>
     </div>
   )
