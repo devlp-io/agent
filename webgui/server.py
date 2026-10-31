@@ -112,6 +112,7 @@ def init_db() -> None:
                 created REAL NOT NULL,
                 updated REAL NOT NULL,
                 model TEXT,
+                workdir TEXT,
                 mode TEXT NOT NULL DEFAULT 'agent',
                 pinned INTEGER NOT NULL DEFAULT 0,
                 archived INTEGER NOT NULL DEFAULT 0
@@ -147,6 +148,10 @@ def init_db() -> None:
             );
             """
         )
+        try:
+            c.execute("ALTER TABLE threads ADD COLUMN workdir TEXT")
+        except sqlite3.OperationalError:
+            pass
 
 
 init_db()
@@ -921,6 +926,29 @@ def _generate_title(first_text: str, reply_hint: str = "") -> str:
     title = re.sub(r"^(title\s*[:\-]\s*)", "", title, flags=re.I)
     title = re.sub(r"\s+", " ", title).strip(" .:-")
     return title[:80]
+
+
+def _slug(text: str, limit: int = 24) -> str:
+    t = re.sub(r"[^a-zA-Z0-9]+", "-", (text or "").strip().lower()).strip("-")
+    return (t[:limit].rstrip("-") or "session")
+
+
+def _session_workdir(thread_id: str, first_text: str) -> pathlib.Path:
+    """Each chat gets its own folder under the workspace root; reuse it for the chat."""
+    with _db() as c:
+        row = c.execute("SELECT workdir FROM threads WHERE id=?", (thread_id,)).fetchone()
+        existing = row["workdir"] if row else None
+    if existing:
+        p = pathlib.Path(existing)
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+    root = pathlib.Path(os.environ.get("AG_SCAN_ROOT", os.path.expanduser("~/scans"))).expanduser() / "workspace"
+    name = f"{_slug(first_text)}-{thread_id[:6]}"
+    path = root / name
+    path.mkdir(parents=True, exist_ok=True)
+    with _db() as c:
+        c.execute("UPDATE threads SET workdir=? WHERE id=?", (str(path), thread_id))
+    return path
 
 def _autotitle(first_text: str) -> str:
     t = re.sub(r"\s+", " ", (first_text or "").strip())
@@ -2045,6 +2073,12 @@ async def _agent_stream(body: ChatBody, request: Request):
             r"file|script|page|site|app|device|local)\b",
             text or "", re.I,
         ))
+        try:
+            session_dir = _session_workdir(body.thread_id, text or "session")
+            setattr(router, "get_active_work_dir", lambda wd=str(session_dir): pathlib.Path(wd))
+        except Exception:
+            session_dir = None
+
         passive_mission = bool(PASSIVE_RE.search(text or ""))
         try:
             _apply_mission_guard(router, passive_mission, started + MAX_AGENT_SECONDS if MAX_AGENT_SECONDS else 0.0)
@@ -2055,7 +2089,14 @@ async def _agent_stream(body: ChatBody, request: Request):
                 router._tools_checked_for_session = True
             except Exception:
                 pass
-        prompt = (_mission_constraints(text) + GUI_TRANSPORT
+        session_block = ""
+        if session_dir is not None:
+            session_block = (
+                f"[SESSION WORKSPACE] Your working directory for this chat is `{session_dir}`. "
+                "Create new files and projects there. You may read or access any other directory or existing "
+                "workspace on this box when the task needs it, but do not repurpose an existing project for new work.\n\n"
+            )
+        prompt = (_mission_constraints(text) + session_block + GUI_TRANSPORT
                   + _attachments_context(atts) + (text or "Please review the attached files."))
         followups = 0
         limit_hit = False
@@ -2275,7 +2316,7 @@ async def _agent_stream(body: ChatBody, request: Request):
                 yield _sse({"type": "status", "status": "THINKING"})
                 continue
 
-            leaked = _dsml_commands("".join(turn_text))
+            leaked = _dsml_commands("".join(turn_text) + "\n" + (last_reply or ""))
             if leaked and followups < 2 and not router.is_busy:
                 followups += 1
                 results = []
@@ -2484,6 +2525,8 @@ async def _agent_stream(body: ChatBody, request: Request):
             lines.append("")
             lines.append("Continue in this chat to resume.")
             last_reply = "\n".join(lines)
+        if _has_dsml(last_reply or ""):
+            last_reply = re.sub(r"<[\uff5c|][^>]*>", "", last_reply or "").strip()
         last_reply = _strip_code_blocks(last_reply)
         last_reply = _scrub_identity(last_reply)
         last_reply = _agent_answer_cleanup(last_reply, has_edit or bool(tools))
