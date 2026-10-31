@@ -55,6 +55,11 @@ export default function App() {
   const [toasts, setToasts] = useState<ToastItem[]>([])
   const abortRef = useRef<AbortController | null>(null)
   const jobAbortRef = useRef<AbortController | null>(null)
+  const activeRef = useRef<string | null>(null)
+  const openSeq = useRef(0)
+  const textBuf = useRef('')
+  const toolBuf = useRef<Record<string, string>>({})
+  const flushTimer = useRef<number | null>(null)
   const toastId = useRef(0)
 
   const pushToast = useCallback((msg: string, kind: 'ok' | 'err' = 'ok') => {
@@ -122,29 +127,44 @@ export default function App() {
   }, [loadModels, loadThreads])
 
   const openThread = useCallback(async (id: string) => {
+    const seq = ++openSeq.current
+    activeRef.current = id
     setActiveId(id)
     setSidebarOpen(false)
     setLoadingMessages(true)
     setStreaming(null)
+    setMessages([])
     abortRef.current?.abort()
     jobAbortRef.current?.abort()
     try {
       const r = await api.messages(id)
+      if (seq !== openSeq.current || activeRef.current !== id) return
       setMessages(r.messages)
       attachJobIfRunning(id)
     } catch (e) {
+      if (seq !== openSeq.current) return
       pushToast(e instanceof Error ? e.message : 'failed to load chat', 'err')
       setMessages([])
     } finally {
-      setLoadingMessages(false)
+      if (seq === openSeq.current) setLoadingMessages(false)
     }
   }, [pushToast])
+
+  const wasOnline = useRef(true)
+  useEffect(() => {
+    if (!wasOnline.current && online) {
+      pushToast('backend reconnected', 'ok')
+      if (activeId && !streaming) openThread(activeId)
+    }
+    wasOnline.current = online
+  }, [online, activeId, streaming, openThread, pushToast])
 
   const createThread = useCallback(async (): Promise<Thread | null> => {
     try {
       const t = await api.createThread(activeModel ?? undefined)
       const thread: Thread = { ...t, msg_count: 0, pinned: false, mode: 'agent', updated_iso: '' }
       setThreads(prev => [thread, ...prev])
+      activeRef.current = t.id
       setActiveId(t.id)
       setMessages([])
       setStreaming(null)
@@ -163,13 +183,21 @@ export default function App() {
   }, [activeId, createThread])
 
   const deleteThread = async (id: string) => {
+    if (activeRef.current === id) {
+      abortRef.current?.abort()
+      jobAbortRef.current?.abort()
+      api.cancelJob(id).catch(() => {})
+    }
     try {
       await api.deleteThread(id)
       setThreads(prev => prev.filter(t => t.id !== id))
-      if (activeId === id) {
-        setActiveId(null); setMessages([]); setStreaming(null)
+      if (activeRef.current === id) {
+        activeRef.current = null
+        setActiveId(null); setMessages([]); setStreaming(null); setLoadingMessages(false)
       }
-    } catch (e) { pushToast(e instanceof Error ? e.message : 'delete failed', 'err') }
+    } catch (e) {
+      pushToast(e instanceof Error ? e.message : 'delete failed', 'err')
+    }
   }
 
   const renameThread = async (id: string, title: string) => {
@@ -195,6 +223,32 @@ export default function App() {
   // ── streaming ────────────────────────────────────────────────────────
   const patchStreaming = (fn: (m: Message) => Message) => setStreaming(prev => prev ? fn(prev) : prev)
 
+  const flushStreaming = () => {
+    if (flushTimer.current !== null) {
+      window.clearTimeout(flushTimer.current)
+      flushTimer.current = null
+    }
+    const text = textBuf.current
+    textBuf.current = ''
+    if (text) appendText(text)
+    const toolOut = toolBuf.current
+    toolBuf.current = {}
+    const ids = Object.keys(toolOut)
+    if (ids.length) {
+      patchStreaming(m => ({
+        ...m,
+        parts: m.parts.map(p => p.type === 'tool' && toolOut[p.call_id]
+          ? { ...p, output: (p.output || '') + toolOut[p.call_id] }
+          : p),
+      }))
+    }
+  }
+
+  const scheduleFlush = () => {
+    if (flushTimer.current !== null) return
+    flushTimer.current = window.setTimeout(flushStreaming, 70)
+  }
+
   const appendText = (text: string) => patchStreaming(m => {
     const parts = [...m.parts]
     const last = parts[parts.length - 1]
@@ -207,6 +261,15 @@ export default function App() {
   })
 
   const handleEvent = (ev: SseEvent) => {
+    const evTid =
+      ev.type === 'start' ? ev.user_message.thread_id
+      : ev.type === 'done' ? ev.message.thread_id
+      : null
+    if (evTid && activeRef.current && evTid !== activeRef.current) {
+      if (ev.type === 'done') loadThreads()
+      return
+    }
+    if (!['delta', 'tool_delta', 'thinking'].includes(ev.type)) flushStreaming()
     switch (ev.type) {
       case 'start': {
         setMessages(prev => [
@@ -231,7 +294,8 @@ export default function App() {
         break
       }
       case 'delta':
-        appendText(ev.text)
+        textBuf.current += ev.text
+        scheduleFlush()
         break
       case 'note':
         patchStreaming(m => ({ ...m, parts: [...m.parts, { type: 'note', text: ev.text }] }))
@@ -276,12 +340,8 @@ export default function App() {
         })
         break
       case 'tool_delta':
-        patchStreaming(m => ({
-          ...m,
-          parts: m.parts.map(p => p.type === 'tool' && p.call_id === ev.id
-            ? { ...p, output: (p.output || '') + ev.output }
-            : p),
-        }))
+        toolBuf.current[ev.id] = (toolBuf.current[ev.id] || '') + ev.output
+        scheduleFlush()
         break
       case 'text_final':
         patchStreaming(m => {
@@ -337,7 +397,7 @@ export default function App() {
   const attachJobIfRunning = async (id: string) => {
     try {
       const st = await api.jobStatus(id)
-      if (!st.running) return
+      if (!st.running || activeRef.current !== id) return
       jobAbortRef.current?.abort()
       const ctrl = new AbortController()
       jobAbortRef.current = ctrl
@@ -353,6 +413,7 @@ export default function App() {
         created_iso: new Date().toISOString(),
         streaming: true,
       })
+      if (activeRef.current !== id) return
       await subscribeJob(id, handleEvent, ctrl.signal)
     } catch { /* job may have finished */ }
   }
@@ -395,7 +456,7 @@ export default function App() {
         pushToast(e instanceof Error ? e.message : 'stream failed', 'err')
       }
     } finally {
-      setStreaming(null)
+      if (activeRef.current === tid) setStreaming(null)
       loadThreads()
     }
   }

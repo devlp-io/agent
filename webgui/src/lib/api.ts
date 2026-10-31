@@ -201,7 +201,7 @@ export async function subscribeJob(
   onEvent: (e: SseEvent) => void,
   signal: AbortSignal,
 ): Promise<void> {
-  const res = await fetch(`${API}/jobs/${encodeURIComponent(threadId)}/stream`, {
+  const res = await fetch(`${API}/jobs/${encodeURIComponent(threadId)}/stream?compact=1`, {
     headers: { ...authHeaders() },
     signal,
   })

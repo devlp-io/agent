@@ -324,8 +324,40 @@ def _start_job(thread_id: str, iterator) -> Dict[str, Any]:
     return job
 
 
-async def _subscribe_job(job: Dict[str, Any]):
+def _compact_events(events: List[str]) -> List[str]:
+    """Merge token/tool-output deltas so reattaching to a long job is cheap."""
+    out: List[Dict[str, Any]] = []
+    for raw in events:
+        try:
+            ev = json.loads(raw[5:].strip()) if raw.startswith("data:") else None
+        except Exception:
+            ev = None
+        if not isinstance(ev, dict):
+            continue
+        kind = ev.get("type")
+        if out:
+            last = out[-1]
+            if kind in ("tool_delta", "delta", "thinking") and last.get("type") == kind:
+                key = "output" if kind == "tool_delta" else "text"
+                if kind == "tool_delta" and last.get("id") != ev.get("id"):
+                    pass
+                else:
+                    last[key] = (last.get(key) or "") + (ev.get(key) or "")
+                    continue
+            if kind == "status" and last.get("type") == "status":
+                out[-1] = ev
+                continue
+        out.append(ev)
+    return [_sse(ev) for ev in out]
+
+
+async def _subscribe_job(job: Dict[str, Any], compact: bool = False):
     idx = 0
+    if compact:
+        snapshot = list(job["events"])
+        idx = len(snapshot)
+        for chunk in _compact_events(snapshot):
+            yield chunk
     while True:
         evs = job["events"]
         while idx < len(evs):
@@ -1048,12 +1080,22 @@ def api_thread_patch(thread_id: str, body: ThreadPatch):
 
 @app.delete("/api/v2/threads/{thread_id}")
 def api_thread_delete(thread_id: str):
+    job = _jobs.get(thread_id)
+    if job and not job.get("done"):
+        job["cancel"] = True
+    router = _router_session(thread_id)
+    if router is not None:
+        try:
+            router.cancel()
+        except Exception:
+            pass
     with _db() as c:
         cur = c.execute("DELETE FROM threads WHERE id=?", (thread_id,))
         if cur.rowcount == 0:
             raise HTTPException(404, "thread not found")
     with _routers_lock:
         _routers.pop(thread_id, None)
+    _jobs.pop(thread_id, None)
     return {"ok": True}
 
 
@@ -1444,7 +1486,8 @@ def _snapshot_tree(root: str, depth: Optional[int] = None) -> Dict[str, Dict[str
     if not base.is_dir():
         return out
     try:
-        for p in base.rglob("*"):
+        iterator = base.iterdir() if depth is not None else base.rglob("*")
+        for p in iterator:
             rel = p.relative_to(base)
             if depth is not None and len(rel.parts) > depth:
                 continue
@@ -1904,6 +1947,8 @@ async def _agent_stream(body: ChatBody, request: Request):
         parts: List[Dict[str, Any]] = []
         tools: List[Dict[str, Any]] = []
         tool_calls: Dict[str, List[str]] = {}
+        out_buf: Dict[str, str] = {}
+        last_out_flush = 0.0
         thoughts: List[str] = []
         thought_ms = 0.0
         turn_start = time.time()
@@ -1987,7 +2032,10 @@ async def _agent_stream(body: ChatBody, request: Request):
             work_dir = str(router.get_active_work_dir())
         except Exception:
             work_dir = str(pathlib.Path.cwd())
-        before_tree = _snapshot_tree(work_dir)
+        try:
+            before_tree = await asyncio.to_thread(_snapshot_tree, work_dir, 1)
+        except Exception:
+            before_tree = {}
 
         local_task = bool(not re.search(
             r"https?://|\b(?:[\w-]+\.)+(?:com|net|org|io|dev|app|ai|co|gov|edu|info|biz|me|xyz)\b",
@@ -2026,6 +2074,7 @@ async def _agent_stream(body: ChatBody, request: Request):
         while True:
             router.dispatch(prompt)
             terminal = False
+            processed = 0
             while not terminal:
                 if ((MAX_AGENT_ACTIONS and len(tools) >= MAX_AGENT_ACTIONS)
                         or (MAX_AGENT_SECONDS and (time.time() - started) > MAX_AGENT_SECONDS)):
@@ -2062,6 +2111,10 @@ async def _agent_stream(body: ChatBody, request: Request):
                         reasoning_since = time.time()
                     turn_reasoning.append(ev[1])
                     continue
+
+                processed += 1
+                if processed % 25 == 0:
+                    await asyncio.sleep(0)
 
                 name = type(ev).__name__
 
@@ -2106,7 +2159,13 @@ async def _agent_stream(body: ChatBody, request: Request):
                             if part.get("call_id") == cid:
                                 part["output"] = (part.get("output") or "") + out
                                 break
-                        yield _sse({"type": "tool_delta", "id": cid, "output": out})
+                        acc = (out_buf.get(cid) or "") + out
+                        if len(acc) >= 8192 or (time.time() - last_out_flush) >= 0.15:
+                            out_buf[cid] = ""
+                            last_out_flush = time.time()
+                            yield _sse({"type": "tool_delta", "id": cid, "output": acc})
+                        else:
+                            out_buf[cid] = acc
 
                 elif name == "CommandFinishEvent":
                     cmd = getattr(ev, "command", "") or ""
@@ -2124,6 +2183,9 @@ async def _agent_stream(body: ChatBody, request: Request):
                                 tools.append({"tool": "shell", "args": part.get("args", {}), "ok": rc == 0})
                                 if rc != 0 and cmd.strip():
                                     failures.append({"cmd": cmd, "output": (part.get("output") or out or "")[-3000:]})
+                                pending_out = out_buf.pop(cid, "")
+                                if pending_out:
+                                    yield _sse({"type": "tool_delta", "id": cid, "output": pending_out})
                                 yield _sse({"type": "tool_end", "id": cid, "tool": "shell",
                                             "ok": rc == 0, "output": part["output"],
                                             "status": part["status"]})
@@ -2335,7 +2397,10 @@ async def _agent_stream(body: ChatBody, request: Request):
             work_dir = str(router.get_active_work_dir())
         except Exception:
             work_dir = str(pathlib.Path.cwd())
-        run_changes = _tree_changes(work_dir, before_tree)
+        try:
+            run_changes = await asyncio.to_thread(_tree_changes, work_dir, before_tree, 1)
+        except Exception:
+            run_changes = []
         removed_paths = set(_cleanup_temp_artifacts(run_changes, text, work_dir))
         if removed_paths:
             parts = [
@@ -2356,7 +2421,7 @@ async def _agent_stream(body: ChatBody, request: Request):
                 str(p.get("args", {}).get("path", ""))
                 for p in parts if p.get("type") == "tool" and p.get("tool") == "edit"
             }
-            for ch in _tree_changes(work_dir, before_tree, depth=1):
+            for ch in run_changes:
                 if ch["path"] in known:
                     continue
                 file_text = ""
@@ -2377,7 +2442,7 @@ async def _agent_stream(body: ChatBody, request: Request):
 
         # backups created for files touched in this run are clutter, not deliverables
         try:
-            for ch in _tree_changes(work_dir, before_tree, depth=1):
+            for ch in run_changes:
                 base = pathlib.Path(ch["path"])
                 for bak in list(base.parent.glob(base.name + ".bak*")):
                     try:
@@ -2882,11 +2947,11 @@ def api_job_status(thread_id: str):
 
 
 @app.get("/api/v2/jobs/{thread_id}/stream")
-async def api_job_stream(thread_id: str):
+async def api_job_stream(thread_id: str, compact: bool = False):
     job = _jobs.get(thread_id)
     if not job:
         raise HTTPException(404, "no job for this chat")
-    return StreamingResponse(_subscribe_job(job), media_type="text/event-stream",
+    return StreamingResponse(_subscribe_job(job, compact=compact), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache, no-transform",
                                       "X-Accel-Buffering": "no", "Connection": "keep-alive"})
 
