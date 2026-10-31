@@ -661,18 +661,19 @@ PASSIVE_BLOCK_RE = re.compile(r"$^")  # retained name for compatibility
 
 
 class _GuardedRunner:
-    """TaskRunner wrapper that enforces passive mission constraints."""
+    """TaskRunner wrapper that enforces passive constraints and a wall-clock deadline."""
 
-    def __init__(self, inner, passive: bool):
+    def __init__(self, inner, passive: bool, deadline: float = 0.0):
         self._inner = inner
         self._passive = passive
+        self._deadline = deadline
 
     def __getattr__(self, name):
         return getattr(self._inner, name)
 
     def run_command(self, command, **kwargs):
+        from core.task_runner import CommandResult
         if self._passive and _passive_violation(command or ""):
-            from core.task_runner import CommandResult
             return CommandResult(
                 command=command,
                 returncode=1,
@@ -682,18 +683,25 @@ class _GuardedRunner:
                 duration=0.0,
                 supervisor_notes=["mission-constraint"],
             )
+        if self._deadline:
+            remaining = self._deadline - time.time()
+            if remaining <= 0:
+                return CommandResult(
+                    command=command, returncode=1,
+                    output="[TIME LIMIT] The task deadline was reached before this command could run.",
+                    duration=0.0, supervisor_notes=["time-limit"],
+                )
+            requested = kwargs.get("timeout")
+            kwargs["timeout"] = min(requested, remaining) if requested else remaining
         return self._inner.run_command(command, **kwargs)
 
 
-def _apply_mission_guard(router, passive: bool) -> None:
+def _apply_mission_guard(router, passive: bool, deadline: float = 0.0) -> None:
     inner = getattr(router, "_orig_task_runner", None)
     if inner is None:
         inner = router.task_runner
         setattr(router, "_orig_task_runner", inner)
-    if passive:
-        router.task_runner = _GuardedRunner(inner, True)
-    else:
-        router.task_runner = inner
+    router.task_runner = _GuardedRunner(inner, passive, deadline)
 
 
 def _mission_constraints(text: str) -> str:
@@ -1424,6 +1432,73 @@ def _cleanup_temp_artifacts(changes: List[Dict[str, Any]], user_text: str, work_
     return removed
 
 
+def _looks_like_code_dump(text: str) -> bool:
+    t = (text or "").strip()
+    if not t:
+        return False
+    if t.startswith(("```", "FILE:", "COMMAND:")):
+        return True
+    punct = sum(t.count(ch) for ch in "{}[]<>=")
+    words = len(re.findall(r"[A-Za-z]{3,}", t))
+    if punct > 12 and punct > words * 0.35:
+        return True
+    if re.search(r"for\s+\w+,\s*\w+\s+in\s+\[|\}\s*if\s+|\bdef\s+\w+\(", t):
+        return True
+    return False
+
+
+
+def _final_summary(objective: str, draft: str, parts, hidden: List[str]) -> str:
+    """LLM-written closing report so every task ends like a professional summary."""
+    from core.model_manager import ModelManager
+    mm = ModelManager()
+    mm.set_effort("high")
+    client, model = mm.get_client()
+
+    lines: List[str] = []
+    for p in parts:
+        if p.get("type") != "tool":
+            continue
+        if p.get("tool") == "edit":
+            name = str(p.get("args", {}).get("path", "")).rsplit("/", 1)[-1]
+            action = p.get("args", {}).get("action", "updated")
+            lines.append(f"- FILE {action}: {name}")
+        elif p.get("tool") == "shell":
+            cmd = str(p.get("args", {}).get("cmd", ""))[:120]
+            out = (p.get("output") or "").strip().replace("\n", " ")[:200]
+            ok = "ok" if p.get("ok") else "failed"
+            lines.append(f"- CMD ({ok}): {cmd} -> {out}")
+        if len(lines) >= 25:
+            break
+    evidence = "\n".join(lines) or "(no actions)"
+    hidden_txt = "\n".join(hidden[:12])[:2500]
+
+    sys_prompt = (
+        "You are SOM-SCAN writing the final report of an operation for the operator. "
+        "Use ONLY the evidence provided. Do not invent results. Do not include code. "
+        "Format in clean markdown: a short title (##), a bold 'Bottom line' paragraph, "
+        "then short sections with **bold headings** and bullets, then verification, then next steps. "
+        "If something failed or was blocked, say it plainly. End with what the operator can do next."
+    )
+    user = (
+        f"OBJECTIVE:\n{objective[:800]}\n\n"
+        f"ACTIONS / EVIDENCE:\n{evidence}\n\n"
+        f"HIDDEN ENGINE ACTIVITY / FINDINGS:\n{hidden_txt}\n\n"
+        f"DRAFT ANSWER TO IMPROVE:\n{(draft or '')[:3000]}"
+    )
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "system", "content": sys_prompt},
+                      {"role": "user", "content": user}],
+            max_tokens=1200,
+            temperature=0.2,
+        )
+        txt = (resp.choices[0].message.content or "").strip()
+        return txt
+    except Exception:
+        return ""
+
 def _strip_code_blocks(text: str) -> str:
     if not text:
         return ""
@@ -1567,7 +1642,10 @@ GUI_TRANSPORT = (
     "4) Do not create files unless the task requires them. Temporary helper scripts are allowed but MUST be "
     "deleted before you finish. Never mutate an existing file with sed -i, echo >, or shell redirects — "
     "read it and rewrite it with FILE: <path>|<complete updated content>.\n"
-    "5) Verify with the real output, adapt on failure, and report only what was verified.\n"
+    "5) Verify with the real output, adapt on failure, and report only what was verified. "
+    "Shell is /bin/sh (POSIX dash): no bashisms, no process substitution <(...), no arrays — "
+    "write a Python script with FILE: for complex logic. If a host is unreachable or blocked twice, "
+    "report the limitation instead of retrying forever.\n"
     "6) The device may contain many projects. Work on exactly ONE artifact that best matches the request; "
     "do not inspect, modify, or download assets from other projects. Locate with a few real commands "
     "(never blind loops), then act. Do not run an assessment unless the operator asked for one.\n\n"
@@ -1744,6 +1822,9 @@ async def _agent_stream(body: ChatBody, request: Request):
         status = "thinking"
         started = time.time()
         aborted = False
+        hidden_activity: List[str] = []
+        stop_reason: Optional[str] = None
+        deadline_hit = False
         failures: List[Dict[str, str]] = []
         retried: set = set()
         retry_rounds = 0
@@ -1826,7 +1907,7 @@ async def _agent_stream(body: ChatBody, request: Request):
         ))
         passive_mission = bool(PASSIVE_RE.search(text or ""))
         try:
-            _apply_mission_guard(router, passive_mission)
+            _apply_mission_guard(router, passive_mission, started + MAX_AGENT_SECONDS)
         except Exception:
             pass
         if local_task:
@@ -1839,16 +1920,29 @@ async def _agent_stream(body: ChatBody, request: Request):
         followups = 0
         limit_hit = False
 
+        async def _deadline_task():
+            nonlocal deadline_hit
+            await asyncio.sleep(MAX_AGENT_SECONDS)
+            deadline_hit = True
+            try:
+                router.cancel()
+            except Exception:
+                pass
+
+        deadline_task = asyncio.create_task(_deadline_task())
+
         while True:
             router.dispatch(prompt)
             terminal = False
             while not terminal:
                 if len(tools) >= MAX_AGENT_ACTIONS or (time.time() - started) > MAX_AGENT_SECONDS:
+                    stop_reason = ("action limit" if len(tools) >= MAX_AGENT_ACTIONS else "time limit")
+                    aborted = True
                     add_note(
-                        f"Stopped: reached the {'action' if len(tools) >= MAX_AGENT_ACTIONS else 'time'} limit "
-                        f"({len(tools)} actions, {int(time.time() - started)}s)."
+                        f"Task stopped: reached the {stop_reason} "
+                        f"({len(tools)} actions, {int(time.time() - started)}s) before completion."
                     )
-                    yield _sse({"type": "status", "status": "READY"})
+                    yield _sse({"type": "status", "status": "LIMIT"})
                     try:
                         router.cancel()
                     except Exception:
@@ -1893,8 +1987,7 @@ async def _agent_stream(body: ChatBody, request: Request):
                                     "language": last.get("language", ""),
                                     "content": last["output"]})
                     elif _is_event_note(txt) and not _has_dsml(txt):
-                        add_note(txt)
-                        yield _sse({"type": "note", "text": txt})
+                        hidden_activity.append(txt[:1000])
 
                 elif name == "CommandStartEvent":
                     call_id = _uid()
@@ -1960,8 +2053,7 @@ async def _agent_stream(body: ChatBody, request: Request):
                     sev = getattr(ev, "severity", "info")
                     ttl = getattr(ev, "title", "")
                     evid = getattr(ev, "evidence", "")
-                    add_note(f"**[{sev}] {ttl}**\n\n```\n{evid[:1200]}\n```")
-                    yield _sse({"type": "note", "text": f"**[{sev}] {ttl}**"})
+                    hidden_activity.append(f"[{sev}] {ttl}: {evid[:800]}")
 
                 elif name == "StatusChangeEvent":
                     st = getattr(ev, "status", "") or ""
@@ -1971,6 +2063,7 @@ async def _agent_stream(body: ChatBody, request: Request):
 
                 elif name == "TaskCancelledEvent":
                     aborted = True
+                    stop_reason = stop_reason or ("time limit" if deadline_hit else "operator stop")
                     yield _sse({"type": "status", "status": "CANCELLED"})
                     terminal = True
 
@@ -1985,6 +2078,7 @@ async def _agent_stream(body: ChatBody, request: Request):
 
             if _cancel_requested(body.thread_id):
                 aborted = True
+                stop_reason = stop_reason or ("time limit" if deadline_hit else "operator stop")
                 for part in parts:
                     if part.get("type") == "tool" and part.get("status") == "running":
                         part["status"] = "cancelled"
@@ -2132,6 +2226,10 @@ async def _agent_stream(body: ChatBody, request: Request):
                     yield _sse({"type": "error", "message": f"write failed: {e}"})
                 last_reply = re.split(r"FILE:\s*[^\s|`]+\s*\|", last_reply, maxsplit=1)[0]
 
+        try:
+            deadline_task.cancel()
+        except Exception:
+            pass
         if holder is not None:
             holder["cb"] = None
         try:
@@ -2206,12 +2304,44 @@ async def _agent_stream(body: ChatBody, request: Request):
             add_note(f"Cleaned up {len(vanished)} temporary file(s) created for this task.")
 
         has_edit = any(p.get("type") == "tool" and p.get("tool") == "edit" for p in parts)
+        if stop_reason:
+            fails = [t for t in tools if t.get("ok") is False]
+            lines = [f"**Task not completed — {stop_reason}.**", "",
+                     f"Ran **{len(tools)}** action(s) before it stopped."]
+            if has_edit:
+                edits = [p for p in parts if p.get("type") == "tool" and p.get("tool") == "edit"]
+                lines.append("")
+                lines.append("**Files touched:**")
+                for e in edits[:6]:
+                    name = str(e.get("args", {}).get("path", "")).rsplit("/", 1)[-1]
+                    lines.append(f"- `{name}`")
+            if fails:
+                lines.append("")
+                lines.append("**Last failures:**")
+                for f in fails[-3:]:
+                    cmd = str(f.get("args", {}).get("cmd", ""))[:100]
+                    lines.append(f"- `{cmd}`")
+            lines.append("")
+            lines.append("Ask the operator whether to continue with a narrower step.")
+            last_reply = "\n".join(lines)
         last_reply = _strip_code_blocks(last_reply)
         last_reply = _agent_answer_cleanup(last_reply, has_edit or bool(tools))
         tools = [
             {"tool": p.get("tool"), "args": p.get("args", {}), "ok": p.get("ok")}
             for p in parts if p.get("type") == "tool"
         ]
+        if not stop_reason and (len(tools) >= 2 or _looks_like_code_dump(last_reply)):
+            try:
+                summary = await asyncio.wait_for(
+                    asyncio.to_thread(_final_summary, text or "", last_reply, parts, hidden_activity),
+                    timeout=90,
+                )
+                if summary:
+                    last_reply = summary
+            except Exception:
+                pass
+        if not stop_reason and _looks_like_code_dump(last_reply):
+            last_reply = _action_summary(parts) or _run_summary(parts)
         if not last_reply.strip():
             last_reply = _action_summary(parts)
 
@@ -2231,6 +2361,8 @@ async def _agent_stream(body: ChatBody, request: Request):
         visible = [p for p in parts if p.get("type") in ("note", "tool", "ask")]
 
         thought_text = _strip_code_blocks("\n\n".join(thoughts)).strip()
+        if hidden_activity:
+            thought_text = (thought_text + "\n\n" + "\n".join(hidden_activity)).strip()
         thought_part = None
         if thought_text:
             thought_part = {"type": "thought", "text": thought_text,
@@ -2253,6 +2385,7 @@ async def _agent_stream(body: ChatBody, request: Request):
                 "iterations": len(tools), "aborted": aborted,
                 "thought_ms": int(thought_ms),
                 "duration_ms": int((time.time() - started) * 1000),
+                "hidden_activity": hidden_activity[:60],
                 "session_id": getattr(router, "session_id", None)}
         assistant = _persist_message(body.thread_id, "assistant", content, ordered, [], meta)
         yield _sse({"type": "done", "message": assistant, "title": title})

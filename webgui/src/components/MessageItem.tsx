@@ -51,25 +51,66 @@ function short(p: string): string {
   return name.length > 34 ? name.slice(0, 31) + '…' : name
 }
 
+const RUNNING_MAP: Array<[string, string]> = [
+  ['Ran shell command', 'Running shell'],
+  ['Read ', 'Reading '],
+  ['Listed files', 'Listing files'],
+  ['Searched filesystem', 'Searching filesystem'],
+  ['Searched files', 'Searching files'],
+  ['Analyzed ', 'Analyzing '],
+  ['Fetched URL', 'Fetching URL'],
+  ['Created directory', 'Creating directory'],
+  ['Created file', 'Creating file'],
+  ['Copied files', 'Copying files'],
+  ['Moved files', 'Moving files'],
+  ['Removed files', 'Removing files'],
+  ['Changed permissions', 'Changing permissions'],
+  ['Changed ownership', 'Changing ownership'],
+  ['Ran git ', 'Running git '],
+  ['Ran script', 'Running script'],
+  ['Compiled project', 'Compiling project'],
+  ['Started scan', 'Scanning'],
+  ['Wrote ', 'Writing '],
+  ['Searched the web', 'Searching the web'],
+]
+const PAST_MAP: Array<[string, string]> = [
+  ['Ran shell command', 'Ran shell'],
+]
+
+function toRunning(title: string): string {
+  for (const [a, b] of RUNNING_MAP) if (title.startsWith(a)) return b + title.slice(a.length)
+  if (title.startsWith('Ran ')) return 'Running ' + title.slice(4)
+  return title
+}
+
+function toPast(title: string): string {
+  for (const [a, b] of PAST_MAP) if (title.startsWith(a)) return b + title.slice(a.length)
+  return title
+}
+
 function toolLabel(part: ToolPart): { title: string; detail: string; icon: typeof Terminal } {
+  const running = part.status === 'running'
   if (part.tool === 'shell') {
     const { title, detail } = shellLabel(String(part.args.cmd ?? ''))
-    return { title, detail, icon: Terminal }
+    return { title: running ? toRunning(title) : toPast(title), detail, icon: Terminal }
   }
   if (part.tool === 'edit') {
     const isNew = String(part.args.action ?? '') === 'created'
+    const name = short(String(part.args.path ?? 'file'))
     return {
-      title: `${isNew ? 'Created' : 'Edited'} ${short(String(part.args.path ?? 'file'))}`,
+      title: running
+        ? `${isNew ? 'Creating' : 'Editing'} ${name}`
+        : `${isNew ? 'Created' : 'Edited'} ${name}`,
       detail: '',
       icon: isNew ? FilePlus2 : FilePen,
     }
   }
-  if (part.tool === 'fetch') return { title: 'Fetched URL', detail: String(part.args.url ?? ''), icon: Globe }
-  if (part.tool === 'read') return { title: `Read ${short(String(part.args.path ?? ''))}`, detail: '', icon: FileText }
-  if (part.tool === 'write') return { title: `Wrote ${short(String(part.args.path ?? ''))}`, detail: '', icon: PenLine }
-  if (part.tool === 'list') return { title: 'Listed files', detail: String(part.args.path ?? ''), icon: FolderOpen }
-  if (part.tool === 'web_search') return { title: 'Searched the web', detail: String(part.args.query ?? ''), icon: Search }
-  if (part.tool === 'scan') return { title: 'Started scan', detail: String(part.args.target ?? ''), icon: Radar }
+  if (part.tool === 'fetch') return { title: running ? 'Fetching URL' : 'Fetched URL', detail: String(part.args.url ?? ''), icon: Globe }
+  if (part.tool === 'read') return { title: `${running ? 'Reading' : 'Read'} ${short(String(part.args.path ?? ''))}`, detail: '', icon: FileText }
+  if (part.tool === 'write') return { title: `${running ? 'Writing' : 'Wrote'} ${short(String(part.args.path ?? ''))}`, detail: '', icon: PenLine }
+  if (part.tool === 'list') return { title: running ? 'Listing files' : 'Listed files', detail: String(part.args.path ?? ''), icon: FolderOpen }
+  if (part.tool === 'web_search') return { title: running ? 'Searching the web' : 'Searched the web', detail: String(part.args.query ?? ''), icon: Search }
+  if (part.tool === 'scan') return { title: running ? 'Scanning' : 'Started scan', detail: String(part.args.target ?? ''), icon: Radar }
   if (part.tool === 'finish') return { title: 'Finished', detail: '', icon: CheckCheck }
   return { title: part.tool, detail: '', icon: Wrench }
 }
@@ -301,9 +342,10 @@ function Footer({ m, actions }: { m: Message; actions: number }) {
     )
   }
 
-  const stopped = Boolean(m.meta?.aborted)
+  const stopped = Boolean(m.meta?.aborted || m.meta?.stop_reason)
+  const stopReason = m.meta?.stop_reason ? ` (${String(m.meta.stop_reason)})` : ''
   const bits: string[] = [stopped
-    ? `Stopped after ${totalSecs > 0.2 ? totalSecs.toFixed(1) : Math.max(0.1, elapsed).toFixed(1)}s`
+    ? `Stopped after ${totalSecs > 0.2 ? totalSecs.toFixed(1) : Math.max(0.1, elapsed).toFixed(1)}s${stopReason}`
     : `Worked ${totalSecs > 0.2 ? totalSecs.toFixed(1) : Math.max(0.1, elapsed).toFixed(1)}s`]
   if (actions > 0) bits.push(`${actions} action${actions === 1 ? '' : 's'}`)
   return <div className="mt-2 text-[11px] text-faint">{bits.join(' · ')}</div>
@@ -363,27 +405,9 @@ export function MessageItem({ m, showThinking }: { m: Message; showThinking: boo
           </svg>
         </span>
         <span className="text-[11.5px] font-medium text-muted">SOM-SCAN</span>
-        {!m.streaming && (
-          <span className={`rounded-full border px-1.5 py-0 text-[9px] uppercase tracking-wide ${
-            m.meta?.aborted
-              ? 'border-amber/40 text-amber'
-              : 'border-mint/30 text-mint/90'
-          }`}>
-            {m.meta?.aborted ? 'stopped' : 'done'}
-          </span>
-        )}
       </div>
 
       <div className="pl-7">
-        {!m.streaming && Boolean(m.meta?.objective) && (
-          <div className="mb-2 rounded-lg border border-line bg-panel2/40 px-3 py-2">
-            <div className="text-[9.5px] font-semibold uppercase tracking-[0.14em] text-faint">Objective</div>
-            <div className="mt-0.5 line-clamp-2 text-[11.5px] leading-snug text-muted">
-              {String(m.meta.objective)}
-            </div>
-          </div>
-        )}
-
         {parts.map((p, i) => {
           if (p.type === 'tool') {
             if (collapse && i < firstShownAction) return null
