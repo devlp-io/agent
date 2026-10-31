@@ -90,8 +90,8 @@ DB_PATH = DATA_DIR / "gui.db"
 MAX_UPLOAD_BYTES = int(os.environ.get("AG_GUI_MAX_UPLOAD", 64 * 1024 * 1024))
 TOOL_OUTPUT_LIMIT = 40_000
 MAX_TOOL_ITERS = 12
-MAX_AGENT_ACTIONS = int(os.environ.get("AG_GUI_MAX_ACTIONS", "40"))
-MAX_AGENT_SECONDS = int(os.environ.get("AG_GUI_MAX_SECONDS", "420"))
+MAX_AGENT_ACTIONS = int(os.environ.get("AG_GUI_MAX_ACTIONS", "0"))
+MAX_AGENT_SECONDS = int(os.environ.get("AG_GUI_MAX_SECONDS", "0"))
 
 
 def _db() -> sqlite3.Connection:
@@ -1956,7 +1956,7 @@ async def _agent_stream(body: ChatBody, request: Request):
         ))
         passive_mission = bool(PASSIVE_RE.search(text or ""))
         try:
-            _apply_mission_guard(router, passive_mission, started + MAX_AGENT_SECONDS)
+            _apply_mission_guard(router, passive_mission, started + MAX_AGENT_SECONDS if MAX_AGENT_SECONDS else 0.0)
         except Exception:
             pass
         if local_task:
@@ -1978,16 +1978,17 @@ async def _agent_stream(body: ChatBody, request: Request):
             except Exception:
                 pass
 
-        deadline_task = asyncio.create_task(_deadline_task())
+        deadline_task = asyncio.create_task(_deadline_task()) if MAX_AGENT_SECONDS else None
 
         while True:
             router.dispatch(prompt)
             terminal = False
             while not terminal:
-                if len(tools) >= MAX_AGENT_ACTIONS or (time.time() - started) > MAX_AGENT_SECONDS:
+                if ((MAX_AGENT_ACTIONS and len(tools) >= MAX_AGENT_ACTIONS)
+                        or (MAX_AGENT_SECONDS and (time.time() - started) > MAX_AGENT_SECONDS)):
                     stop_reason = ("action limit" if len(tools) >= MAX_AGENT_ACTIONS else "time limit")
                     aborted = True
-                    add_note(
+                    hidden_activity.append(
                         f"Task stopped: reached the {stop_reason} "
                         f"({len(tools)} actions, {int(time.time() - started)}s) before completion."
                     )
@@ -2133,7 +2134,8 @@ async def _agent_stream(body: ChatBody, request: Request):
                         part["status"] = "cancelled"
                         part["ok"] = False
                         part["output"] = (part.get("output") or "") + "\n[cancelled by operator]"
-                parts.append({"type": "note", "text": "Stopped by operator."})
+                if stop_reason == "operator stop":
+                    parts.append({"type": "note", "text": "Stopped by operator."})
                 break
             if limit_hit:
                 break
@@ -2275,10 +2277,11 @@ async def _agent_stream(body: ChatBody, request: Request):
                     yield _sse({"type": "error", "message": f"write failed: {e}"})
                 last_reply = re.split(r"FILE:\s*[^\s|`]+\s*\|", last_reply, maxsplit=1)[0]
 
-        try:
-            deadline_task.cancel()
-        except Exception:
-            pass
+        if deadline_task is not None:
+            try:
+                deadline_task.cancel()
+            except Exception:
+                pass
         if holder is not None:
             holder["cb"] = None
         try:
@@ -2371,7 +2374,7 @@ async def _agent_stream(body: ChatBody, request: Request):
                     cmd = str(f.get("args", {}).get("cmd", ""))[:100]
                     lines.append(f"- `{cmd}`")
             lines.append("")
-            lines.append("Ask the operator whether to continue with a narrower step.")
+            lines.append("Continue in this chat to resume.")
             last_reply = "\n".join(lines)
         last_reply = _strip_code_blocks(last_reply)
         last_reply = _agent_answer_cleanup(last_reply, has_edit or bool(tools))
@@ -2400,7 +2403,9 @@ async def _agent_stream(body: ChatBody, request: Request):
                     part["status"] = "cancelled"
                     part["ok"] = False
                     part["output"] = (part.get("output") or "") + "\n[cancelled by operator]"
-            if not any(p.get("type") == "note" and p.get("text") == "Stopped by operator." for p in parts):
+            if stop_reason == "operator stop" and not any(
+                p.get("type") == "note" and p.get("text") == "Stopped by operator." for p in parts
+            ):
                 add_note("Stopped by operator.")
 
         for part in parts:
