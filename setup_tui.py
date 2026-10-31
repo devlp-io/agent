@@ -22,6 +22,8 @@ import platform
 import shutil
 import subprocess
 import sys
+import threading
+import queue
 import time
 
 ROOT = pathlib.Path(__file__).resolve().parent
@@ -41,8 +43,20 @@ TTY = sys.stdout.isatty() and os.environ.get("NO_COLOR", "") == ""
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
-def panel_line(text: str, width: int = 58) -> None:
+def term_width() -> int:
+    try:
+        cols = shutil.get_terminal_size((80, 24)).columns
+    except Exception:
+        cols = 80
+    return max(36, min(58, cols - 2))
+
+
+def panel_line(text: str, width: int | None = None) -> None:
+    width = width or term_width()
     visible = ANSI_RE.sub("", text)
+    if len(visible) > width - 2:
+        text = text[: max(0, width - 5)] + "…"
+        visible = ANSI_RE.sub("", text)
     pad = max(0, width - len(visible) - 2)
     print(cyan("│") + "  " + text + " " * pad + cyan("│"))
 
@@ -111,23 +125,24 @@ def line(kind: str, text: str) -> None:
 
 def header() -> None:
     title = "SOM-SCAN  ·  SETUP"
+    width = term_width()
     if TTY:
         print()
-        print(cyan("╭" + "─" * 58 + "╮"))
+        print(cyan("╭" + "─" * width + "╮"))
         panel_line(bold(title))
-        print(cyan("├" + "─" * 58 + "┤"))
+        print(cyan("├" + "─" * width + "┤"))
         panel_line(f"{'platform':<10} {platform.system().lower()}"
                    + (" / termux" if termux() else ""))
         panel_line(f"{'python':<10} {sys.version.split()[0]}  ({sys.executable})")
         panel_line(f"{'env':<10} {VENV}")
-        print(cyan("╰" + "─" * 58 + "╯"))
+        print(cyan("╰" + "─" * width + "╯"))
     else:
         print(f"\n{title}\nplatform: {platform.system().lower()}\n"
               f"python: {sys.version.split()[0]}\nenv: {VENV}\n")
 
 
 def run_cmd(cmd: list[str], label: str, timeout: int | None = None) -> tuple[bool, str]:
-    """Run a command with a spinner, return (ok, captured output)."""
+    """Run a command with a live spinner, elapsed time, and latest output line."""
     if not TTY:
         print(f"  › {label}…")
         try:
@@ -139,25 +154,70 @@ def run_cmd(cmd: list[str], label: str, timeout: int | None = None) -> tuple[boo
     frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
     try:
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                             text=True, errors="replace")
+                             text=True, errors="replace", bufsize=1)
     except Exception as e:
         return False, str(e)
-    out: list[str] = []
+
+    lines: list[str] = []
+    q: "queue.Queue[str | None]" = queue.Queue()
+    eof = [False]
+
+    def reader():
+        try:
+            for ln in iter(p.stdout.readline, ""):
+                if ln:
+                    q.put(ln)
+        finally:
+            eof[0] = True
+            q.put(None)
+
+    threading.Thread(target=reader, daemon=True).start()
+    start = time.time()
+    last = ""
     i = 0
-    while p.poll() is None:
-        if p.stdout is not None:
-            chunk = p.stdout.readline()
-            if chunk:
-                out.append(chunk)
-        sys.stdout.write(f"\r  {cyan(frames[i % len(frames)])} {label}… ")
+    width = max(30, term_width() - 3)
+    while True:
+        while True:
+            try:
+                item = q.get_nowait()
+            except queue.Empty:
+                break
+            if item is None:
+                eof[0] = True
+                continue
+            lines.append(item)
+            clean = item.strip()
+            if clean and not clean.startswith(("Requirement already", "Using cached")):
+                last = clean
+        elapsed = int(time.time() - start)
+        status = f"  {frames[i % len(frames)]} {label}… {elapsed}s"
+        if last:
+            room = max(10, width - len(label) - 14)
+            status += "  " + (last[:room] + "…" if len(last) > room else last)
+        sys.stdout.write("\r\033[K" + status)
         sys.stdout.flush()
         i += 1
-        time.sleep(0.08)
-    rest = p.stdout.read() if p.stdout is not None else ""
-    if rest:
-        out.append(rest)
-    sys.stdout.write("\r" + " " * (len(label) + 10) + "\r")
-    return p.returncode == 0, "".join(out)
+        if p.poll() is not None and eof[0] and q.empty():
+            break
+        if timeout and (time.time() - start) > timeout:
+            try:
+                p.terminate()
+            except Exception:
+                pass
+            break
+        time.sleep(0.1)
+
+    rc = p.wait()
+    while True:
+        try:
+            item = q.get_nowait()
+        except queue.Empty:
+            break
+        if item:
+            lines.append(item)
+    sys.stdout.write("\r\033[K")
+    sys.stdout.flush()
+    return rc == 0, "".join(lines)
 
 
 def imports_ok(py: pathlib.Path, modules: list[str]) -> tuple[bool, str]:
@@ -304,10 +364,11 @@ def run_setup(argv: list[str]) -> int:
         pass
 
     if TTY:
-        print(cyan("╭" + "─" * 58 + "╮"))
+        width = term_width()
+        print(cyan("╭" + "─" * width + "╮"))
         panel_line(f"{green('READY')}  run {bold('somscan')} from any directory")
         panel_line(f"web console: {bold('somscan gui')}")
-        print(cyan("╰" + "─" * 58 + "╯"))
+        print(cyan("╰" + "─" * width + "╯"))
     else:
         print("\nREADY — run: somscan\n")
     return 0
