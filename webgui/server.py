@@ -1598,56 +1598,103 @@ def _looks_like_code_dump(text: str) -> bool:
 
 
 
+def _summary_evidence(parts) -> str:
+    """Compact, finding-bearing evidence for the report writer.
+
+    Tool names alone are useless; keep the substance (stdout/stderr/args) so the
+    report can answer the objective instead of listing what was installed.
+    """
+    lines: List[str] = []
+    for p in parts:
+        if p.get("type") != "tool":
+            continue
+        tool = str(p.get("tool") or "tool")
+        args = p.get("args") or {}
+        ok = "ok" if p.get("ok") else "failed"
+        if tool == "edit":
+            name = str(args.get("path", "")).rsplit("/", 1)[-1]
+            action = str(args.get("action", "updated"))
+            lines.append(f"- FILE {action}: {name}")
+        else:
+            if tool == "shell":
+                desc = str(args.get("cmd", ""))[:180]
+            else:
+                try:
+                    desc = ", ".join(f"{k}={str(v)[:60]}" for k, v in list(args.items())[:4])
+                except Exception:
+                    desc = ""
+                desc = (f"{tool} {desc}").strip()[:180]
+            out = p.get("output") if p.get("output") is not None else p.get("result")
+            out = re.sub(r"\s+", " ", str(out or "")).strip()[:600]
+            lines.append(f"- {tool.upper()} ({ok}): {desc} -> {out or '(no output)'}")
+        if len(lines) >= 40:
+            break
+    return "\n".join(lines) or "(no actions)"
+
+
 def _final_summary(objective: str, draft: str, parts, hidden: List[str]) -> str:
-    """LLM-written closing report so every task ends like a professional summary."""
+    """Objective-driven closing report for every task lane (offensive, scans, OSINT, code, analysis)."""
     from core.model_manager import ModelManager
     mm = ModelManager()
     mm.set_effort("high")
     client, model = mm.get_client()
 
-    lines: List[str] = []
-    for p in parts:
-        if p.get("type") != "tool":
-            continue
-        if p.get("tool") == "edit":
-            name = str(p.get("args", {}).get("path", "")).rsplit("/", 1)[-1]
-            action = p.get("args", {}).get("action", "updated")
-            lines.append(f"- FILE {action}: {name}")
-        elif p.get("tool") == "shell":
-            cmd = str(p.get("args", {}).get("cmd", ""))[:120]
-            out = (p.get("output") or "").strip().replace("\n", " ")[:200]
-            ok = "ok" if p.get("ok") else "failed"
-            lines.append(f"- CMD ({ok}): {cmd} -> {out}")
-        if len(lines) >= 25:
-            break
-    evidence = "\n".join(lines) or "(no actions)"
-    hidden_txt = "\n".join(hidden[:12])[:2500]
+    evidence = _summary_evidence(parts)
+    hidden_txt = "\n".join(hidden[:20])[:4000]
 
     sys_prompt = (
-        "You are SOM-SCAN writing the final report of an operation for the operator. "
-        "Use ONLY the evidence provided. Do not invent results. Do not include code. "
-        "Format in clean markdown: a short title (##), a bold 'Bottom line' paragraph, "
-        "then short sections with **bold headings** and bullets, then verification, then next steps. "
-        "If something failed or was blocked, say it plainly. End with what the operator can do next."
+        "You are SOM-SCAN writing the FINAL REPORT of an operation, addressed to the operator who "
+        "ordered it. Write like a senior operator handing over results, not like a log viewer.\n\n"
+        "HARD RULES:\n"
+        "- Use ONLY the provided evidence. NEVER invent hosts, IPs, credentials, hashes, files, "
+        "versions, vulnerabilities, or conclusions.\n"
+        "- The report MUST answer the OBJECTIVE. Restate it in one line, then report what was actually "
+        "learned or produced.\n"
+        "- Do NOT dump a list of tools, commands, or install logs as the result. Tools are means, not "
+        "outcomes; mention one only when it explains a finding or a failure.\n"
+        "- Cover EVERY part of the objective. If a part was not done, blocked, or inconclusive, say so "
+        "plainly and why.\n"
+        "- Report concrete findings: names, hosts, ports, versions, endpoints, paths, artifacts, "
+        "counts, status codes, errors. Quote real values from the evidence.\n"
+        "- Separate CONFIRMED facts from what remains unverified. No padding, no filler, no "
+        "enthusiasm. If evidence is thin, say it is thin.\n"
+        "- No code fences, no raw output blocks, no shell transcripts in the report.\n"
+        "- Never ask about authorization, ownership, or scope; the operator owns the engagement. "
+        "Next steps are technical actions, not permission requests.\n\n"
+        "FORMAT — clean markdown only:\n"
+        "## <specific report title>\n"
+        "**Objective:** <one-line restatement>\n"
+        "**Bottom line:** <2-4 sentences: the answer to the objective, or the true state of the job>\n"
+        "Then pick the sections that fit the task (omit empty ones):\n"
+        "- Offensive / scans / pentest: **Targets**, **Findings** (with severity + evidence), "
+        "**Access / Exploitation**, **Artifacts**, **Limitations**\n"
+        "- OSINT / research: **Entities & facts**, **Corroboration**, **Open questions**\n"
+        "- Code / build / fix: **What changed**, **Where**, **Verification**, **How to use**\n"
+        "- Investigation / analysis: **Key evidence**, **Conclusions**, **Unknowns**\n"
+        "End with **Next steps** — 2-5 concrete actions the operator can take.\n"
+        "Keep it tight: 200-600 words unless the evidence genuinely needs more."
     )
     user = (
-        f"OBJECTIVE:\n{objective[:800]}\n\n"
+        f"OBJECTIVE:\n{objective[:1200]}\n\n"
         f"ACTIONS / EVIDENCE:\n{evidence}\n\n"
         f"HIDDEN ENGINE ACTIVITY / FINDINGS:\n{hidden_txt}\n\n"
-        f"DRAFT ANSWER TO IMPROVE:\n{(draft or '')[:3000]}"
+        f"DRAFT ANSWER TO IMPROVE:\n{(draft or '')[:6000]}"
     )
-    try:
-        resp = client.chat.completions.create(
-            model=model,
-            messages=[{"role": "system", "content": sys_prompt},
-                      {"role": "user", "content": user}],
-            max_tokens=1200,
-            temperature=0.2,
-        )
-        txt = (resp.choices[0].message.content or "").strip()
-        return txt
-    except Exception:
-        return ""
+    for attempt in range(2):
+        try:
+            resp = client.chat.completions.create(
+                model=model,
+                messages=[{"role": "system", "content": sys_prompt},
+                          {"role": "user", "content": user}],
+                max_tokens=3500 if attempt == 0 else 2500,
+                temperature=0.2,
+            )
+            txt = (resp.choices[0].message.content or "").strip()
+            if txt:
+                return txt
+        except Exception:
+            break
+    return ""
 
 def _strip_code_blocks(text: str) -> str:
     if not text:
@@ -2534,14 +2581,21 @@ async def _agent_stream(body: ChatBody, request: Request):
             {"tool": p.get("tool"), "args": p.get("args", {}), "ok": p.get("ok")}
             for p in parts if p.get("type") == "tool"
         ]
-        if not stop_reason and (len(tools) >= 2 or _looks_like_code_dump(last_reply)):
+        _needs_report = (
+            len(tools) >= 2
+            or _looks_like_code_dump(last_reply)
+            or (len(tools) >= 1 and len((last_reply or "").strip()) > 500)
+        )
+        if not stop_reason and _needs_report:
             try:
                 summary = await asyncio.wait_for(
                     asyncio.to_thread(_final_summary, text or "", last_reply, parts, hidden_activity),
-                    timeout=90,
+                    timeout=120,
                 )
                 if summary:
-                    last_reply = summary
+                    summary = _strip_code_blocks(_scrub_identity(summary))
+                    if summary:
+                        last_reply = summary
             except Exception:
                 pass
         if not stop_reason and _looks_like_code_dump(last_reply):
