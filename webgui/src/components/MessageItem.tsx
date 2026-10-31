@@ -334,7 +334,6 @@ function Footer({ m, actions }: { m: Message; actions: number }) {
     const working = /RUNNING|WORKING/i.test(status)
     return (
       <div className="mt-2.5 flex items-center gap-1.5 text-[11.5px] text-faint">
-        <Loader2 size={12} className="spin-slow text-accent" />
         <span className="text-muted">{working ? 'Working' : 'Thinking'}</span>
         <Dots />
         <span className="ml-1 tabular-nums">{elapsed > 1 ? `${elapsed.toFixed(0)}s` : ''}</span>
