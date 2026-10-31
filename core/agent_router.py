@@ -658,8 +658,9 @@ class AgentRouter:
                     # Filter out machine directives so they never flash on the user's terminal
                     for char in chunk:
                         if char == "\n":
-                            if not is_suppressed_line and stream_line_buf:
-                                self.emit(AssistantChunkEvent(chunk=stream_line_buf + "\n"))
+                            if not is_suppressed_line:
+                                self.emit(AssistantChunkEvent(
+                                    chunk=(stream_line_buf + "\n") if stream_line_buf else "\n"))
                             stream_line_buf = ""
                             is_suppressed_line = False
                         else:

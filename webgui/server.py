@@ -1063,6 +1063,16 @@ def _generate_title(first_text: str, reply_hint: str = "") -> str:
     return title[:80]
 
 
+def _store_title(thread_id: str, title: str) -> None:
+    if not title:
+        return
+    try:
+        with _db() as c:
+            c.execute("UPDATE threads SET title=? WHERE id=?", (title[:80], thread_id))
+    except Exception:
+        pass
+
+
 def _slug(text: str, limit: int = 24) -> str:
     t = re.sub(r"[^a-zA-Z0-9]+", "-", (text or "").strip().lower()).strip("-")
     return (t[:limit].rstrip("-") or "session")
@@ -2348,6 +2358,12 @@ async def _agent_stream(body: ChatBody, request: Request):
             title_task = asyncio.create_task(asyncio.to_thread(
                 _generate_title, text or (atts[0]["filename"] if atts else ""), ""
             ))
+            def _title_done(t, _tid=body.thread_id):
+                try:
+                    _store_title(_tid, t.result())
+                except Exception:
+                    pass
+            title_task.add_done_callback(_title_done)
 
         parts: List[Dict[str, Any]] = []
         tools: List[Dict[str, Any]] = []
@@ -2358,6 +2374,9 @@ async def _agent_stream(body: ChatBody, request: Request):
         thought_ms = 0.0
         turn_start = time.time()
         turn_text: List[str] = []
+        streamed_visible: List[str] = []
+        stream_out: List[str] = []
+        last_stream_flush = [0.0]
         turn_reasoning: List[str] = []
         reasoning_since = None
         last_reply = ""
@@ -2406,7 +2425,8 @@ async def _agent_stream(body: ChatBody, request: Request):
                 "started": started, "thought_ms": int(thought_ms),
                 "duration_ms": int((now - started) * 1000),
             }
-            _message_update(live_id, last_reply or "", live_parts, meta)
+            live_text = last_reply or "".join(streamed_visible)
+            _message_update(live_id, live_text[-8000:], live_parts, meta)
 
         persist_live(True)
 
@@ -2590,7 +2610,16 @@ async def _agent_stream(body: ChatBody, request: Request):
                 name = type(ev).__name__
 
                 if name == "AssistantChunkEvent":
-                    turn_text.append(getattr(ev, "chunk", "") or "")
+                    chunk = getattr(ev, "chunk", "") or ""
+                    if chunk:
+                        turn_text.append(chunk)
+                        streamed_visible.append(chunk)
+                        stream_out.append(chunk)
+                        now = time.time()
+                        if len(stream_out) >= 24 or (now - last_stream_flush[0]) >= 0.05:
+                            yield _sse({"type": "delta", "text": "".join(stream_out)})
+                            stream_out.clear()
+                            last_stream_flush[0] = now
 
                 elif name == "AssistantMessageEvent":
                     txt = getattr(ev, "text", "") or ""
@@ -2703,6 +2732,10 @@ async def _agent_stream(body: ChatBody, request: Request):
                     yield _sse({"type": "error", "message": msg})
 
                 persist_live()
+                if name != "AssistantChunkEvent" and stream_out:
+                    yield _sse({"type": "delta", "text": "".join(stream_out)})
+                    stream_out.clear()
+                    last_stream_flush[0] = time.time()
 
             if _cancel_requested(body.thread_id):
                 aborted = True
@@ -2782,6 +2815,11 @@ async def _agent_stream(body: ChatBody, request: Request):
                 )
                 continue
             break
+
+        # flush any pending visible stream before the final report
+        if stream_out:
+            yield _sse({"type": "delta", "text": "".join(stream_out)})
+            stream_out.clear()
 
         # flush the trailing turn's thought budget
         if turn_text:
@@ -3045,13 +3083,12 @@ async def _agent_stream(body: ChatBody, request: Request):
         final_title = title
         if title_task is not None:
             try:
-                generated = await asyncio.wait_for(title_task, timeout=10)
+                generated = await asyncio.wait_for(asyncio.shield(title_task), timeout=1.2)
             except Exception:
                 generated = ""
             if generated:
                 final_title = generated
-                with _db() as c:
-                    c.execute("UPDATE threads SET title=? WHERE id=?", (generated, body.thread_id))
+                _store_title(body.thread_id, generated)
         _add_thread_usage(body.thread_id, usage_delta(_usage_base))
         yield _sse({"type": "done", "message": assistant, "title": final_title})
 
@@ -3144,6 +3181,12 @@ async def api_chat(body: ChatBody, request: Request):
             title_task = asyncio.create_task(asyncio.to_thread(
                 _generate_title, text or (atts[0]["filename"] if atts else ""), ""
             ))
+            def _title_done2(t, _tid=body.thread_id):
+                try:
+                    _store_title(_tid, t.result())
+                except Exception:
+                    pass
+            title_task.add_done_callback(_title_done2)
 
         try:
             await _compliance_gate(text or "review attached files: " + ", ".join(a.get("filename", "") for a in atts))
@@ -3367,13 +3410,12 @@ async def api_chat(body: ChatBody, request: Request):
         final_title = cur_title
         if needs_title and title_task is not None:
             try:
-                generated = await asyncio.wait_for(title_task, timeout=10)
+                generated = await asyncio.wait_for(asyncio.shield(title_task), timeout=1.2)
             except Exception:
                 generated = ""
             if generated:
                 final_title = generated
-                with _db() as c:
-                    c.execute("UPDATE threads SET title=? WHERE id=?", (generated, body.thread_id))
+                _store_title(body.thread_id, generated)
         _add_thread_usage(body.thread_id, usage_delta(_usage_base))
         yield _sse({"type": "done", "message": assistant, "title": final_title})
 
