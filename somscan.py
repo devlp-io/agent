@@ -22,8 +22,150 @@ try:
 except Exception:
     pass
 
-from tui import run_tui, _reset_terminal_state
 from core.version import get_full_version
+
+
+def _gui_home() -> pathlib.Path:
+    d = pathlib.Path.home() / ".somscan"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _gui_healthy(host: str, port: int, timeout: float = 0.6) -> bool:
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"http://{host}:{port}/api/v2/health", timeout=timeout) as r:
+            return 200 <= getattr(r, "status", 0) < 500
+    except Exception:
+        return False
+
+
+def _gui_pid() -> int | None:
+    try:
+        return int((_gui_home() / "gui.pid").read_text().strip())
+    except Exception:
+        return None
+
+
+def run_gui(args: list[str]) -> int:
+    """`somscan gui` — build if needed, start the web console detached, print the URL."""
+    import os
+    import shutil
+    import signal
+    import subprocess
+    import time
+    import webbrowser
+
+    host = "127.0.0.1"
+    port = int(os.environ.get("AG_GUI_PORT", "8788"))
+    open_browser = True
+    sub = args[0].lower() if args else ""
+    flags = args[1:] if sub in ("start", "run", "serve", "stop", "kill", "status") else args
+    it = iter(flags)
+    for a in it:
+        if a in ("--port", "-p"):
+            port = int(next(it))
+        elif a.startswith("--port="):
+            port = int(a.split("=", 1)[1])
+        elif a == "--host":
+            host = next(it)
+        elif a.startswith("--host="):
+            host = a.split("=", 1)[1]
+        elif a in ("--no-open", "-n"):
+            open_browser = False
+
+    if sub in ("stop", "kill"):
+        pid = _gui_pid()
+        if not pid:
+            print("[gui] no pid file — nothing to stop")
+            return 0
+        try:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(pid), "/F"], check=False,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                os.kill(pid, signal.SIGTERM)
+            print(f"[gui] stopped pid {pid}")
+        except Exception as e:
+            print(f"[gui] could not stop pid {pid}: {e}")
+        try:
+            (_gui_home() / "gui.pid").unlink()
+        except Exception:
+            pass
+        return 0
+
+    if sub == "status":
+        pid = _gui_pid()
+        alive = _gui_healthy(host, port)
+        print(f"[gui] {'running' if alive else 'not running'}"
+              + (f" · pid {pid}" if pid else "")
+              + f" · http://{host}:{port}/gui")
+        return 0 if alive else 1
+
+    bind = host
+    browse_host = "127.0.0.1" if bind in ("0.0.0.0", "::", "") else bind
+    if _gui_healthy(browse_host, port):
+        print(f"[gui] already running · http://{browse_host}:{port}/gui")
+        return 0
+
+    webgui = HERE / "webgui"
+    dist = webgui / "dist" / "index.html"
+    if not dist.exists():
+        npm = shutil.which("npm")
+        if not npm:
+            print("[gui] frontend not built and npm is missing.")
+            print("      Install Node 18+ then run: cd webgui && npm install && npm run build")
+            return 1
+        if not (webgui / "node_modules").exists():
+            print("[gui] installing frontend dependencies (first run)…")
+            r = subprocess.run([npm, "install"], cwd=str(webgui))
+            if r.returncode != 0:
+                print("[gui] npm install failed — check the output above")
+                return 1
+        print("[gui] building frontend (first run)…")
+        r = subprocess.run([npm, "run", "build"], cwd=str(webgui))
+        if r.returncode != 0 or not dist.exists():
+            print("[gui] build failed — check the output above")
+            return 1
+
+    log_path = _gui_home() / "gui.log"
+    log = open(log_path, "ab", buffering=0)
+    cmd = [sys.executable, str(webgui / "server.py"), "--host", bind, "--port", str(port)]
+    kwargs = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+    try:
+        proc = subprocess.Popen(
+            cmd, cwd=str(HERE), stdin=subprocess.DEVNULL, stdout=log, stderr=log, **kwargs
+        )
+    except Exception as e:
+        print(f"[gui] failed to start: {e}")
+        return 1
+    (_gui_home() / "gui.pid").write_text(str(proc.pid), encoding="utf-8")
+
+    ok = False
+    for _ in range(80):
+        if _gui_healthy(browse_host, port):
+            ok = True
+            break
+        if proc.poll() is not None:
+            break
+        time.sleep(0.25)
+
+    url = f"http://{browse_host}:{port}/gui"
+    if ok:
+        print(f"[gui] SOM-SCAN web console: {url}")
+        print(f"[gui] pid {proc.pid} · log {log_path}")
+        if open_browser:
+            try:
+                webbrowser.open(url)
+            except Exception:
+                pass
+        return 0
+    print(f"[gui] server did not become ready — see {log_path}")
+    return 1
 
 
 def run_headless(task_or_target: str, resume: bool = False):
@@ -102,8 +244,13 @@ def run_headless(task_or_target: str, resume: bool = False):
 
 
 def main():
+    _reset = None
     try:
         args = sys.argv[1:]
+
+        # Web console: somscan gui [start|stop|status] [--host H] [--port P] [--no-open]
+        if args and args[0].lower() == "gui":
+            raise SystemExit(run_gui(args[1:]))
 
         # Version flag
         if "-v" in args or "--version" in args:
@@ -142,6 +289,11 @@ def main():
                 headless = True
                 args.remove(hf)
 
+        # The terminal UI is only imported when actually needed, so `gui`,
+        # `--version`, and installer flags work without textual installed.
+        from tui import run_tui, _reset_terminal_state
+        _reset = _reset_terminal_state
+
         # Interactive TUI mode (default when typing `somscan` with no args)
         if not args:
             run_tui()
@@ -178,6 +330,7 @@ Usage:
   somscan -n, --headless <target> Launch direct non-interactive scan (headless/CLI stream)
   somscan --scan <target> -n      Direct non-interactive scan on target
   somscan --resume [-n]           Resume previous assessment (interactive or -n)
+  somscan gui [start|stop|status] Web console (background, prints URL)
   somscan -v, --version       Display current version
   somscan -h, --help          Show this help message
 
@@ -219,7 +372,8 @@ Inside SOM-SCAN TUI:
         print(f"\n[SOM-SCAN Error Boundary] Caught exception: {type(e).__name__}: {e}", file=sys.stderr)
         traceback.print_exc()
     finally:
-        _reset_terminal_state()
+        if _reset:
+            _reset()
 
 
 if __name__ == "__main__":

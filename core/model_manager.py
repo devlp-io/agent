@@ -6,6 +6,7 @@ import os
 import re
 import time
 import pathlib
+import threading
 from typing import Generator, List, Dict, Tuple, Optional
 from openai import OpenAI
 
@@ -21,19 +22,59 @@ except Exception:
     pass
 
 
+def _default_variants(model: str) -> List[Dict[str, str]]:
+    return [
+        {"key": "quick", "label": "Quick", "model": model, "effort": "low"},
+        {"key": "balanced", "label": "Balanced", "model": model, "effort": "high"},
+        {"key": "deep", "label": "Deep", "model": model, "effort": "max"},
+    ]
+
+
+def _parse_variants(raw: str, model: str) -> List[Dict[str, str]]:
+    """Parse `quick=Label~model~effort;balanced=...` into ordered variant dicts."""
+    if not raw:
+        return []
+    out: List[Dict[str, str]] = []
+    for chunk in raw.split(";"):
+        chunk = chunk.strip()
+        if not chunk or "=" not in chunk:
+            continue
+        key, rest = chunk.split("=", 1)
+        key = key.strip().lower()
+        if key not in ("quick", "balanced", "deep"):
+            continue
+        bits = rest.split("~")
+        label = (bits[0] or key.title()).strip()
+        v_model = (bits[1].strip() if len(bits) > 1 else "") or model
+        v_effort = (bits[2].strip() if len(bits) > 2 else "") or ""
+        out.append({"key": key, "label": label, "model": v_model, "effort": v_effort})
+    order = {"quick": 0, "balanced": 1, "deep": 2}
+    out.sort(key=lambda v: order.get(v["key"], 9))
+    return out
+
+
 class ModelConfig:
-    def __init__(self, name: str, model: str, base_url: str, key_var: str):
+    def __init__(self, name: str, model: str, base_url: str, key_var: str,
+                 variants: Optional[List[Dict[str, str]]] = None,
+                 price_in: float = 0.0, price_out: float = 0.0):
         self.name = name
         self.model = model
         self.base_url = base_url
         self.key_var = key_var
+        self.variants = variants or _default_variants(model)
+        self.price_in = float(price_in or 0.0)
+        self.price_out = float(price_out or 0.0)
 
     @property
     def api_key(self) -> str:
-        # Check AG_KEY first, then specific key_var, then DEEPSEEK_KEY for deepseek
+        # Provider-specific key only. DEEPSEEK_KEY and the generic AG_KEY are
+        # aliases for DeepSeek; other providers must set their own variable so
+        # a DeepSeek key never marks Gemini/OpenAI/etc. as configured.
         if self.key_var == "DEEPSEEK_KEY":
-            return os.environ.get("AG_KEY") or os.environ.get("DEEPSEEK_KEY") or ""
-        return os.environ.get(self.key_var) or os.environ.get("AG_KEY") or ""
+            return os.environ.get("DEEPSEEK_KEY") or os.environ.get("AG_KEY") or ""
+        if self.key_var == "AG_KEY":
+            return os.environ.get("AG_KEY") or ""
+        return os.environ.get(self.key_var) or ""
 
     @property
     def is_configured(self) -> bool:
@@ -42,16 +83,45 @@ class ModelConfig:
         return bool(self.api_key)
 
 
+# Process-wide usage accumulator. Every ModelManager instance (agent router,
+# chat stream, title/summary helpers) records here; the server snapshots the
+# totals around a run and attributes the delta to that thread.
+GLOBAL_USAGE: Dict[str, float] = {
+    "prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0, "requests": 0,
+}
+USAGE_LOCK = threading.Lock()
+_EMPTY_USAGE = {"prompt_tokens": 0, "completion_tokens": 0, "cost_usd": 0.0, "requests": 0}
+
+
+def usage_snapshot() -> Dict[str, float]:
+    with USAGE_LOCK:
+        return dict(GLOBAL_USAGE)
+
+
+def usage_delta(before: Dict[str, float]) -> Dict[str, float]:
+    after = usage_snapshot()
+    return {k: float(after.get(k, 0)) - float(before.get(k, 0)) for k in _EMPTY_USAGE}
+
+
 class ModelManager:
     """Manages active models, profiles from models.conf, and streaming requests."""
 
     def __init__(self):
         self.profiles: Dict[str, ModelConfig] = {}
         self._reasoning_cb = None
+        self.usage_totals = dict(_EMPTY_USAGE)
+        self.model_override: Optional[str] = None
         self._load_profiles()
         self.active_profile_name = "deepseek-flash"
         self.effort = os.environ.get("AG_REASONING_EFFORT", "high")
         self._sync_from_env()
+
+    @staticmethod
+    def _to_price(value: str) -> float:
+        try:
+            return max(0.0, float(value))
+        except Exception:
+            return 0.0
 
     def _load_profiles(self):
         conf_file = HERE / "models.conf"
@@ -63,7 +133,12 @@ class ModelManager:
                 parts = [p.strip() for p in line.split("|")]
                 if len(parts) >= 4:
                     name, model, base, key_var = parts[:4]
-                    self.profiles[name] = ModelConfig(name, model, base, key_var)
+                    variants = _parse_variants(parts[4], model) if len(parts) > 4 else []
+                    price_in = self._to_price(parts[5]) if len(parts) > 5 else 0.0
+                    price_out = self._to_price(parts[6]) if len(parts) > 6 else 0.0
+                    self.profiles[name] = ModelConfig(
+                        name, model, base, key_var, variants, price_in, price_out
+                    )
 
         # Fallback defaults if conf missing
         if "deepseek-flash" not in self.profiles:
@@ -130,7 +205,61 @@ class ModelManager:
 
     @property
     def display_name(self) -> str:
-        return self.active_config.model
+        return self.model_override or self.active_config.model
+
+    @property
+    def active_model_id(self) -> str:
+        return self.model_override or self.active_config.model
+
+    def resolve_variant(self, key: Optional[str]) -> Dict[str, str]:
+        """Return the selected variant dict for the active profile (or {})."""
+        if not key:
+            return {}
+        for v in self.active_config.variants:
+            if v.get("key") == key:
+                return v
+        return {}
+
+    def apply_variant(self, key: Optional[str]) -> None:
+        """Select a variant: model override + reasoning effort for this manager."""
+        v = self.resolve_variant(key)
+        if not v:
+            self.model_override = None
+            return
+        model = (v.get("model") or "").strip()
+        self.model_override = model if model and model != self.active_config.model else None
+        effort = (v.get("effort") or "").strip()
+        if effort:
+            self.set_effort(effort)
+
+    def record_usage(self, usage, cfg: Optional[ModelConfig] = None) -> None:
+        """Accumulate token usage and estimated cost for this manager and globally."""
+        if usage is None:
+            return
+        cfg = cfg or self.active_config
+        try:
+            p = int(getattr(usage, "prompt_tokens", 0) or 0)
+            c = int(getattr(usage, "completion_tokens", 0) or 0)
+        except Exception:
+            return
+        if p <= 0 and c <= 0:
+            return
+        price_cfg = cfg
+        if self.model_override:
+            for prof in self.profiles.values():
+                if prof.model == self.model_override:
+                    price_cfg = prof
+                    break
+        cost = (p / 1_000_000.0) * price_cfg.price_in + (c / 1_000_000.0) * price_cfg.price_out
+        with USAGE_LOCK:
+            GLOBAL_USAGE["prompt_tokens"] += p
+            GLOBAL_USAGE["completion_tokens"] += c
+            GLOBAL_USAGE["cost_usd"] += cost
+            GLOBAL_USAGE["requests"] += 1
+        self.usage_totals["prompt_tokens"] += p
+        self.usage_totals["completion_tokens"] += c
+        self.usage_totals["cost_usd"] += cost
+        self.usage_totals["requests"] += 1
 
     @property
     def provider_name(self) -> str:
@@ -150,7 +279,8 @@ class ModelManager:
         return "custom"
 
     def set_model(self, model_or_profile: str) -> Tuple[bool, str]:
-        target = model_or_profile.strip()
+        target = (model_or_profile or "").strip()
+        self.model_override = None
         if target in self.profiles:
             self.active_profile_name = target
             os.environ["AG_MODEL"] = self.active_config.model
@@ -172,9 +302,10 @@ class ModelManager:
         key = cfg.api_key
         if not key and not ("localhost" in cfg.base_url or "127.0.0.1" in cfg.base_url):
             raise ValueError(
-                f"API key missing for {cfg.name} (checked {cfg.key_var} and AG_KEY in environment and .env)"
+                f"API key missing for {cfg.name} (set {cfg.key_var} in .env or Settings)"
             )
-        return OpenAI(base_url=cfg.base_url, api_key=key or "dummy-key"), cfg.model
+        model = self.model_override or cfg.model
+        return OpenAI(base_url=cfg.base_url, api_key=key or "dummy-key"), model
 
     def get_client(self) -> Tuple[OpenAI, str]:
         return self.get_client_for(self.active_config)
@@ -202,17 +333,35 @@ class ModelManager:
             for attempt in range(max_retries):
                 try:
                     extra = {}
-                    if model in ("deepseek-flash", "deepseek-v4-pro"):
+                    if model in ("deepseek-flash", "deepseek-v4-pro", "deepseek-v4"):
                         extra["reasoning_effort"] = getattr(self, "effort", "high") or "high"
-                    response = client.chat.completions.create(
+                    request = dict(
                         model=model,
                         messages=messages,
                         stream=True,
                         temperature=temperature,
                         **extra,
                     )
+                    # OpenAI-compatible usage on the final chunk. Providers that
+                    # reject the option are retried once without it.
+                    try:
+                        response = client.chat.completions.create(
+                            stream_options={"include_usage": True}, **request
+                        )
+                    except Exception as opt_err:
+                        low = str(opt_err).lower()
+                        if any(t in low for t in ("stream_options", "unknown parameter",
+                                                  "unrecognized", "extra fields", "extra inputs",
+                                                  "not permitted", "unexpected keyword",
+                                                  "unsupported", "invalid_request")):
+                            response = client.chat.completions.create(**request)
+                        else:
+                            raise
                     has_yielded = False
                     for chunk in response:
+                        usage = getattr(chunk, "usage", None)
+                        if usage is not None:
+                            self.record_usage(usage, cfg)
                         if not chunk.choices:
                             continue
                         delta = chunk.choices[0].delta
@@ -288,7 +437,7 @@ class ModelManager:
 
     def get_env_status(self) -> Dict[str, str]:
         """Get masked status of configured environment variables."""
-        keys = ["DEEPSEEK_KEY", "AG_KEY", "GEMINI_KEY", "OPENAI_KEY", "ANTHROPIC_KEY", "OPENROUTER_KEY"]
+        keys = ["DEEPSEEK_KEY", "AG_KEY", "GEMINI_KEY", "OPENAI_KEY", "ANTHROPIC_KEY", "OPENROUTER_KEY", "OLLAMA_KEY"]
         res = {}
         for k in keys:
             val = os.environ.get(k, "")

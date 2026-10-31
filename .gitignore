@@ -130,3 +130,6 @@ scans/
 # keep webgui TypeScript helpers (root lib/ pattern must not swallow them)
 !webgui/src/lib/
 !webgui/src/lib/**
+
+# first-run bootstrap marker
+.bootstrap_done

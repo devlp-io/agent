@@ -1,5 +1,5 @@
 import type {
-  Attachment, Message, ModelProfile, RunningJob, Scan, Settings, SseEvent, Thread,
+  Attachment, Message, ModelProfile, RunningJob, Scan, Settings, SseEvent, Thread, Usage,
 } from './types'
 
 const API = '/api/v2'
@@ -81,6 +81,8 @@ export const api = {
     `/threads/${id}/messages`,
   ),
 
+  usage: (id: string) => j<Usage>(`/threads/${id}/usage`),
+
   exportUrl: (id: string) => `${API}/threads/${id}/export?fmt=md`,
 
   upload: async (file: File, threadId: string): Promise<Attachment> => {
@@ -154,6 +156,7 @@ export type ChatPayload = {
   text: string
   attachments: string[]
   model?: string | null
+  variant?: 'quick' | 'balanced' | 'deep'
   mode: 'agent' | 'chat'
   auto_approve: boolean
   effort: 'quick' | 'balanced' | 'deep'

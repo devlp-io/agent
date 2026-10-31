@@ -148,10 +148,17 @@ def init_db() -> None:
             );
             """
         )
-        try:
-            c.execute("ALTER TABLE threads ADD COLUMN workdir TEXT")
-        except sqlite3.OperationalError:
-            pass
+        for col, decl in (
+            ("workdir", "TEXT"),
+            ("in_tokens", "INTEGER NOT NULL DEFAULT 0"),
+            ("out_tokens", "INTEGER NOT NULL DEFAULT 0"),
+            ("cost_usd", "REAL NOT NULL DEFAULT 0"),
+            ("requests", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            try:
+                c.execute(f"ALTER TABLE threads ADD COLUMN {col} {decl}")
+            except sqlite3.OperationalError:
+                pass
 
 
 init_db()
@@ -223,25 +230,108 @@ MODEL_LABELS = {
 }
 
 
+def _provider_of(base: str) -> str:
+    b = (base or "").lower()
+    if "deepseek" in b:
+        return "deepseek"
+    if "generativelanguage" in b or "google" in b:
+        return "google"
+    if "openrouter" in b:
+        return "openrouter"
+    if "anthropic" in b:
+        return "anthropic"
+    if "openai" in b:
+        return "openai"
+    if "localhost" in b or "127.0.0.1" in b:
+        return "ollama"
+    return "custom"
+
+
+def _model_label(name: str, cfg=None) -> str:
+    if name in MODEL_LABELS:
+        return MODEL_LABELS[name]
+    if cfg is not None and cfg.model in MODEL_LABELS:
+        return MODEL_LABELS[cfg.model]
+    return (cfg.model if cfg is not None else name)
+
+
 def _profiles() -> List[Dict[str, Any]]:
     mm = model_manager()
     out = []
     for name, cfg in mm.profiles.items():
-        base = (cfg.base_url or "").lower()
-        local = "localhost" in base or "127.0.0.1" in base
-        key = os.environ.get(cfg.key_var, "")
-        if not key and cfg.key_var in ("AG_KEY", "DEEPSEEK_KEY"):
-            key = os.environ.get("AG_KEY", "")
         out.append({
             "name": name,
-            "label": MODEL_LABELS.get(name) or MODEL_LABELS.get(cfg.model) or cfg.model,
+            "label": _model_label(name, cfg),
             "model": cfg.model,
             "base": cfg.base_url,
-            "configured": local or bool(key),
+            "provider": _provider_of(cfg.base_url),
+            "key_var": cfg.key_var,
+            "configured": bool(cfg.is_configured),
+            "variants": list(cfg.variants or []),
+            "price_in": cfg.price_in,
+            "price_out": cfg.price_out,
             "active": name == mm.active_profile_name,
         })
-    out.sort(key=lambda r: (not r["active"], r["name"]))
+    out.sort(key=lambda r: (not r["active"], not r["configured"], r["name"]))
     return out
+
+
+def _apply_model_choice(mm, body) -> None:
+    """Apply the requested profile + variant (model override + effort) to a manager."""
+    if getattr(body, "model", None):
+        try:
+            mm.set_model(body.model)
+        except Exception:
+            pass
+    key = (getattr(body, "variant", None) or getattr(body, "effort", None) or "").strip().lower()
+    if key in ("quick", "balanced", "deep"):
+        mm.apply_variant(key)
+        if not mm.resolve_variant(key):
+            mm.set_effort(EFFORT_MAP.get(key, "high"))
+    else:
+        mm.model_override = None
+        mm.set_effort(EFFORT_MAP.get(getattr(body, "effort", "balanced"), "high"))
+
+
+def _add_thread_usage(thread_id: str, delta: Dict[str, float]) -> None:
+    p = int(round(delta.get("prompt_tokens", 0) or 0))
+    o = int(round(delta.get("completion_tokens", 0) or 0))
+    c = float(delta.get("cost_usd", 0) or 0.0)
+    r = int(round(delta.get("requests", 0) or 0))
+    if p <= 0 and o <= 0 and r <= 0:
+        return
+    try:
+        with _db() as c2:
+            c2.execute(
+                "UPDATE threads SET in_tokens=COALESCE(in_tokens,0)+?, "
+                "out_tokens=COALESCE(out_tokens,0)+?, cost_usd=COALESCE(cost_usd,0)+?, "
+                "requests=COALESCE(requests,0)+? WHERE id=?",
+                (p, o, c, r, thread_id),
+            )
+    except Exception:
+        pass
+
+
+def _thread_usage(thread_id: str) -> Dict[str, Any]:
+    with _db() as c:
+        row = c.execute(
+            "SELECT in_tokens,out_tokens,cost_usd,requests,model FROM threads WHERE id=?",
+            (thread_id,),
+        ).fetchone()
+    if not row:
+        return {}
+    p = int(row["in_tokens"] or 0)
+    o = int(row["out_tokens"] or 0)
+    cfg = model_manager().profiles.get(row["model"] or "")
+    return {
+        "input_tokens": p,
+        "output_tokens": o,
+        "total_tokens": p + o,
+        "cost_usd": round(float(row["cost_usd"] or 0.0), 6),
+        "requests": int(row["requests"] or 0),
+        "model": row["model"],
+        "label": _model_label(row["model"] or "", cfg),
+    }
 
 
 # ── schemas ────────────────────────────────────────────────────────────────
@@ -250,6 +340,7 @@ class ChatBody(BaseModel):
     text: str = ""
     attachments: List[str] = Field(default_factory=list)
     model: Optional[str] = None
+    variant: Optional[str] = None
     mode: str = "agent"          # agent | chat
     auto_approve: bool = True
     effort: str = "balanced"     # quick | balanced | deep
@@ -824,6 +915,10 @@ async def _compliance_gate(task_text: str) -> bool:
                 )
             )
             try:
+                mm.record_usage(getattr(resp, "usage", None))
+            except Exception:
+                pass
+            try:
                 txt = (resp.choices[0].message.content or "").strip().lower()
             except Exception:
                 txt = ""
@@ -916,6 +1011,10 @@ def _generate_title(first_text: str, reply_hint: str = "") -> str:
             temperature=0.3,
             **extra,
         )
+        try:
+            mm.record_usage(getattr(resp, "usage", None))
+        except Exception:
+            pass
         msg = resp.choices[0].message
         title = (getattr(msg, "content", None) or "").strip()
         if not title:
@@ -1058,6 +1157,9 @@ def api_threads(q: str = ""):
             "updated": r["updated"], "updated_iso": _iso(r["updated"]),
             "model": r["model"], "mode": r["mode"],
             "pinned": bool(r["pinned"]), "msg_count": r["msg_count"],
+            "in_tokens": int(r["in_tokens"] or 0) if "in_tokens" in r.keys() else 0,
+            "out_tokens": int(r["out_tokens"] or 0) if "out_tokens" in r.keys() else 0,
+            "cost_usd": float(r["cost_usd"] or 0) if "cost_usd" in r.keys() else 0.0,
         } for r in rows
     ]}
 
@@ -1137,9 +1239,23 @@ def api_messages(thread_id: str):
             "SELECT * FROM messages WHERE thread_id=? ORDER BY created ASC", (thread_id,)
         ).fetchall()
     return {
-        "thread": {"id": t["id"], "title": t["title"], "model": t["model"], "mode": t["mode"]},
+        "thread": {
+            "id": t["id"], "title": t["title"], "model": t["model"], "mode": t["mode"],
+            "in_tokens": int(t["in_tokens"] or 0),
+            "out_tokens": int(t["out_tokens"] or 0),
+            "cost_usd": float(t["cost_usd"] or 0),
+            "requests": int(t["requests"] or 0),
+        },
         "messages": [_row_to_message(r) for r in rows],
     }
+
+
+@app.get("/api/v2/threads/{thread_id}/usage")
+def api_thread_usage(thread_id: str):
+    usage = _thread_usage(thread_id)
+    if not usage:
+        raise HTTPException(404, "thread not found")
+    return usage
 
 
 @app.get("/api/v2/threads/{thread_id}/export")
@@ -1694,6 +1810,10 @@ def _final_summary(objective: str, draft: str, parts, hidden: List[str]) -> str:
                 max_tokens=3500 if attempt == 0 else 2500,
                 temperature=0.2,
             )
+            try:
+                mm.record_usage(getattr(resp, "usage", None))
+            except Exception:
+                pass
             txt = (resp.choices[0].message.content or "").strip()
             if txt:
                 return txt
@@ -1993,6 +2113,12 @@ async def _agent_stream(body: ChatBody, request: Request):
     router = _router_for(body.thread_id)
     if router.is_busy:
         raise HTTPException(409, "agent is already running in this chat — stop it first")
+    try:
+        _apply_model_choice(router.model_manager, body)
+        if getattr(body, "model", None):
+            model_manager().set_model(body.model)
+    except Exception:
+        pass
 
     user_msg = _persist_message(body.thread_id, "user", text, [{"type": "text", "text": text}], atts, {})
     with _db() as c:
@@ -2013,6 +2139,8 @@ async def _agent_stream(body: ChatBody, request: Request):
         loop.call_soon_threadsafe(queue.put_nowait, ev)
 
     async def gen():
+        from core.model_manager import usage_snapshot, usage_delta
+        _usage_base = usage_snapshot()
         if holder is not None:
             holder["cb"] = cb
 
@@ -2050,7 +2178,7 @@ async def _agent_stream(body: ChatBody, request: Request):
             loop.call_soon_threadsafe(queue.put_nowait, ("reasoning", txt))
 
         try:
-            router.model_manager.set_effort(EFFORT_MAP.get(body.effort, "high"))
+            _apply_model_choice(router.model_manager, body)
             router.model_manager.set_reasoning_callback(on_reasoning)
         except Exception:
             pass
@@ -2646,7 +2774,7 @@ async def _agent_stream(body: ChatBody, request: Request):
             content = "\n\n".join(notes).strip()
         meta = {"mode": "agent", "engine": "cli", "effort": body.effort,
                 "objective": (text or "")[:300],
-                "model": model_manager().display_name, "tools": tools,
+                "model": router.model_manager.display_name, "tools": tools,
                 "iterations": len(tools), "aborted": aborted,
                 "thought_ms": int(thought_ms),
                 "duration_ms": int((time.time() - started) * 1000),
@@ -2663,6 +2791,7 @@ async def _agent_stream(body: ChatBody, request: Request):
                 final_title = generated
                 with _db() as c:
                     c.execute("UPDATE threads SET title=? WHERE id=?", (generated, body.thread_id))
+        _add_thread_usage(body.thread_id, usage_delta(_usage_base))
         yield _sse({"type": "done", "message": assistant, "title": final_title})
 
     return gen()
@@ -2703,7 +2832,7 @@ async def api_chat(body: ChatBody, request: Request):
         if not t:
             raise HTTPException(404, "thread not found")
 
-    if body.model:
+    if getattr(body, "model", None):
         try:
             model_manager().set_model(body.model)
         except Exception:
@@ -2745,6 +2874,8 @@ async def api_chat(body: ChatBody, request: Request):
     queue: asyncio.Queue = asyncio.Queue()
 
     async def gen():
+        from core.model_manager import usage_snapshot, usage_delta
+        _usage_base = usage_snapshot()
         yield _sse({"type": "start", "user_message": user_msg,
                     "title": _autotitle(text or (atts[0]["filename"] if atts else "")) if needs_title else cur_title})
         title_task = None
@@ -2775,7 +2906,7 @@ async def api_chat(body: ChatBody, request: Request):
             loop.call_soon_threadsafe(queue.put_nowait, ("reasoning", txt))
 
         try:
-            model_manager().set_effort(EFFORT_MAP.get(body.effort, "high"))
+            _apply_model_choice(model_manager(), body)
             model_manager().set_reasoning_callback(_on_reason)
         except Exception:
             pass
@@ -2967,6 +3098,10 @@ async def api_chat(body: ChatBody, request: Request):
                 "tools": tool_log, "iterations": len(tool_log),
                 "aborted": aborted, "thought_ms": thought_ms,
                 "duration_ms": int((time.time() - started) * 1000)}
+        try:
+            model_manager().model_override = None
+        except Exception:
+            pass
         assistant = _persist_message(body.thread_id, "assistant", content, parts, [], meta)
         final_title = cur_title
         if needs_title and title_task is not None:
@@ -2978,6 +3113,7 @@ async def api_chat(body: ChatBody, request: Request):
                 final_title = generated
                 with _db() as c:
                     c.execute("UPDATE threads SET title=? WHERE id=?", (generated, body.thread_id))
+        _add_thread_usage(body.thread_id, usage_delta(_usage_base))
         yield _sse({"type": "done", "message": assistant, "title": final_title})
 
     job = _start_job(body.thread_id, gen())
@@ -3218,7 +3354,7 @@ def api_settings_v2():
     raw = lg.read_env()
     return {
         "keys": {k: lg.mask(raw.get(k, "")) for k in lg.KEY_FIELDS},
-        "effective": {k: bool(os.environ.get(k)) for k in lg.KEY_FIELDS},
+        "effective": {k: bool(os.environ.get(k) or raw.get(k)) for k in lg.KEY_FIELDS},
         "path": str(lg.ENV_PATH),
         "model": model_manager().display_name,
         "provider": model_manager().provider_name,
@@ -3230,10 +3366,21 @@ def api_settings_v2():
 @app.post("/api/v2/settings")
 def api_settings_save(body: SettingsBody):
     lg = legacy()
-    saved = lg.write_env(body.updates or {})
-    for k, v in (body.updates or {}).items():
+    updates = body.updates or {}
+    saved = lg.write_env(updates)
+    for k, v in updates.items():
         if v:
             os.environ[k] = v
+    if updates.get("AG_MODEL"):
+        try:
+            model_manager().set_model(updates["AG_MODEL"])
+        except Exception:
+            pass
+    if updates.get("AG_REASONING_EFFORT"):
+        try:
+            model_manager().set_effort(updates["AG_REASONING_EFFORT"])
+        except Exception:
+            pass
     return {"saved": sorted(saved.keys()), "path": str(lg.ENV_PATH)}
 
 

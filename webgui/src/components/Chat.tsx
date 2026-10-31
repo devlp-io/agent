@@ -57,7 +57,7 @@ export function Chat({
 
   return (
     <div ref={scrollRef} className="fx-scroll flex-1 overflow-y-auto">
-      <div className="mx-auto w-full max-w-3xl px-3 pb-6 pt-4 sm:px-5">
+      <div className="mx-auto w-full max-w-3xl px-3 pb-6 pt-4 sm:px-5 xl:max-w-4xl">
         {empty && (
           <div className="flex min-h-[calc(100dvh-19rem)] flex-col items-center justify-center py-8 text-center">
             <div className="orb relative mb-7 grid h-20 w-20 place-items-center">

@@ -616,6 +616,7 @@ export default function App() {
         onClose={() => setRightOpen(false)}
         thread={activeThread}
         messages={messages}
+        models={models}
         onOpenScans={() => setScansOpen(true)}
       />
 
@@ -626,6 +627,7 @@ export default function App() {
         active={activeModel}
         onModel={changeModel}
         pushToast={pushToast}
+        onSaved={loadModels}
       />
 
       <ScansModal open={scansOpen} onClose={() => setScansOpen(false)} pushToast={pushToast} />

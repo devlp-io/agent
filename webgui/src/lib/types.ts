@@ -58,6 +58,17 @@ export type Thread = {
   mode: string
   pinned: boolean
   msg_count: number
+  in_tokens?: number
+  out_tokens?: number
+  cost_usd?: number
+  requests?: number
+}
+
+export type ModelVariant = {
+  key: 'quick' | 'balanced' | 'deep'
+  label: string
+  model?: string
+  effort?: string
 }
 
 export type ModelProfile = {
@@ -65,8 +76,23 @@ export type ModelProfile = {
   label?: string
   model: string
   base: string
+  provider?: string
+  key_var?: string
   configured: boolean
   active: boolean
+  variants?: ModelVariant[]
+  price_in?: number
+  price_out?: number
+}
+
+export type Usage = {
+  input_tokens: number
+  output_tokens: number
+  total_tokens: number
+  cost_usd: number
+  requests: number
+  model?: string | null
+  label?: string
 }
 
 export type Scan = {

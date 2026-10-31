@@ -27,11 +27,10 @@ Point it at an authorized target or chat with it directly from your terminal. SO
 2. [Architecture & Workflow](#architecture--workflow)
 3. [Interactive Terminal UI & Shortcuts](#interactive-terminal-ui--shortcuts)
 4. [Installation & Setup](#installation--setup)
-   - [Linux (Ubuntu, Debian, Kali, Arch)](#linux-ubuntu-debian-kali-arch)
-   - [macOS (Apple Silicon & Intel)](#macos-apple-silicon--intel)
-   - [Windows (Native PowerShell & CMD)](#windows-native-powershell--cmd)
-   - [Windows (WSL2 Ubuntu)](#windows-wsl2-ubuntu)
-   - [Android Termux](#android-termux)
+   - [Linux, macOS, WSL2, Termux](#linux-macos-wsl2-ubuntu-termux)
+   - [Windows (PowerShell, cmd, Terminal)](#windows-powershell-cmd-windows-terminal)
+   - [WSL2 Ubuntu notes](#wsl2-ubuntu-notes)
+   - [What the first run does](#what-the-first-run-does)
 5. [Model Configuration & Environment Variables](#model-configuration--environment-variables)
 6. [Command Reference & Usage](#command-reference--usage)
 7. [Security Tooling & Auto-Installer](#security-tooling--auto-installer)
@@ -133,307 +132,62 @@ somscan
 
 ## Installation & Setup
 
-### Linux (Ubuntu, Debian, Kali, Arch)
+One-time install, then `somscan` works from any directory — no aliases, no activating venvs.
 
-1. **System Prerequisites**:
-   ```bash
-   # Debian / Ubuntu / Kali
-   sudo apt update && sudo apt install -y python3 python3-pip python3-venv git curl build-essential
+**Requirements:** Python 3.10+, `git`. Node 18+ is only needed for the web console.
 
-   # Arch Linux
-   sudo pacman -Syu python python-pip git curl base-devel
-   ```
-
-2. **Clone & Set Up Virtual Environment**:
-   ```bash
-   git clone https://github.com/devlp-io/agent.git ~/agent
-   cd ~/agent
-   python3 -m venv venv
-   source venv/bin/activate
-   pip install --upgrade pip
-   pip install -r requirements.txt textual rich openai httpx python-dotenv
-   ```
-
-3. **Configure Environment**:
-   ```bash
-   cp .env.examples .env
-   # Edit .env with your preferred editor and insert your API key:
-   # DEEPSEEK_KEY=sk-... or AG_KEY=sk-...
-   ```
-
-4. **Launch**:
-   ```bash
-   chmod +x somscan
-   ./somscan
-   ```
-
-5. *(Optional)* **Add to System PATH**:
-   ```bash
-   echo 'export PATH="$HOME/agent:$PATH"' >> ~/.bashrc
-   source ~/.bashrc
-   ```
-
-6. **Updating to Latest Version**:
-   Pull upstream improvements, hardened directives, and test updates anytime:
-   ```bash
-   cd ~/agent
-   git pull origin main
-   source venv/bin/activate
-   pip install -r requirements.txt --upgrade
-   ```
-
----
-
-### macOS (Apple Silicon & Intel)
-
-1. **System Prerequisites**:
-   Ensure [Homebrew](https://brew.sh) is installed:
-   ```bash
-   brew install python git curl
-   ```
-
-2. **Clone & Install**:
-   ```bash
-   git clone https://github.com/devlp-io/agent.git ~/agent
-   cd ~/agent
-   python3 -m venv venv
-   source venv/bin/activate
-   pip install --upgrade pip
-   pip install -r requirements.txt textual rich openai httpx python-dotenv
-   ```
-
-3. **Configure & Run**:
-   ```bash
-   cp .env.examples .env
-   # Set API key in .env
-   chmod +x somscan
-   ./somscan
-   ```
-
-4. **Updating to Latest Version**:
-   ```bash
-   cd ~/agent
-   git pull origin main
-   source venv/bin/activate
-   pip install -r requirements.txt --upgrade
-   ```
-
----
-
-### Windows (Native PowerShell & CMD)
-
-SOM-SCAN runs natively on Windows 10 and Windows 11 with full color rendering and responsive layouts via Windows Terminal.
-
-1. **Install Python 3.10+**:
-   Download and install from [python.org](https://www.python.org/downloads/windows/). Ensure **"Add Python to PATH"** is checked during setup.
-
-2. **Clone Repository**:
-   Open PowerShell:
-   ```powershell
-   git clone https://github.com/devlp-io/agent.git C:\agent
-   cd C:\agent
-   ```
-
-3. **Install Dependencies**:
-   ```powershell
-   python -m pip install --upgrade pip
-   python -m pip install -r requirements.txt textual rich openai httpx python-dotenv
-   ```
-
-4. **Configure Environment**:
-   ```powershell
-   Copy-Item .env.examples .env
-   notepad .env
-   ```
-
-5. **Launch**:
-   Launch directly with PowerShell launcher or batch script:
-   ```powershell
-   .\somscan.ps1
-   # or
-   .\somscan.bat
-   # or
-   python somscan.py
-   ```
-
-6. **Updating to Latest Version**:
-   Open PowerShell in the installation directory:
-   ```powershell
-   cd C:\agent
-   git pull origin main
-   python -m pip install -r requirements.txt --upgrade
-   ```
-
----
-
-### Windows (WSL2 Ubuntu)
-
-Running SOM-SCAN inside WSL2 Ubuntu delivers the ultimate performance and capability: full raw-socket penetration testing utilities (`nmap`, `naabu`, `nuclei`, `subfinder`, `masscan`), native C/C++ & MinGW compilers, and high-performance terminal rendering.
-
----
-
-#### A. First-Time Setup (New Operators)
-
-Follow these exact steps to set up an operational SOM-SCAN node from scratch:
-
-1. **Install & Launch WSL2 Ubuntu**:
-   Open Windows PowerShell (Run as Administrator) and run:
-   ```powershell
-   wsl --install -d Ubuntu
-   ```
-   *(If WSL is already installed, simply launch Ubuntu from your Start menu or run `wsl -d Ubuntu` in PowerShell).*
-
-2. **Clone the Repository**:
-   Inside your Ubuntu WSL terminal:
-   ```bash
-   # Clone directly into your Linux home directory (recommended for max I/O performance)
-   git clone https://github.com/devlp-io/agent.git ~/agent
-   cd ~/agent
-
-   # OR if your repository lives on a Windows drive (e.g. D:\agent):
-   # cd /mnt/d/agent
-   ```
-
-3. **Run the Red-Team Automated Bootstrapper**:
-   Execute `bootstrap.sh`. This automatically updates apt repositories, installs essential compilers (`gcc`, `g++`, `mingw-w64`, `nasm`, `make`), debuggers (`gdb`, `radare2`, `strace`), builds the isolated Python virtual environment (`.venv_linux`), and installs all Python dependencies:
-   ```bash
-   bash bootstrap.sh
-   ```
-
-4. **Make `somscan` Launchable from Anywhere**:
-   Create a canonical global symlink in `/usr/local/bin` so you can launch the agent from any folder, drive, or target workspace:
-   ```bash
-   sudo ln -sf "$(pwd)/somscan" /usr/local/bin/somscan
-   ```
-
-5. **Configure API Credentials**:
-   Copy the example environment configuration and insert your API key:
-   ```bash
-   cp .env.examples .env
-   nano .env
-   ```
-   Set your model key (e.g., DeepSeek, Gemini, or OpenAI):
-   ```ini
-   AG_MODEL=deepseek-flash
-   AG_BASE=https://api.deepseek.com/v1
-   DEEPSEEK_KEY=sk-your-key-here
-   AG_KEY=sk-your-key-here
-   ```
-   *(Alternatively, launch `somscan` directly and type `/key sk-your-key-here` inside the interactive TUI).*
-
-6. **Launch SOM-SCAN**:
-   Launch from any directory in your terminal:
-   ```bash
-   somscan
-   ```
-   Or target a host directly:
-   ```bash
-   somscan --scan https://target-example.com
-   ```
-
----
-
-#### B. Upgrading Existing Installations (For Existing Operators)
-
-If you already have an earlier checkout of SOM-SCAN installed in WSL2, run this single block to pull the latest offensive architecture, visual cards, deadlock watchdogs, and dependencies:
+### Linux, macOS, WSL2 Ubuntu, Termux
 
 ```bash
-# 1. Navigate to your repository directory
-cd ~/agent    # or cd /mnt/d/agent
-
-# 2. Pull the latest commits from main
-git pull origin main
-
-# 3. Activate the virtual environment
-source .venv_linux/bin/activate 2>/dev/null || source venv/bin/activate
-
-# 4. Install updated requirements (using --no-compile to prevent NTFS bytecode stalls)
-pip install --upgrade pip
-pip install --no-compile -r requirements.txt
-
-# 5. Ensure global symlink points to the latest launcher
-sudo ln -sf "$(pwd)/somscan" /usr/local/bin/somscan
-
-# 6. Verify and launch
-somscan
+git clone https://github.com/devlp-io/agent.git
+cd agent
+./install.sh
 ```
 
----
+`install.sh` creates a local environment, installs requirements, preinstalls the core toolkit,
+and puts `somscan` on your PATH (`~/.local/bin`). Then, from anywhere:
 
-#### C. Launching from Windows PowerShell / Terminal (Optional)
+```bash
+somscan            # interactive CLI
+somscan gui        # web console (runs in the background)
+```
 
-You can launch SOM-SCAN directly from Windows PowerShell or Windows Terminal without manually opening an Ubuntu prompt:
+Skip the toolkit preinstall with `./install.sh --no-toolkits` or `SOMSCAN_SKIP_TOOLKITS=1 somscan`.
+You can also skip the installer and run `./somscan` directly from the repo — the first launch
+bootstraps the same environment automatically.
+
+### Windows (PowerShell, cmd, Windows Terminal)
 
 ```powershell
-# Run interactively from any Windows PowerShell session:
-wsl -d Ubuntu -e somscan
-
-# Or pass a target directly from Windows:
-wsl -d Ubuntu -e somscan --scan https://target-example.com
+git clone https://github.com/devlp-io/agent.git
+cd agent
+powershell -ExecutionPolicy Bypass -File install.ps1
 ```
 
-> [!TIP]
-> **Windows PowerShell Alias**: To type `somscan` directly in Windows PowerShell, add this to your PowerShell profile (`notepad $PROFILE`):
-> ```powershell
-> function somscan { wsl -d Ubuntu -e somscan $args }
-> ```
+Or double-click / run `install.cmd`. Open a **new** terminal so PATH refreshes, then:
 
----
+```powershell
+somscan
+somscan gui
+```
 
-#### D. WSL2 Operator Notes & Performance Tips
+The installer creates `%LOCALAPPDATA%\Programs\somscan\bin\somscan.cmd` and adds it to your
+user PATH. `somscan.bat` / `somscan.ps1` in the repo also work directly on first run.
 
-- **NTFS DrvFs Mounts (`/mnt/c/...` or `/mnt/d/...`)**:
-  When installing or updating pip packages on a Windows drive mounted inside WSL, always pass `--no-compile` (e.g. `pip install --no-compile -r requirements.txt`). Python 3.14+ bytecode writes can encounter filesystem locking on Windows NTFS mounts.
-- **Raw Socket Capabilities**:
-  To grant raw-socket network scan capabilities to `nmap` without running everything as root:
-  ```bash
-  sudo setcap cap_net_raw,cap_net_admin,cap_net_bind_service+eip $(which nmap)
-  ```
-- **Terminal Aesthetics**:
-  For optimal rendering of the minimal near-black TUI, use [Windows Terminal](https://aka.ms/windowsterminal) with a TrueColor-capable font such as *Cascadia Code*, *JetBrains Mono*, or *Fira Code*.
+### WSL2 Ubuntu notes
 
----
+Run the Linux installer inside the WSL shell. `somscan gui` starts the server inside WSL and
+prints `http://127.0.0.1:8788/gui`; open that URL in your Windows browser. To expose it on the
+LAN for a phone, run `somscan gui --host 0.0.0.0 --no-open`.
 
-### Android Termux
+### What the first run does
 
-SOM-SCAN supports mobile security testing directly within [Termux](https://termux.dev/) without requiring root permissions.
+1. Creates `.venv` (or `.venv_linux`) in the repo.
+2. Installs `requirements.txt`.
+3. Preinstalls the core toolkit profile (ProjectDiscovery, OSINT, AD, cloud, RE).
+4. Launches the CLI (or the requested command).
 
-1. **Install Required Packages**:
-   ```bash
-   pkg update -y && pkg upgrade -y
-   pkg install -y python git clang make libffi libxml2 libxslt openssl
-   ```
-
-2. **Grant Storage Access**:
-   ```bash
-   termux-setup-storage
-   ```
-
-3. **Clone & Install Python Dependencies**:
-   ```bash
-   git clone https://github.com/devlp-io/agent.git ~/agent
-   cd ~/agent
-   pip install --upgrade pip setuptools wheel
-   pip install textual rich openai httpx python-dotenv
-   pip install -r requirements.txt --no-build-isolation || pip install -r requirements.txt
-   ```
-
-4. **Launch in Termux**:
-   ```bash
-   python somscan.py
-   ```
-
-5. **Updating to Latest Version**:
-   ```bash
-   cd ~/agent
-   git pull origin main
-   pip install -r requirements.txt --upgrade
-   ```
-
-> **Termux Tips**:
-> - Use the Termux extra-keys bar for `ESC`, `CTRL`, and arrow keys.
-> - Soft keyboard opens automatically when tapping the input field.
-> - To prevent Android from sleeping during background scans: acquire a wake-lock via Termux notification or run `termux-wake-lock`.
+The bootstrap runs once. Later launches go straight to the CLI.
 
 ---
 
@@ -443,11 +197,9 @@ Whenever new features, attack methodologies, UI enhancements, or supervisor upda
 
 | Platform | One-Liner Update Command |
 |---|---|
-| **Linux (Debian / Ubuntu / Kali / Arch)** | `cd ~/agent && git pull origin main && source venv/bin/activate && pip install -r requirements.txt --upgrade` |
-| **macOS (Apple Silicon & Intel)** | `cd ~/agent && git pull origin main && source venv/bin/activate && pip install -r requirements.txt --upgrade` |
-| **Windows (PowerShell)** | `cd C:\agent; git pull origin main; python -m pip install -r requirements.txt --upgrade` |
-| **Windows (WSL2 Ubuntu)** | `cd ~/agent && git pull origin main && source .venv_linux/bin/activate && pip install --no-compile -r requirements.txt` |
-| **Android (Termux)** | `cd ~/agent && git pull origin main && pip install -r requirements.txt --upgrade` |
+| **Linux / macOS / WSL2** | `cd ~/agent && git pull origin main && ./install.sh` |
+| **Windows (PowerShell)** | `cd C:\agent; git pull origin main; powershell -ExecutionPolicy Bypass -File install.ps1` |
+| **Android (Termux)** | `cd ~/agent && git pull origin main && ./install.sh` |
 
 > [!TIP]
 > Your `.env` credentials, custom methodologies, and local scan artifacts (`~/scans/` or `C:\Users\<user>\scans\`) are never overwritten during updates because they are excluded in `.gitignore`.
@@ -543,17 +295,23 @@ python dashboard.py --port 8787
 Open `http://127.0.0.1:8787` in any browser to inspect live log streams, inspect finding tables, interact with the HTTP repeater, or dispatch operator directives.
 
 ### 6. Agent Web GUI (Antigravity-style)
-A production, mobile-first chat console for the agent: streaming replies, multi-thread history,
-media/file attachments, live tool cards with per-call approvals, model switching, scan control,
-and an artifacts/context panel.
+
+A production, responsive chat console: streaming replies, multi-thread history, media/file
+attachments, live tool cards, model + variant switching, per-thread token/cost usage, scan
+control, and an artifacts/context panel.
 
 ```bash
-# one-time build (needs Node 20+)
-make gui-build
+somscan gui                  # start in the background, prints the URL
+somscan gui status           # is it running?
+somscan gui stop             # stop it
 
-# serve the API + SPA on http://127.0.0.1:8788/gui
-make gui
+somscan gui --port 9000      # custom port
+somscan gui --host 0.0.0.0   # expose on the LAN (phone/tablet)
+somscan gui --no-open        # do not open a browser
 ```
+
+The first `somscan gui` builds the frontend if needed (Node 18+). Server logs live at
+`~/.somscan/gui.log`. Default URL: `http://127.0.0.1:8788/gui`.
 
 Development (Vite HMR on :5173, API proxied to :8788):
 ```bash

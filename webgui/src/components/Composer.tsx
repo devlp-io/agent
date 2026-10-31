@@ -3,7 +3,7 @@ import {
   ArrowUp, Square, Paperclip, X, ChevronDown, Bot, MessageSquare,
   Zap, Scale, Brain, ShieldOff, ImageIcon, FileText, Loader2,
 } from 'lucide-react'
-import type { Attachment, ModelProfile } from '../lib/types'
+import type { Attachment, ModelProfile, ModelVariant } from '../lib/types'
 import { api } from '../lib/api'
 
 export type ComposerOptions = {
@@ -117,10 +117,18 @@ export function Composer({
   }
 
   const activeProfile = models.find(m => m.name === activeModel)
+  const variants: ModelVariant[] = activeProfile?.variants?.length
+    ? activeProfile.variants
+    : [
+        { key: 'quick', label: 'Quick' },
+        { key: 'balanced', label: 'Balanced' },
+        { key: 'deep', label: 'Deep' },
+      ]
+  const variantIcon = { quick: Zap, balanced: Scale, deep: Brain } as const
   const canSend = (text.trim().length > 0 || files.length > 0) && !streaming
 
   return (
-    <div ref={wrapRef} className="relative mx-auto w-full max-w-3xl px-3 pb-[calc(10px+var(--safe-b))] pt-2 sm:px-5">
+    <div ref={wrapRef} className="relative mx-auto w-full max-w-3xl px-3 pb-[calc(10px+var(--safe-b))] pt-2 sm:px-5 xl:max-w-4xl">
       <div
         onDragOver={e => { e.preventDefault(); setDragging(true) }}
         onDragLeave={() => setDragging(false)}
@@ -274,11 +282,12 @@ export function Composer({
       )}
 
       {menu === 'model' && (
-        <div className="pop absolute bottom-[64px] right-3 z-40 w-72 overflow-hidden rounded-xl border border-line bg-panel shadow-2xl">
-          <div className="border-b border-line px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-faint">
-            Model
+        <div className="pop absolute bottom-[64px] right-2 z-40 w-[min(20rem,calc(100vw-1rem))] overflow-hidden rounded-xl border border-line bg-panel shadow-2xl sm:right-3">
+          <div className="flex items-center justify-between gap-2 border-b border-line px-3 py-2">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-faint">Model</span>
+            <span className="max-w-[60%] truncate text-[10px] text-faint">{activeProfile?.label ?? activeProfile?.model ?? ''}</span>
           </div>
-          <div className="max-h-64 overflow-y-auto py-1">
+          <div className="max-h-[min(56vh,320px)] overflow-y-auto py-1">
             {models.map(p => (
               <button
                 key={p.name}
@@ -294,19 +303,29 @@ export function Composer({
               </button>
             ))}
           </div>
-          <div className="flex border-t border-line">
-            {([['quick', Zap], ['balanced', Scale], ['deep', Brain]] as const).map(([k, Icon]) => (
-              <button
-                key={k}
-                onClick={() => { setEffort(k); setMenu(null) }}
-                className={[
-                  'flex flex-1 items-center justify-center gap-1 py-2 text-[11px] capitalize transition',
-                  effort === k ? 'bg-accent/12 text-accent' : 'text-muted hover:bg-panel3',
-                ].join(' ')}
-              >
-                <Icon size={12} /> {k}
-              </button>
-            ))}
+          <div className="border-t border-line px-2 pb-2 pt-1.5">
+            <div className="px-1 pb-1 text-[9.5px] uppercase tracking-wider text-faint">
+              Variants · {activeProfile?.label ?? 'model'}
+            </div>
+            <div className="flex gap-1">
+              {variants.map(v => {
+                const Icon = variantIcon[v.key] ?? Scale
+                return (
+                  <button
+                    key={v.key}
+                    onClick={() => { setEffort(v.key); setMenu(null) }}
+                    className={[
+                      'flex min-w-0 flex-1 flex-col items-center justify-center gap-0.5 rounded-lg px-1.5 py-2 text-[10.5px] transition',
+                      effort === v.key ? 'bg-accent/12 text-accent' : 'text-muted hover:bg-panel3',
+                    ].join(' ')}
+                    title={v.model && v.model !== activeProfile?.model ? v.model : undefined}
+                  >
+                    <Icon size={12} />
+                    <span className="max-w-full truncate">{v.label}</span>
+                  </button>
+                )
+              })}
+            </div>
           </div>
         </div>
       )}

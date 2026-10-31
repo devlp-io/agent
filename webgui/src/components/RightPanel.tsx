@@ -2,27 +2,35 @@ import { useEffect, useState } from 'react'
 import {
   X, FileText, Download, Layers, Cpu, Activity, Wrench, Radar, Image as ImageIcon, Boxes,
 } from 'lucide-react'
-import type { Message, Thread } from '../lib/types'
+import type { Message, ModelProfile, Thread, Usage } from '../lib/types'
 import { api } from '../lib/api'
 
 type Tab = 'overview' | 'files' | 'runs'
 
 export function RightPanel({
-  open, onClose, thread, messages, onOpenScans,
+  open, onClose, thread, messages, onOpenScans, models = [],
 }: {
   open: boolean
   onClose: () => void
   thread: Thread | null
   messages: Message[]
   onOpenScans: () => void
+  models?: ModelProfile[]
 }) {
   const [tab, setTab] = useState<Tab>('overview')
   const [uploads, setUploads] = useState<{ id: string; filename: string; mime: string; size: number; url: string }[]>([])
+  const [usage, setUsage] = useState<Usage | null>(null)
 
   useEffect(() => {
-    if (!thread) { setUploads([]); return }
+    if (!thread) { setUploads([]); setUsage(null); return }
     api.uploads(thread.id).then(r => setUploads(r.uploads)).catch(() => setUploads([]))
+    api.usage(thread.id).then(setUsage).catch(() => setUsage(null))
   }, [thread, messages.length])
+
+  const modelLabel = (() => {
+    const p = models.find(m => m.name === thread?.model)
+    return p?.label ?? p?.model ?? thread?.model ?? '—'
+  })()
 
   const runs = messages
     .flatMap(m => {
@@ -42,7 +50,7 @@ export function RightPanel({
   return (
     <>
       <div className="fixed inset-0 z-40 bg-black/50 backdrop-blur-sm lg:hidden" onClick={onClose} />
-      <aside className="fixed inset-y-0 right-0 z-50 flex w-[330px] max-w-[92vw] flex-col border-l border-line bg-panel/95 backdrop-blur-xl lg:static lg:z-auto lg:bg-panel/40">
+      <aside className="fixed inset-y-0 right-0 z-50 flex w-[340px] max-w-[94vw] flex-col border-l border-line bg-panel/95 backdrop-blur-xl sm:w-[360px] lg:static lg:z-auto lg:w-[340px] lg:bg-panel/40 xl:w-[380px]">
         <header className="flex h-14 shrink-0 items-center gap-2 border-b border-line px-3">
           <Boxes size={15} className="text-accent" />
           <span className="flex-1 text-[12.5px] font-semibold">Context</span>
@@ -68,10 +76,30 @@ export function RightPanel({
           {tab === 'overview' && (
             <div className="space-y-3">
               <div className="card p-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-faint">Usage</span>
+                  <span className="text-[10px] text-faint">{usage?.label ?? modelLabel}</span>
+                </div>
+                <div className="mt-2 grid grid-cols-2 gap-2 text-[11px]">
+                  <Meta icon={Activity} label="input" value={fmtInt(usage?.input_tokens)} />
+                  <Meta icon={Activity} label="output" value={fmtInt(usage?.output_tokens)} />
+                  <Meta icon={Cpu} label="total tokens" value={fmtInt(usage?.total_tokens)} />
+                  <Meta icon={Wrench} label="cost" value={fmtCost(usage?.cost_usd)} />
+                  <Meta icon={Layers} label="requests" value={fmtInt(usage?.requests)} />
+                  <Meta icon={Cpu} label="model" value={modelLabel} />
+                </div>
+                {usage && usage.total_tokens > 0 && usage.cost_usd === 0 && (
+                  <p className="mt-2 text-[10px] leading-snug text-faint">
+                    Cost is 0 when the provider/model has no price configured.
+                  </p>
+                )}
+              </div>
+
+              <div className="card p-3">
                 <div className="text-[10px] font-semibold uppercase tracking-wider text-faint">Thread</div>
                 <div className="mt-1 truncate text-[13px] font-medium">{thread?.title ?? '—'}</div>
                 <div className="mt-2 grid grid-cols-2 gap-2 text-[11px]">
-                  <Meta icon={Cpu} label="model" value={thread?.model ?? '—'} />
+                  <Meta icon={Cpu} label="model" value={modelLabel} />
                   <Meta icon={Activity} label="messages" value={String(messages.length)} />
                   <Meta icon={Layers} label="mode" value={thread?.mode ?? 'agent'} />
                   <Meta icon={Wrench} label="tool calls" value={String(runs.length)} />
@@ -162,6 +190,18 @@ export function RightPanel({
       </aside>
     </>
   )
+}
+
+function fmtInt(n?: number) {
+  if (n === undefined || n === null) return '—'
+  return n.toLocaleString()
+}
+
+function fmtCost(usd?: number) {
+  if (usd === undefined || usd === null) return '—'
+  if (usd === 0) return '$0'
+  if (usd < 0.01) return `$${usd.toFixed(4)}`
+  return `$${usd.toFixed(2)}`
 }
 
 function Meta({ icon: Icon, label, value }: { icon: typeof Cpu; label: string; value: string }) {

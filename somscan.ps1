@@ -1,33 +1,51 @@
 <#
 .SYNOPSIS
-    SOM-SCAN CLI launcher for Windows Terminal / PowerShell
+    SOM-SCAN launcher for Windows Terminal / PowerShell.
+.DESCRIPTION
+    First run creates .venv, installs requirements + core toolkits, then runs.
+    Use `somscan gui` to start the web console in the background.
 #>
 
+$ErrorActionPreference = "Stop"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$Venv = Join-Path $ScriptDir ".venv"
+$Py = Join-Path $Venv "Scripts\python.exe"
 
-# Look for Python 3.12 or any Python 3.x in user AppData
-$pythonCandidates = @(
-    "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
-    "$env:LOCALAPPDATA\Programs\Python\Launcher\py.exe"
-) + (Get-ChildItem -Path "$env:LOCALAPPDATA\Programs\Python\Python3*\python.exe" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
-
-$pyExe = $pythonCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-
-if (-not $pyExe) {
-    if (Get-Command py.exe -ErrorAction SilentlyContinue) {
-        $pyExe = "py.exe"
-    } elseif (Get-Command python.exe -ErrorAction SilentlyContinue) {
-        # Verify it is not the WindowsApps dummy stub
-        $test = & python.exe -c "import sys; print(sys.version)" 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            $pyExe = "python.exe"
-        }
+function Find-Python {
+    $candidates = @()
+    if (Get-Command py.exe -ErrorAction SilentlyContinue) { return @("py.exe", "-3") }
+    $candidates += (Get-ChildItem -Path "$env:LOCALAPPDATA\Programs\Python\Python3*\python.exe" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+    $candidates += (Get-ChildItem -Path "$env:ProgramFiles\Python3*\python.exe" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
+    foreach ($c in $candidates) {
+        if (Test-Path $c) { return @($c) }
     }
+    if (Get-Command python.exe -ErrorAction SilentlyContinue) { return @("python.exe") }
+    return $null
 }
 
-if (-not $pyExe) {
-    Write-Error "Python 3.10+ was not found. Please install Python or specify its path."
-    exit 1
+if (-not (Test-Path $Py)) {
+    Write-Host "[somscan] first run - setting up Python environment (one time)..."
+    $boot = Find-Python
+    if (-not $boot) {
+        Write-Error "Python 3.10+ was not found. Install it from https://python.org"
+        exit 1
+    }
+    $bootArgs = @()
+    if ($boot.Count -gt 1) { $bootArgs = $boot[1..($boot.Count - 1)] }
+    & $boot[0] @bootArgs -m venv $Venv
+    if (-not (Test-Path $Py)) {
+        Write-Error "Failed to create virtual environment at $Venv"
+        exit 1
+    }
+    & $Py -m pip install --upgrade pip setuptools wheel
+    & $Py -m pip install -r (Join-Path $ScriptDir "requirements.txt")
+    if ($LASTEXITCODE -ne 0) { Write-Error "Dependency install failed."; exit 1 }
+    if ($env:SOMSCAN_SKIP_TOOLKITS -ne "1" -and (Test-Path (Join-Path $ScriptDir "installer.py"))) {
+        Write-Host "[somscan] installing core toolkits (first run, this can take a few minutes)..."
+        & $Py (Join-Path $ScriptDir "installer.py") preinstall core
+    }
+    "done" | Out-File -FilePath (Join-Path $ScriptDir ".bootstrap_done") -Encoding ascii
 }
 
-& $pyExe "$ScriptDir\somscan.py" @args
+& $Py (Join-Path $ScriptDir "somscan.py") @args
+exit $LASTEXITCODE

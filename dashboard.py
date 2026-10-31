@@ -315,7 +315,9 @@ def kill_scan(key: str) -> dict:
 # ══════════════════════════════════════════════════════════════════════
 
 KEY_FIELDS = (
-    "AG_MODEL", "AG_BASE", "AG_KEY", "DEEPSEEK_KEY",
+    "AG_MODEL", "AG_BASE", "AG_KEY", "AG_REASONING_EFFORT",
+    "DEEPSEEK_KEY", "GEMINI_KEY", "OPENAI_KEY", "ANTHROPIC_KEY",
+    "OPENROUTER_KEY", "OLLAMA_KEY",
     "AG_PROXY", "AG_SCAN_ROOT", "AG_MAX_TURNS", "AG_CTX_MAX",
     "AG_CMD_TIMEOUT", "AG_CURL_TIMEOUT",
 )
@@ -337,26 +339,45 @@ def read_env() -> dict:
 
 
 def write_env(updates: dict) -> dict:
-    cur = {}
-    if ENV_PATH.exists():
-        for line in ENV_PATH.read_text().splitlines():
-            line = line.rstrip("\n")
-            if not line.strip() or line.strip().startswith("#") or "=" not in line:
+    """Update .env in place, preserving comments, ordering, and unrelated keys."""
+    clean = {}
+    for k, v in (updates or {}).items():
+        if v is None or k not in KEY_FIELDS:
+            continue
+        value = str(v).strip().replace("\n", " ").replace("\r", "")
+        clean[k] = value
+
+    lines = ENV_PATH.read_text().splitlines() if ENV_PATH.exists() else []
+    out: list[str] = []
+    seen: set[str] = set()
+    current: dict[str, str] = {}
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in line:
+            out.append(line)
+            continue
+        k, _, v = line.partition("=")
+        k = k.strip()
+        if k in clean:
+            seen.add(k)
+            if clean[k] == "":
+                continue  # explicit clear: drop the line
+            out.append(f"{k}={clean[k]}")
+        else:
+            out.append(line)
+        current[k] = v.strip().strip('"').strip("'")
+
+    for k, v in clean.items():
+        if k not in seen:
+            if v == "":
+                current.pop(k, None)
                 continue
-            k, _, v = line.partition("=")
-            cur[k.strip()] = v.strip()
-    for k, v in updates.items():
-        if v is None:
-            continue
-        if k not in KEY_FIELDS:
-            continue
-        if isinstance(v, str) and v.strip() == "":
-            cur.pop(k, None)
-            continue
-        cur[k] = str(v).strip()
-    body = "\n".join(f"{k}={shlex.quote(v)}" for k, v in sorted(cur.items()))
-    ENV_PATH.write_text(body + "\n")
-    return cur
+            out.append(f"{k}={v}")
+        if v:
+            current[k] = v
+
+    ENV_PATH.write_text("\n".join(out).rstrip("\n") + "\n")
+    return current
 
 
 def mask(v: str) -> str:

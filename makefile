@@ -47,18 +47,7 @@ sync-cve:
 	@python -m intel.cve_db sync 5
 
 lint:
-	@python - << 'PYEOF'
-import ast, pathlib
-bad = 0
-for p in pathlib.Path('.').rglob('*.py'):
-    if 'venv' in p.parts or '__pycache__' in p.parts or 'tools' in p.parts:
-        continue
-    try:
-        ast.parse(p.read_text())
-    except SyntaxError as e:
-        print(f"SYNTAX {p}: {e}"); bad += 1
-print("lint ok" if not bad else f"{bad} file(s) with errors")
-PYEOF
+	@python3 -m compileall -q -x '(^|/)(venv|\.venv|__pycache__|tools)/' . && echo "lint ok"
 
 clean:
 	@find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true

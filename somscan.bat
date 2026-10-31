@@ -1,44 +1,49 @@
 @echo off
-rem SOM-SCAN CLI launcher for Windows Terminal & Command Prompt
+rem SOM-SCAN launcher for Windows (PowerShell, cmd, Windows Terminal).
+rem First run creates .venv, installs requirements and core toolkits, then runs.
+setlocal EnableExtensions
 
-setlocal
+set "DIR=%~dp0"
+set "VENV=%DIR%.venv"
+set "PY=%VENV%\Scripts\python.exe"
 
-rem 1. Check user AppData Python installation
-if exist "%LOCALAPPDATA%\Programs\Python\Python312\python.exe" (
-    "%LOCALAPPDATA%\Programs\Python\Python312\python.exe" "%~dp0somscan.py" %*
-    exit /b %ERRORLEVEL%
-)
+if exist "%PY%" goto run
 
-for /d %%D in ("%LOCALAPPDATA%\Programs\Python\Python3*") do (
-    if exist "%%D\python.exe" (
-        "%%D\python.exe" "%~dp0somscan.py" %*
-        exit /b %ERRORLEVEL%
-    )
-)
-
-rem 2. Check py launcher
+echo [somscan] first run - setting up Python environment (one time)...
 where py.exe >nul 2>&1
 if %ERRORLEVEL% EQU 0 (
-    py.exe "%~dp0somscan.py" %*
-    exit /b %ERRORLEVEL%
-)
-
-rem 3. Check Program Files Python
-for /d %%D in ("%ProgramFiles%\Python3*") do (
-    if exist "%%D\python.exe" (
-        "%%D\python.exe" "%~dp0somscan.py" %*
-        exit /b %ERRORLEVEL%
+    py -3 -m venv "%VENV%"
+) else (
+    where python.exe >nul 2>&1
+    if %ERRORLEVEL% NEQ 0 (
+        echo [somscan] Python 3.10+ was not found. Install it from https://python.org
+        exit /b 1
     )
+    python.exe -m venv "%VENV%"
 )
 
-rem 4. Check system python (skip WindowsApps stub if not installed)
-python.exe -c "import sys" >nul 2>&1
-if %ERRORLEVEL% EQU 0 (
-    python.exe "%~dp0somscan.py" %*
-    exit /b %ERRORLEVEL%
+if not exist "%PY%" (
+    echo [somscan] failed to create virtual environment at %VENV%
+    echo           Try: py -3 -m venv "%VENV%"
+    exit /b 1
 )
 
-echo [SOM-SCAN Error] Python 3.10+ executable was not found.
-echo Please verify Python is installed or run with Python directly:
-echo   %%LOCALAPPDATA%%\Programs\Python\Python312\python.exe somscan.py
-exit /b 1
+"%PY%" -m pip install --upgrade pip setuptools wheel
+"%PY%" -m pip install -r "%DIR%requirements.txt"
+if errorlevel 1 (
+    echo [somscan] dependency install failed.
+    exit /b 1
+)
+
+if /I "%SOMSCAN_SKIP_TOOLKITS%"=="1" goto mark
+if exist "%DIR%installer.py" (
+    echo [somscan] installing core toolkits (first run, this can take a few minutes)...
+    "%PY%" "%DIR%installer.py" preinstall core
+)
+
+:mark
+echo done> "%DIR%.bootstrap_done" 2>nul
+
+:run
+"%PY%" "%DIR%somscan.py" %*
+exit /b %ERRORLEVEL%

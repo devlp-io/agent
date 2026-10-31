@@ -5,19 +5,26 @@ import {
 import type { ModelProfile, Settings } from '../lib/types'
 import { api } from '../lib/api'
 
-const KEY_FIELDS = ['AG_MODEL', 'AG_BASE', 'AG_KEY', 'DEEPSEEK_KEY', 'AG_PROXY', 'AG_SCAN_ROOT'] as const
-
 const KEY_LABELS: Record<string, string> = {
-  AG_MODEL: 'Model id',
+  AG_MODEL: 'Model id override',
   AG_BASE: 'API base URL',
-  AG_KEY: 'API key',
-  DEEPSEEK_KEY: 'DeepSeek key (alias)',
+  AG_KEY: 'Generic key (DeepSeek alias)',
+  AG_REASONING_EFFORT: 'Default effort (low/high/max)',
+  DEEPSEEK_KEY: 'DeepSeek key',
+  GEMINI_KEY: 'Gemini key',
+  OPENAI_KEY: 'OpenAI key',
+  ANTHROPIC_KEY: 'Anthropic key',
+  OPENROUTER_KEY: 'OpenRouter key',
+  OLLAMA_KEY: 'Ollama key (local)',
   AG_PROXY: 'Proxy',
   AG_SCAN_ROOT: 'Scan root',
 }
 
+const PROVIDER_KEYS = ['DEEPSEEK_KEY', 'GEMINI_KEY', 'OPENAI_KEY', 'ANTHROPIC_KEY', 'OPENROUTER_KEY', 'OLLAMA_KEY'] as const
+const RUNTIME_KEYS = ['AG_MODEL', 'AG_BASE', 'AG_KEY', 'AG_REASONING_EFFORT', 'AG_PROXY', 'AG_SCAN_ROOT'] as const
+
 export function SettingsModal({
-  open, onClose, models, onModel, pushToast,
+  open, onClose, models, onModel, pushToast, onSaved,
 }: {
   open: boolean
   onClose: () => void
@@ -25,6 +32,7 @@ export function SettingsModal({
   active?: string | null
   onModel: (name: string) => void
   pushToast: (msg: string, kind?: 'ok' | 'err') => void
+  onSaved?: () => void
 }) {
   const [tab, setTab] = useState<'general' | 'tools'>('general')
   const [settings, setSettings] = useState<Settings | null>(null)
@@ -71,6 +79,7 @@ export function SettingsModal({
       setDraft({})
       const s = await api.settings()
       setSettings(s)
+      onSaved?.()
     } catch (e) {
       pushToast(e instanceof Error ? e.message : 'save failed', 'err')
     } finally { setSaving(false) }
@@ -144,9 +153,36 @@ export function SettingsModal({
               </section>
 
               <section>
-                <Label icon={KeyRound}>Provider &amp; runtime</Label>
+                <Label icon={KeyRound}>Provider keys</Label>
                 <div className="mt-2 grid gap-2.5 sm:grid-cols-2">
-                  {KEY_FIELDS.map(k => (
+                  {PROVIDER_KEYS.map(k => (
+                    <label key={k} className="block">
+                      <span className="mb-1 flex items-center gap-1.5 text-[11px] text-muted">
+                        {KEY_LABELS[k]}
+                        {settings?.effective?.[k] && <Check size={11} className="text-mint" />}
+                      </span>
+                      <input
+                        type="password"
+                        className="field font-mono text-[12px]"
+                        placeholder={settings?.keys?.[k] || 'not set'}
+                        value={draft[k] ?? ''}
+                        onChange={e => setDraft(d => ({ ...d, [k]: e.target.value }))}
+                        autoComplete="off"
+                        spellCheck={false}
+                      />
+                    </label>
+                  ))}
+                </div>
+                <p className="mt-2 text-[11px] leading-snug text-faint">
+                  Keys enable their provider and turn the model dot green. Empty fields keep their current value.
+                  Saved to <span className="font-mono">{settings?.path}</span>.
+                </p>
+              </section>
+
+              <section>
+                <Label icon={Server}>Runtime</Label>
+                <div className="mt-2 grid gap-2.5 sm:grid-cols-2">
+                  {RUNTIME_KEYS.map(k => (
                     <label key={k} className="block">
                       <span className="mb-1 block text-[11px] text-muted">{KEY_LABELS[k]}</span>
                       <input
@@ -161,9 +197,6 @@ export function SettingsModal({
                     </label>
                   ))}
                 </div>
-                <p className="mt-2 text-[11px] text-faint">
-                  Empty fields keep their current value. Saved to <span className="font-mono">{settings?.path}</span>.
-                </p>
               </section>
 
               <section className="grid gap-2 sm:grid-cols-2">
