@@ -332,9 +332,10 @@ function Footer({ m, actions }: { m: Message; actions: number }) {
   if (m.streaming) {
     const status = String(m.meta?.status ?? '')
     const working = /RUNNING|WORKING/i.test(status)
+    const waiting = /WAITING|STALL/i.test(status)
     return (
       <div className="relative z-10 mt-3 flex items-center gap-1.5 text-[11.5px] text-faint">
-        <span className="text-muted">{working ? 'Working' : 'Thinking'}</span>
+        <span className="text-muted">{waiting ? 'Waiting for model' : working ? 'Working' : 'Thinking'}</span>
         <Dots />
         <span className="ml-1 tabular-nums">{elapsed > 1 ? `${elapsed.toFixed(0)}s` : ''}</span>
       </div>

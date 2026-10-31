@@ -92,6 +92,7 @@ TOOL_OUTPUT_LIMIT = 40_000
 MAX_TOOL_ITERS = 12
 MAX_AGENT_ACTIONS = int(os.environ.get("AG_GUI_MAX_ACTIONS", "0"))
 MAX_AGENT_SECONDS = int(os.environ.get("AG_GUI_MAX_SECONDS", "0"))
+MAX_AGENT_STALL = int(os.environ.get("AG_GUI_STALL_SECONDS", "60"))
 
 
 def _db() -> sqlite3.Connection:
@@ -2437,6 +2438,8 @@ async def _agent_stream(body: ChatBody, request: Request):
         stream_out: List[str] = []
         last_stream_flush = [0.0]
         turn_reasoning: List[str] = []
+        reason_out: List[str] = []
+        last_reason_flush = [0.0]
         reasoning_since = None
         last_reply = ""
         status = "thinking"
@@ -2448,6 +2451,8 @@ async def _agent_stream(body: ChatBody, request: Request):
         failures: List[Dict[str, str]] = []
         retried: set = set()
         retry_rounds = 0
+        last_event_at = [time.time()]
+        last_heartbeat = [0.0]
 
         # Live message: persisted immediately and updated as the run progresses.
         # If the process dies, this row keeps the partial answer and tool cards.
@@ -2610,6 +2615,9 @@ async def _agent_stream(body: ChatBody, request: Request):
                   + _attachments_context(atts) + (text or "Please review the attached files."))
         followups = 0
         limit_hit = False
+        stall_retries = 0
+        stall_retry = False
+        stall_guard = [0.0]
 
         async def _deadline_task():
             nonlocal deadline_hit
@@ -2652,16 +2660,67 @@ async def _agent_stream(body: ChatBody, request: Request):
                     break
                 try:
                     ev = await asyncio.wait_for(queue.get(), timeout=5.0)
+                    last_event_at[0] = time.time()
+                    last_heartbeat[0] = time.time()
                 except asyncio.TimeoutError:
                     if not router.is_busy and queue.empty():
                         break
+                    now = time.time()
+                    if now - last_heartbeat[0] >= 20:
+                        last_heartbeat[0] = now
+                        yield _sse({"type": "status", "status": "WAITING FOR MODEL…"})
                     persist_live(force=True)
+                    running_tool = any(
+                        p.get("type") == "tool" and p.get("status") == "running" for p in parts
+                    )
+                    if (MAX_AGENT_STALL and router.is_busy and not running_tool
+                            and now - last_event_at[0] > MAX_AGENT_STALL):
+                        try:
+                            router.cancel()
+                        except Exception:
+                            pass
+                        for _ in range(30):
+                            if not router.is_busy:
+                                break
+                            await asyncio.sleep(0.1)
+                        if stall_retries < 1 and not router.is_busy:
+                            stall_retries += 1
+                            stall_retry = True
+                            stall_guard[0] = time.time() + 4.0
+                            while not queue.empty():
+                                try:
+                                    queue.get_nowait()
+                                except Exception:
+                                    break
+                            prompt = (
+                                f"[RETRY AFTER STALL] The previous response produced no output for "
+                                f"{int(now - last_event_at[0])}s. Re-answer the operator's request now. "
+                                "If it is a question, answer it directly; otherwise continue the task "
+                                "from the saved state and keep actions visible."
+                            )
+                            yield _sse({"type": "status", "status": "WORKING"})
+                            terminal = True
+                            break
+                        aborted = True
+                        stop_reason = "model stall"
+                        add_note(f"> **Model stream stalled** — no output for "
+                                 f"{int(now - last_event_at[0])}s. Retry or reply `continue`.")
+                        yield _sse({"type": "error",
+                                    "message": "Model stream stalled with no output; stopped."})
+                        terminal = True
+                        break
                     continue
 
                 if isinstance(ev, tuple) and ev and ev[0] == "reasoning":
                     if reasoning_since is None:
                         reasoning_since = time.time()
                     turn_reasoning.append(ev[1])
+                    reason_out.append(ev[1])
+                    now = time.time()
+                    if len(reason_out) >= 80 or (now - last_reason_flush[0]) >= 0.2:
+                        yield _sse({"type": "thinking", "text": "".join(reason_out)})
+                        reason_out.clear()
+                        last_reason_flush[0] = now
                     continue
 
                 processed += 1
@@ -2669,6 +2728,14 @@ async def _agent_stream(body: ChatBody, request: Request):
                     await asyncio.sleep(0)
 
                 name = type(ev).__name__
+
+                if (stall_guard[0] and time.time() < stall_guard[0]
+                        and name in ("TaskCancelledEvent", "StatusChangeEvent")):
+                    st_guard = getattr(ev, "status", "")
+                    if name == "TaskCancelledEvent" or st_guard in ("CANCELLED", "READY"):
+                        continue
+                if name in ("AssistantChunkEvent", "CommandStartEvent"):
+                    stall_guard[0] = 0.0
 
                 if name == "AssistantChunkEvent":
                     chunk = getattr(ev, "chunk", "") or ""
@@ -2814,6 +2881,12 @@ async def _agent_stream(body: ChatBody, request: Request):
                     stream_out.clear()
                     last_stream_flush[0] = time.time()
 
+            if stall_retry:
+                stall_retry = False
+                last_event_at[0] = time.time()
+                yield _sse({"type": "status", "status": "THINKING"})
+                continue
+
             if _cancel_requested(body.thread_id):
                 aborted = True
                 stop_reason = stop_reason or ("time limit" if deadline_hit else "operator stop")
@@ -2890,6 +2963,10 @@ async def _agent_stream(body: ChatBody, request: Request):
                 )
                 continue
             break
+
+        if reason_out:
+            yield _sse({"type": "thinking", "text": "".join(reason_out)})
+            reason_out.clear()
 
         # flush any pending visible stream before the final report
         if stream_out:

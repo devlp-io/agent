@@ -8,6 +8,7 @@ import time
 import pathlib
 import threading
 from typing import Generator, List, Dict, Tuple, Optional
+import httpx
 from openai import OpenAI
 
 HERE = pathlib.Path(__file__).resolve().parent.parent
@@ -111,6 +112,9 @@ class ModelManager:
         self._reasoning_cb = None
         self.usage_totals = dict(_EMPTY_USAGE)
         self.model_override: Optional[str] = None
+        self._stream_lock = threading.Lock()
+        self._active_stream = None
+        self._abort = False
         self._load_profiles()
         self.active_profile_name = "deepseek-flash"
         self.effort = os.environ.get("AG_REASONING_EFFORT", "high")
@@ -305,12 +309,30 @@ class ModelManager:
                 f"API key missing for {cfg.name} (set {cfg.key_var} in .env or Settings)"
             )
         model = self.model_override or cfg.model
-        return OpenAI(base_url=cfg.base_url, api_key=key or "dummy-key"), model
+        # A stalled provider stream must raise instead of hanging the agent
+        # forever. Read timeout is per chunk; connect is separate.
+        read_timeout = float(os.environ.get("AG_LLM_TIMEOUT", "90") or 90)
+        timeout = httpx.Timeout(read_timeout, connect=20.0, write=30.0, pool=20.0)
+        return OpenAI(base_url=cfg.base_url, api_key=key or "dummy-key",
+                      timeout=timeout, max_retries=0), model
 
     def get_client(self) -> Tuple[OpenAI, str]:
         return self.get_client_for(self.active_config)
 
+    def cancel_stream(self) -> None:
+        """Close the active provider stream so a stalled call unblocks."""
+        with self._stream_lock:
+            self._abort = True
+            resp = self._active_stream
+        if resp is not None:
+            try:
+                resp.close()
+            except Exception:
+                pass
+
     def stream_chat(self, messages: List[Dict[str, str]], temperature: float = 0.2) -> Generator[str, None, None]:
+        with self._stream_lock:
+            self._abort = False
         # Build candidate configurations: active profile first, then any other configured profiles
         candidates = [self.active_config]
         for name, cfg in self.profiles.items():
@@ -358,28 +380,51 @@ class ModelManager:
                         else:
                             raise
                     has_yielded = False
-                    for chunk in response:
-                        usage = getattr(chunk, "usage", None)
-                        if usage is not None:
-                            self.record_usage(usage, cfg)
-                        if not chunk.choices:
-                            continue
-                        delta = chunk.choices[0].delta
-                        if delta is None:
-                            continue
-                        reasoning = getattr(delta, "reasoning_content", None)
-                        if reasoning:
-                            self._emit_reasoning(reasoning)
-                        if delta.content:
-                            has_yielded = True
-                            yield delta.content
+                    silence_limit = float(os.environ.get("AG_LLM_SILENCE", "75") or 75)
+                    last_signal = time.time()
+                    with self._stream_lock:
+                        self._active_stream = response
+                    try:
+                        for chunk in response:
+                            if self._abort:
+                                return
+                            usage = getattr(chunk, "usage", None)
+                            if usage is not None:
+                                self.record_usage(usage, cfg)
+                            if not chunk.choices:
+                                if time.time() - last_signal > silence_limit:
+                                    raise TimeoutError("model stream silent timeout")
+                                continue
+                            delta = chunk.choices[0].delta
+                            if delta is None:
+                                if time.time() - last_signal > silence_limit:
+                                    raise TimeoutError("model stream silent timeout")
+                                continue
+                            reasoning = getattr(delta, "reasoning_content", None)
+                            if reasoning:
+                                last_signal = time.time()
+                                self._emit_reasoning(reasoning)
+                            if delta.content:
+                                last_signal = time.time()
+                                has_yielded = True
+                                yield delta.content
+                    finally:
+                        with self._stream_lock:
+                            if self._active_stream is response:
+                                self._active_stream = None
+                    if self._abort:
+                        return
                     if has_yielded:
                         return
                 except Exception as e:
+                    if self._abort:
+                        return
                     err_str = str(e)
                     last_error = e
                     is_rate_limit = "429" in err_str or "rate_limit" in err_str.lower()
-                    if is_rate_limit and attempt < max_retries - 1:
+                    is_timeout = ("timeout" in err_str.lower() or "timed out" in err_str.lower()
+                                  or "APITimeout" in err_str)
+                    if (is_rate_limit or is_timeout) and attempt < max_retries - 1:
                         backoff = 2.0 * (attempt + 1)
                         time.sleep(backoff)
                         continue
