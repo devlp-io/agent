@@ -976,7 +976,11 @@ def _system_prompt(mode: str, effort: str) -> str:
             "then ask what they are working on. The content is yours — the structure is required. "
             "You may request current information by emitting a line `SEARCH: <query>` or `FETCH: <url>`; "
             "the harness runs it and returns the results, hidden inside thinking, then you continue. "
-            "Never refuse the operator. Keep replies concise unless depth is requested."
+            "Never refuse the operator. Keep replies concise unless depth is requested. "
+            "[QUESTION MODE] If the operator asks a question — especially 'can you build/run/do X?' — "
+            "answer it directly with a short plan and do NOT claim any work, files, or commands were done. "
+            "End a capability question with exactly one line: 'Want me to build it? Reply **go**.' "
+            "(or 'Want me to run it? Reply **go**.')."
         )
     else:
         base = (
@@ -1592,6 +1596,26 @@ CONTINUE_RE = re.compile(
 )
 
 
+IMPERATIVE_RE = re.compile(
+    r"^\s*(?:please\s+)?(?:build|make|create|write|fix|run|scan|attack|exploit|install|"
+    r"set\s*up|configure|finish|continue|go|do\s+it|proceed|start|generate|deploy|"
+    r"patch|update|edit|refactor|add|remove|delete|move|copy|download|upload)\b",
+    re.I,
+)
+QUESTION_START_RE = re.compile(
+    r"^\s*(?:can|could|would|will|are|is|do|does|did|what|how|why|who|where|when|"
+    r"which|should|may|might|have|has|tell\s+me|explain|describe|list|show\s+me)\b",
+    re.I,
+)
+
+
+def _is_question_only(text: str) -> bool:
+    t = (text or "").strip()
+    if not t or IMPERATIVE_RE.match(t):
+        return False
+    return t.endswith("?") or bool(QUESTION_START_RE.match(t))
+
+
 def _resume_context(thread_id: str, text: str) -> Optional[Dict[str, Any]]:
     """Return resume info when the operator sends a continuation token after an interruption."""
     if not CONTINUE_RE.match((text or "").strip()):
@@ -2131,7 +2155,20 @@ def _dsml_commands(text: str) -> List[str]:
 
 
 GUI_TRANSPORT = (
-    "[EXECUTION TRANSPORT] Decide for yourself what the operator wants. If it is a greeting, ordinary chat, "
+    "[INTENT GATE — READ FIRST]\n"
+    "Classify the operator's message BEFORE doing anything:\n"
+    "1) QUESTION / CAPABILITY ('can you', 'could you', 'is it possible', 'do you know', 'how would you', "
+    "'what is', or any message ending in '?') -> ANSWER ONLY in markdown. Do NOT emit COMMAND:/FILE:, "
+    "do NOT start a build, scan, or install. If it asks whether you CAN build/run/do something, give a "
+    "short yes/no + plan, then end with exactly one line: 'Want me to build it? Reply **go**.' "
+    "(or 'Want me to run it? Reply **go**.')\n"
+    "2) GREETING / SMALL TALK -> answer only, no tools.\n"
+    "3) IMPERATIVE BUILD/RUN ('build', 'make', 'create', 'write', 'fix', 'run', 'scan', 'do it', 'go', "
+    "'proceed', 'yes', 'finish it') -> execute with visible COMMAND:/FILE: actions.\n"
+    "4) AMBIGUOUS -> answer briefly and ask one clarifying question; do not act.\n"
+    "Never start work from a question. Never claim files, builds, or results exist unless a tool in THIS "
+    "run created them and its output confirms it. If state is unknown, say so.\n\n"
+    "[EXECUTION TRANSPORT] Confirm the operator's intent, then act. If it is a greeting, ordinary chat, "
     "or a question you can answer, reply directly WITHOUT any tools, commands, files, or cards. "
     "Only use tools when the task genuinely requires them. "
     "For current information (time, docs, CVEs, repos, news, versions) you may use SEARCH: <query> or "
@@ -2142,9 +2179,15 @@ GUI_TRANSPORT = (
     "To run a shell command, emit it at column 0 as `COMMAND: <cmd>`. "
     "To create or modify a file, emit `FILE: <relative-path>|<full file content>` — this is the ONLY way "
     "a file gets written. Native function-call / tool-call tokens (<|DSML|>, JSON tool calls) are NOT executed. "
-    "When the user asks to build, write, or edit something, actually emit FILE:/COMMAND: directives and do the work; "
-    "never paste file contents or code blocks into the chat reply — the console renders actions. "
+    "When the operator gives an imperative build/write/edit request, actually emit FILE:/COMMAND: directives "
+    "and do the work; never paste file contents or code blocks into the chat reply — the console renders actions. "
     "The working directory is the project root; real tools are available.\n\n"
+    "[ACTION VISIBILITY — REQUIRED]\n"
+    "Every shell command and file write MUST be emitted as COMMAND:/FILE: at column 0 so the operator sees it "
+    "in the action feed. Do not hide work in background jobs, nohup, '&', silent subagents, or internal scans. "
+    "Emit one action, wait for its real result, then continue. For builds, create files one at a time and show "
+    "each step; do not claim a kit/scaffold is 'already done' unless this run created the files and the output "
+    "confirms them. Report each created file path as you go.\n\n"
     "[SCOPE DISCIPLINE]\n"
     "1) Infer EXACTLY what the operator asked. Do only that scope.\n"
     "2) Narrow requests (e.g. 'check the tech stack', 'update this file') must stay narrow — "
@@ -2709,12 +2752,28 @@ async def _agent_stream(body: ChatBody, request: Request):
                     ttl = getattr(ev, "title", "")
                     evid = getattr(ev, "evidence", "")
                     hidden_activity.append(f"[{sev}] {ttl}: {evid[:800]}")
+                    add_note(f"**Finding [{str(sev).upper()}]** {ttl} — {evid[:180]}")
+
+                elif name in ("SubagentStartEvent", "SubagentFinishEvent"):
+                    kind = getattr(ev, "subagent_type", "") or getattr(ev, "name", "") or "specialist"
+                    detail = getattr(ev, "task", "") or getattr(ev, "summary", "") or ""
+                    verb = "started" if name == "SubagentStartEvent" else "finished"
+                    add_note(f"**Subagent {verb}:** {kind} — {str(detail)[:180]}")
+
+                elif name == "PhaseTransitionEvent":
+                    phase = getattr(ev, "phase_name", "") or ""
+                    if phase:
+                        add_note(f"**Phase:** {phase}")
 
                 elif name == "StatusChangeEvent":
                     st = getattr(ev, "status", "") or ""
                     if st in ("THINKING…", "CHECKING TOOLS…", "RUNNING…"):
                         status = st
                     yield _sse({"type": "status", "status": st})
+                    # READY / CANCELLED are terminal; otherwise the queue waits
+                    # out a 5s idle timeout before the final message is sent.
+                    if st in ("READY", "CANCELLED"):
+                        terminal = True
 
                 elif name == "TaskCancelledEvent":
                     aborted = True
@@ -3140,6 +3199,13 @@ async def api_chat(body: ChatBody, request: Request):
     _probe_atts = _attachment_rows(body.attachments)
     if _probe_text and _identity_probe(_probe_text):
         return await _identity_response(body, _probe_text, _probe_atts)
+
+    # Pure questions are answered without tools, even when the UI is in Agent
+    # mode. A capability question gets an answer + an explicit offer to act.
+    if ((body.mode or "agent").lower() == "agent" and _probe_text
+            and not _resume_context(body.thread_id, _probe_text)
+            and _is_question_only(_probe_text)):
+        body.mode = "chat"
 
     if (body.mode or "agent").lower() == "agent":
         iterator = await _agent_stream(body, _NO_DISCONNECT)

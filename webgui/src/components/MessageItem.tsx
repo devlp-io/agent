@@ -333,7 +333,7 @@ function Footer({ m, actions }: { m: Message; actions: number }) {
     const status = String(m.meta?.status ?? '')
     const working = /RUNNING|WORKING/i.test(status)
     return (
-      <div className="mt-2.5 flex items-center gap-1.5 text-[11.5px] text-faint">
+      <div className="relative z-10 mt-3 flex items-center gap-1.5 text-[11.5px] text-faint">
         <span className="text-muted">{working ? 'Working' : 'Thinking'}</span>
         <Dots />
         <span className="ml-1 tabular-nums">{elapsed > 1 ? `${elapsed.toFixed(0)}s` : ''}</span>
@@ -347,7 +347,7 @@ function Footer({ m, actions }: { m: Message; actions: number }) {
     ? `Stopped after ${totalSecs > 0.2 ? totalSecs.toFixed(1) : Math.max(0.1, elapsed).toFixed(1)}s${stopReason}`
     : `Worked ${totalSecs > 0.2 ? totalSecs.toFixed(1) : Math.max(0.1, elapsed).toFixed(1)}s`]
   if (actions > 0) bits.push(`${actions} action${actions === 1 ? '' : 's'}`)
-  return <div className="mt-2 text-[11px] text-faint">{bits.join(' · ')}</div>
+  return <div className="relative z-10 mt-3 text-[11px] text-faint">{bits.join(' · ')}</div>
 }
 
 function ThinkingBlock({ text }: { text: string }) {
@@ -395,8 +395,9 @@ export function MessageItem({ m, showThinking }: { m: Message; showThinking: boo
     .map((p, i) => (p.type === 'tool' || p.type === 'note' ? i : -1))
     .filter(i => i >= 0)
   const firstActivity = activityIdx.length ? activityIdx[0] : -1
-  const doneCollapse = !m.streaming && activityIdx.length > 0 && !showAllSteps
-  const collapse = m.streaming && !showAllSteps && actionIdx.length > 6
+  // Keep actions visible by default; only fold very long runs.
+  const doneCollapse = !m.streaming && activityIdx.length > 20 && !showAllSteps
+  const collapse = m.streaming && !showAllSteps && actionIdx.length > 20
   const firstShownAction = collapse ? actionIdx[actionIdx.length - 3] : -1
   const hiddenSteps = collapse ? actionIdx.length - 3 : 0
 
