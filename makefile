@@ -3,7 +3,7 @@ SHELL := /bin/bash
 AGENT := agent_v8.py
 VENV  := venv
 
-.PHONY: help install bootstrap run resume report lint clean update sync-cve tui gui gui-build gui-dev gui-test
+.PHONY: help install bootstrap run resume report lint clean update sync-cve tui gui gui-build gui-dev gui-test toolkits
 
 help:
 	@echo "targets:"
@@ -17,6 +17,7 @@ help:
 	@echo "  make gui           build + serve GUI at http://127.0.0.1:8788/gui"
 	@echo "  make gui-dev       Vite dev server on :5173 + API on :8788"
 	@echo "  make gui-test      GUI backend smoke tests"
+	@echo "  make toolkits      preinstall the modern toolkit (core profile)"
 	@echo "  make lint          syntax-check all .py files"
 	@echo "  make clean         drop __pycache__ + tmp"
 
@@ -77,3 +78,6 @@ gui-dev:
 
 gui-test:
 	@python3 webgui/test_api.py
+
+toolkits:
+	@python3 installer.py preinstall core

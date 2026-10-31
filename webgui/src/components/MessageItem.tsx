@@ -392,7 +392,12 @@ export function MessageItem({ m, showThinking }: { m: Message; showThinking: boo
     .map((p, i) => (p.type === 'tool' && p.tool === 'shell' ? i : -1))
     .filter(i => i >= 0)
   const lastShell = shellIdx.length ? shellIdx[shellIdx.length - 1] : -1
-  const collapse = !showAllSteps && actionIdx.length > 6
+  const activityIdx = parts
+    .map((p, i) => (p.type === 'tool' || p.type === 'note' ? i : -1))
+    .filter(i => i >= 0)
+  const firstActivity = activityIdx.length ? activityIdx[0] : -1
+  const doneCollapse = !m.streaming && activityIdx.length > 0 && !showAllSteps
+  const collapse = m.streaming && !showAllSteps && actionIdx.length > 6
   const firstShownAction = collapse ? actionIdx[actionIdx.length - 3] : -1
   const hiddenSteps = collapse ? actionIdx.length - 3 : 0
 
@@ -409,6 +414,44 @@ export function MessageItem({ m, showThinking }: { m: Message; showThinking: boo
 
       <div className="pl-7">
         {parts.map((p, i) => {
+          const activity = p.type === 'tool' || p.type === 'note'
+
+          if (doneCollapse && activity) {
+            if (i !== firstActivity) return null
+            return (
+              <button
+                key={`activity-${i}`}
+                onClick={() => setShowAllSteps(true)}
+                className="my-1.5 flex items-center gap-1.5 rounded-lg border border-line bg-panel2/40 px-2.5 py-1.5 text-[11px] text-faint transition hover:border-line2 hover:text-muted"
+              >
+                <ChevronRight size={11} />
+                Show {activityIdx.length} step{activityIdx.length === 1 ? '' : 's'}
+              </button>
+            )
+          }
+
+          if (showAllSteps && !m.streaming && activity && i === firstActivity) {
+            return (
+              <div key={`hide-${i}`}>
+                <button
+                  onClick={() => setShowAllSteps(false)}
+                  className="my-1.5 flex items-center gap-1.5 text-[11px] text-faint transition hover:text-muted"
+                >
+                  <ChevronRight size={11} className="rotate-90" />
+                  Hide steps
+                </button>
+                {p.type === 'tool'
+                  ? <ToolCard part={p} defaultOpen={p.tool === 'shell' && i === lastShell} />
+                  : (
+                    <div className="my-1 flex items-start gap-1.5 text-[11.5px] leading-snug text-faint">
+                      <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-faint/70" />
+                      <span className="min-w-0 break-words">{p.text.length > 220 ? p.text.slice(0, 217) + '…' : p.text}</span>
+                    </div>
+                  )}
+              </div>
+            )
+          }
+
           if (p.type === 'tool') {
             if (collapse && i < firstShownAction) return null
             return (

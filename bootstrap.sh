@@ -67,3 +67,9 @@ echo "  [✓] SOM-SCAN Setup Complete for WSL Ubuntu!"
 echo "  To launch interactive CLI:  ./somscan"
 echo "  Or with arguments:         ./somscan --scan <target>"
 echo "========================================================"
+
+# ── Modern toolkit preinstall (first install) ─────────────────────────────
+if command -v python3 >/dev/null 2>&1; then
+    echo "[+] Pre-installing the modern SOM-SCAN toolkit (core profile)..."
+    python3 "$DIR/installer.py" preinstall core || true
+fi

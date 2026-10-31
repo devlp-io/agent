@@ -288,3 +288,46 @@ def find(query):
         if q in name.lower() or q in t.get("desc", "").lower():
             out.append((name, t))
     return out
+
+
+# ═══════════════════════════════════════════════════════════════════
+# MODERN OSINT + ADVANCED RED-TEAM TOOLKIT (2025/2026 stack)
+# ═══════════════════════════════════════════════════════════════════
+TOOLS.update({
+    # OSINT — people, handles, email, phone, socials
+    "sherlock":      {"check": "command -v sherlock",      "install": "pipx install sherlock-project || pip install --user --break-system-packages sherlock-project", "category": "osint", "desc": "hunt usernames across 400+ social networks", "url": "https://github.com/sherlock-project/sherlock"},
+    "maigret":       {"check": "command -v maigret",       "install": "pipx install maigret || pip install --user --break-system-packages maigret", "category": "osint", "desc": "deep username OSINT across 3000+ sites with reports", "url": "https://github.com/soxoj/maigret"},
+    "holehe":        {"check": "command -v holehe",        "install": "pipx install holehe || pip install --user --break-system-packages holehe", "category": "osint", "desc": "email registered-account finder across services", "url": "https://github.com/megadose/holehe"},
+    "socialscan":    {"check": "command -v socialscan",    "install": "pipx install socialscan || pip install --user --break-system-packages socialscan", "category": "osint", "desc": "username/email availability across platforms", "url": "https://github.com/iojw/socialscan"},
+    "ghunt":         {"check": "command -v ghunt",         "install": "pipx install ghunt || pip install --user --break-system-packages ghunt", "category": "osint", "desc": "Google account OSINT (email, GAIA, maps, drive)", "url": "https://github.com/mxrch/GHunt"},
+    "theHarvester":  {"check": "command -v theHarvester",  "install": "pipx install theHarvester || pip install --user --break-system-packages theHarvester", "category": "osint", "desc": "emails, hosts, subdomains, employee names", "url": "https://github.com/laramies/theHarvester"},
+    "spiderfoot":    {"check": "command -v spiderfoot",    "install": "pipx install spiderfoot || pip install --user --break-system-packages spiderfoot", "category": "osint", "desc": "automated OSINT correlation engine", "url": "https://github.com/smicallef/spiderfoot"},
+    "h8mail":        {"check": "command -v h8mail",         "install": "pipx install h8mail || pip install --user --break-system-packages h8mail", "category": "osint", "desc": "email breach exposure and hunting", "url": "https://github.com/khast3x/h8mail"},
+    "phoneinfoga":   {"check": "command -v phoneinfoga",   "install": "go install -v github.com/sundowndev/phoneinfoga/v2/cmd/phoneinfoga@latest", "category": "osint", "desc": "phone number intelligence framework", "url": "https://github.com/sundowndev/phoneinfoga"},
+    "mosint":        {"check": "command -v mosint",        "install": "go install -v github.com/alpkeskin/mosint/v3/cmd/mosint@latest", "category": "osint", "desc": "email OSINT: breaches, socials, leaks", "url": "https://github.com/alpkeskin/mosint"},
+    "instaloader":   {"check": "command -v instaloader",   "install": "pipx install instaloader || pip install --user --break-system-packages instaloader", "category": "osint", "desc": "Instagram profile/posts metadata downloader", "url": "https://github.com/instaloader/instaloader"},
+    "waymore":       {"check": "command -v waymore",       "install": "pipx install waymore || pip install --user --break-system-packages waymore", "category": "osint", "desc": "find URLs from Wayback, Common Crawl, AlienVault", "url": "https://github.com/xnl-h4ck3r/waymore"},
+
+    # ADVANCED AD / CREDS
+    "impacket":      {"check": "command -v impacket-secretsdump", "install": "pipx install impacket || pip install --user --break-system-packages impacket", "category": "pivot", "desc": "AD/SMB protocol toolkit (secretsdump, psexec, wmiexec)", "url": "https://github.com/fortra/impacket"},
+    "netexec":       {"check": "command -v nxc",           "install": "pipx install netexec || pip install --user --break-system-packages netexec", "category": "creds", "desc": "modern SMB/WinRM/LDAP/MSSQL/SSH swiss-army attack tool", "url": "https://github.com/Pennyw0rth/NetExec"},
+    "coercer":       {"check": "command -v coercer",       "install": "pipx install coercer || pip install --user --break-system-packages coercer", "category": "pivot", "desc": "coerce Windows hosts to authenticate (PetitPotam/PrinterBug)", "url": "https://github.com/p0dalirius/Coercer"},
+
+    # CLOUD
+    "cloudfox":      {"check": "command -v cloudfox",      "install": "go install -v github.com/BishopFox/cloudfox@latest", "category": "cloud", "desc": "AWS/Azure/GCP attack-surface enumeration", "url": "https://github.com/BishopFox/cloudfox"},
+    "scoutsuite":    {"check": "command -v scout",         "install": "pipx install scoutsuite || pip install --user --break-system-packages scoutsuite", "category": "cloud", "desc": "multi-cloud security posture auditing", "url": "https://github.com/nccgroup/ScoutSuite"},
+    "kube-hunter":   {"check": "command -v kube-hunter",   "install": "pipx install kube-hunter || pip install --user --break-system-packages kube-hunter", "category": "cloud", "desc": "Kubernetes penetration testing", "url": "https://github.com/aquasecurity/kube-hunter"},
+    "checkov":       {"check": "command -v checkov",       "install": "pipx install checkov || pip install --user --break-system-packages checkov", "category": "cloud", "desc": "IaC / container / cloud policy scanner", "url": "https://github.com/bridgecrewio/checkov"},
+    "trivy":         {"check": "command -v trivy",         "install": "curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sh -s -- -b ~/agent/tools", "category": "cloud", "desc": "vuln, secret and misconfig scanner for images/repos/IaC", "url": "https://github.com/aquasecurity/trivy"},
+
+    # RE / MALWARE / MOBILE
+    "capa":          {"check": "command -v capa",          "install": "pipx install flare-capa || pip install --user --break-system-packages flare-capa", "category": "reversing", "desc": "capability detection in malware binaries (FLARE)", "url": "https://github.com/mandiant/capa"},
+    "floss":         {"check": "command -v floss",         "install": "pipx install flare-floss || pip install --user --break-system-packages flare-floss", "category": "reversing", "desc": "extract obfuscated strings from malware (FLARE)", "url": "https://github.com/mandiant/flare-floss"},
+    "semgrep":       {"check": "command -v semgrep",       "install": "pipx install semgrep || pip install --user --break-system-packages semgrep", "category": "web", "desc": "fast static analysis / SAST for code review", "url": "https://github.com/semgrep/semgrep"},
+
+    # ATTACK SURFACE / MODERN RECON
+    "uncover":       {"check": "command -v uncover",       "install": "go install -v github.com/projectdiscovery/uncover/cmd/uncover@latest", "category": "recon", "desc": "query Shodan/Censys/Fofa/ZoomEye from one CLI", "url": "https://github.com/projectdiscovery/uncover"},
+    "alterx":        {"check": "command -v alterx",        "install": "go install -v github.com/projectdiscovery/alterx/cmd/alterx@latest", "category": "recon", "desc": "fast subdomain permutation engine", "url": "https://github.com/projectdiscovery/alterx"},
+    "cloudlist":     {"check": "command -v cloudlist",     "install": "go install -v github.com/projectdiscovery/cloudlist/cmd/cloudlist@latest", "category": "cloud", "desc": "enumerate cloud assets (AWS/GCP/Azure/DigitalOcean)", "url": "https://github.com/projectdiscovery/cloudlist"},
+    "notify":        {"check": "command -v notify",        "install": "go install -v github.com/projectdiscovery/notify/cmd/notify@latest", "category": "util", "desc": "stream tool output to Slack/Discord/Telegram/webhook", "url": "https://github.com/projectdiscovery/notify"},
+})

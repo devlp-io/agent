@@ -1684,7 +1684,13 @@ GUI_TRANSPORT = (
     "4) Do not create files unless the task requires them. Temporary helper scripts are allowed but MUST be "
     "deleted before you finish. Never mutate an existing file with sed -i, echo >, or shell redirects — "
     "read it and rewrite it with FILE: <path>|<complete updated content>.\n"
-    "5) Verify with the real output, adapt on failure, and report only what was verified. "
+    "5) TOOLKITS: prefer real, modern tools over hand-rolled scripts. Check with `command -v` "
+    "(or `python3 installer.py status`); if missing, install it with INSTALL: or the right package "
+    "manager, verify, then use it. Core stack: ProjectDiscovery (subfinder/httpx/katana/nuclei/naabu/tlsx/uncover), "
+    "OSINT (sherlock/maigret/holehe/socialscan/theHarvester/ghunt/h8mail/phoneinfoga/mosint/waymore), "
+    "AD/creds (netexec/certipy/impacket/bloodhound/coercer/kerbrute), cloud (prowler/cloudfox/scoutsuite/trivy/checkov), "
+    "RE/malware (capa/floss/frida/objection/jadx/apktool), code (semgrep). Newly installed tools join the pool. "
+    "Verify with the real output, adapt on failure, and report only what was verified. "
     "Shell is /bin/sh (POSIX dash): no bashisms, no process substitution <(...), no arrays — "
     "write a Python script with FILE: for complex logic. If a host is unreachable or blocked twice, "
     "report the limitation instead of retrying forever.\n"
@@ -2816,6 +2822,64 @@ def api_job_cancel(thread_id: str):
         except Exception:
             pass
     return {"ok": True}
+
+
+# ── toolkit pool ───────────────────────────────────────────────────────────
+_toolkit_state: Dict[str, Any] = {"running": False, "started": None, "result": None}
+
+
+def _toolkit_snapshot() -> Dict[str, Any]:
+    try:
+        import installer
+        st = installer.status()
+        core = getattr(installer, "PREINSTALL_CORE", [])
+        core_installed = [n for n in core if n in set(st.get("installed_list", []))]
+        return {
+            "platform": st.get("platform"),
+            "total": st.get("total_in_db"),
+            "installed": st.get("installed"),
+            "verified": st.get("verified_count"),
+            "installed_list": st.get("installed_list", [])[:400],
+            "core": core,
+            "core_installed": core_installed,
+            "core_missing": [n for n in core if n not in core_installed],
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def _run_toolkit_preinstall():
+    _toolkit_state["running"] = True
+    _toolkit_state["started"] = time.time()
+    try:
+        import installer
+        res = installer.preinstall_core()
+        _toolkit_state["result"] = {
+            "installed": res.get("installed", []),
+            "already": len(res.get("already", [])),
+            "failed": [n for n, _ in res.get("failed", [])],
+        }
+    except Exception as e:
+        _toolkit_state["result"] = {"error": str(e)}
+    finally:
+        _toolkit_state["running"] = False
+        try:
+            (DATA_DIR / "toolkits_preinstalled").write_text(str(int(time.time())))
+        except Exception:
+            pass
+
+
+@app.get("/api/v2/toolkits")
+def api_toolkits():
+    return {"state": _toolkit_state, "pool": _toolkit_snapshot()}
+
+
+@app.post("/api/v2/toolkits/preinstall")
+def api_toolkits_preinstall():
+    if _toolkit_state.get("running"):
+        return {"ok": True, "running": True}
+    threading.Thread(target=_run_toolkit_preinstall, name="toolkit-preinstall", daemon=True).start()
+    return {"ok": True, "running": True}
 
 
 # ── scans (delegate) ───────────────────────────────────────────────────────

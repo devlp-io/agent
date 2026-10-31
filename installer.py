@@ -926,7 +926,18 @@ def ensure_tools_for_task(task_or_target: str, auto_install: bool = True, on_sta
 
 REDTEAM_CATEGORIES = [
     "recon", "web", "fuzz", "network", "pivot", "creds",
-    "api", "secrets", "cloud", "util", "wordlist", "reversing", "misc"
+    "api", "secrets", "cloud", "osint", "util", "wordlist", "reversing", "misc"
+]
+
+# First-install modern toolkit: high-signal, cross-lane tools that make the agent
+# useful out of the box. Everything else is installed on demand by the agent.
+PREINSTALL_CORE = [
+    "sherlock", "maigret", "holehe", "socialscan", "theHarvester", "h8mail",
+    "phoneinfoga", "mosint", "waymore",
+    "netexec", "certipy", "impacket", "coercer", "kerbrute", "bloodhound-python",
+    "cloudfox", "scoutsuite", "kube-hunter", "checkov", "trivy",
+    "capa", "floss", "semgrep", "dalfox",
+    "uncover", "alterx", "cloudlist", "notify",
 ]
 
 
@@ -962,6 +973,34 @@ def preinstall_category(category: str, on_status=None):
             results["failed"].append((t, out))
             if on_status:
                 on_status(f"[{cat.upper()}] ✗ {t} failed: {out[:80]}")
+    return results
+
+
+def preinstall_core(on_status=None):
+    """Install and verify the curated modern toolkit used by the GUI agent."""
+    bootstrap_foundation(on_status=on_status)
+    results = {"profile": "core", "already": [], "installed": [], "failed": []}
+    for name in PREINSTALL_CORE:
+        if name not in TOOLS:
+            continue
+        if is_verified(name):
+            results["already"].append(name)
+            continue
+        if on_status:
+            on_status(f"[CORE] Installing {name}...")
+        try:
+            out = install_any(name)
+        except Exception as e:
+            out = f"{type(e).__name__}: {e}"
+        if is_verified(name):
+            mark_verified(name, True, out)
+            results["installed"].append(name)
+            if on_status:
+                on_status(f"[CORE] ✓ {name} ready")
+        else:
+            results["failed"].append((name, str(out)[:200]))
+            if on_status:
+                on_status(f"[CORE] ✗ {name} failed: {str(out)[:80]}")
     return results
 
 
@@ -1017,7 +1056,9 @@ if __name__ == "__main__":
         print(json.dumps(ensure_tools_for_task(target, auto_install=False), indent=2))
     elif cmd == "preinstall":
         cat = sys.argv[2] if len(sys.argv) > 2 else "all"
-        if cat == "all":
+        if cat == "core":
+            print(json.dumps(preinstall_core(on_status=print), indent=2))
+        elif cat == "all":
             print(json.dumps(preinstall_all_categories(on_status=print), indent=2))
         else:
             print(json.dumps(preinstall_category(cat, on_status=print), indent=2))

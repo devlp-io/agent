@@ -33,6 +33,7 @@ export function SettingsModal({
   const [tools, setTools] = useState<{ name: string; category: string; desc: string; installed: boolean }[]>([])
   const [toolBusy, setToolBusy] = useState<string | null>(null)
   const [toolQuery, setToolQuery] = useState('')
+  const [toolkit, setToolkit] = useState<{ running: boolean; installed?: number; missing?: number } | null>(null)
 
   useEffect(() => {
     if (!open) return
@@ -44,6 +45,20 @@ export function SettingsModal({
     if (!open || tab !== 'tools' || tools.length) return
     api.tools().then(r => setTools(r.tools)).catch(() => {})
   }, [open, tab, tools.length])
+
+  useEffect(() => {
+    if (!open || tab !== 'tools') return
+    let alive = true
+    const load = () => api.toolkits().then(r => {
+      if (!alive) return
+      const core = (r.pool?.core_installed as string[] | undefined) || []
+      const missing = (r.pool?.core_missing as string[] | undefined) || []
+      setToolkit({ running: r.state.running, installed: core.length, missing: missing.length })
+    }).catch(() => {})
+    load()
+    const t = setInterval(load, 4000)
+    return () => { alive = false; clearInterval(t) }
+  }, [open, tab])
 
   if (!open) return null
 
@@ -160,6 +175,33 @@ export function SettingsModal({
 
           {tab === 'tools' && (
             <div>
+              <div className="mb-3 rounded-xl border border-line bg-panel2/60 p-3">
+                <div className="flex items-center gap-2">
+                  <Wrench size={14} className="text-accent" />
+                  <span className="flex-1 text-[12px] font-medium">Modern toolkit pool</span>
+                  <span className="text-[11px] text-faint">
+                    {toolkit ? `${toolkit.installed ?? 0} ready${toolkit.missing ? ` · ${toolkit.missing} missing` : ''}` : '—'}
+                  </span>
+                </div>
+                <p className="mt-1 text-[11px] leading-snug text-faint">
+                  Installs the curated modern stack (OSINT, AD, cloud, RE, web) and adds it to the agent pool.
+                </p>
+                <button
+                  className="btn btn-primary mt-2 h-8 w-full text-[12px]"
+                  disabled={!!toolkit?.running}
+                  onClick={async () => {
+                    try {
+                      await api.preinstallToolkits()
+                      pushToast('toolkit preinstall started', 'ok')
+                    } catch (e) {
+                      pushToast(e instanceof Error ? e.message : 'preinstall failed', 'err')
+                    }
+                  }}
+                >
+                  {toolkit?.running ? <Loader2 size={14} className="spin-slow" /> : <Download size={14} />}
+                  {toolkit?.running ? 'Installing toolkit…' : 'Preinstall modern toolkit'}
+                </button>
+              </div>
               <input
                 value={toolQuery}
                 onChange={e => setToolQuery(e.target.value)}

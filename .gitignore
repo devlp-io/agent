@@ -126,3 +126,7 @@ intel/*.py.pre-*.bak
 evidence/*.py.bak.*
 evidence/*.py.pre-*.bak
 scans/
+
+# keep webgui TypeScript helpers (root lib/ pattern must not swallow them)
+!webgui/src/lib/
+!webgui/src/lib/**
