@@ -146,6 +146,14 @@ def init_db() -> None:
                 history TEXT NOT NULL,
                 updated REAL NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS runs (
+                thread_id TEXT PRIMARY KEY,
+                message_id TEXT,
+                status TEXT NOT NULL DEFAULT 'idle',
+                objective TEXT,
+                started REAL,
+                updated REAL
+            );
             """
         )
         for col, decl in (
@@ -403,6 +411,34 @@ async def _job_reader(job: Dict[str, Any], iterator) -> None:
     finally:
         job["done"] = True
         job["finished"] = time.time()
+        try:
+            run = _run_get(thread_id)
+            if run and run.get("status") == "running":
+                status = "cancelled" if job.get("cancel") else "interrupted"
+                _run_set(thread_id, status=status)
+                mid = run.get("message_id")
+                if mid:
+                    with _db() as c:
+                        m = c.execute("SELECT content, parts, meta FROM messages WHERE id=?", (mid,)).fetchone()
+                    if m:
+                        try:
+                            meta = json.loads(m["meta"] or "{}")
+                        except Exception:
+                            meta = {}
+                        try:
+                            parts = json.loads(m["parts"] or "[]")
+                        except Exception:
+                            parts = []
+                        meta["run_status"] = status
+                        meta["partial"] = False
+                        _mark_partial_parts(parts)
+                        content = (m["content"] or "").strip()
+                        if not content:
+                            content = ("**Task interrupted before completion.** "
+                                       "Send `continue` to resume from the saved state.")
+                        _message_update(mid, content, parts, meta)
+        except Exception:
+            pass
 
 
 def _start_job(thread_id: str, iterator) -> Dict[str, Any]:
@@ -1238,6 +1274,10 @@ def api_messages(thread_id: str):
         rows = c.execute(
             "SELECT * FROM messages WHERE thread_id=? ORDER BY created ASC", (thread_id,)
         ).fetchall()
+    run = _run_get(thread_id)
+    live_job = _jobs.get(thread_id)
+    hide_id = run.get("message_id") if (run and run.get("status") == "running"
+                                        and live_job and not live_job.get("done")) else None
     return {
         "thread": {
             "id": t["id"], "title": t["title"], "model": t["model"], "mode": t["mode"],
@@ -1246,7 +1286,8 @@ def api_messages(thread_id: str):
             "cost_usd": float(t["cost_usd"] or 0),
             "requests": int(t["requests"] or 0),
         },
-        "messages": [_row_to_message(r) for r in rows],
+        "run": run,
+        "messages": [_row_to_message(r) for r in rows if r["id"] != hide_id],
     }
 
 
@@ -1423,6 +1464,145 @@ def _save_agent_session(thread_id: str, router) -> None:
     except Exception:
         pass
 
+
+def _mark_partial_parts(parts: List[Dict[str, Any]]) -> None:
+    for p in parts or []:
+        if p.get("type") == "tool" and p.get("status") == "running":
+            p["status"] = "cancelled"
+            p["ok"] = False
+            out = p.get("output") or ""
+            if "[interrupted" not in out:
+                p["output"] = out + "\n[interrupted — state saved]"
+
+
+def _message_update(mid: str, content: str, parts: List[Dict[str, Any]],
+                    meta: Dict[str, Any]) -> None:
+    try:
+        with _db() as c:
+            c.execute(
+                "UPDATE messages SET content=?, parts=?, meta=? WHERE id=?",
+                (content, json.dumps(parts, ensure_ascii=False),
+                 json.dumps(meta, ensure_ascii=False), mid),
+            )
+    except Exception:
+        pass
+
+
+def _run_get(thread_id: str) -> Optional[Dict[str, Any]]:
+    try:
+        with _db() as c:
+            row = c.execute("SELECT * FROM runs WHERE thread_id=?", (thread_id,)).fetchone()
+        return dict(row) if row else None
+    except Exception:
+        return None
+
+
+def _run_set(thread_id: str, status: Optional[str] = None, message_id: Optional[str] = None,
+             objective: Optional[str] = None, started: Optional[float] = None) -> None:
+    now = _now()
+    try:
+        with _db() as c:
+            row = c.execute("SELECT * FROM runs WHERE thread_id=?", (thread_id,)).fetchone()
+            if row:
+                c.execute(
+                    "UPDATE runs SET status=COALESCE(?,status), message_id=COALESCE(?,message_id), "
+                    "objective=COALESCE(?,objective), started=COALESCE(?,started), updated=? "
+                    "WHERE thread_id=?",
+                    (status, message_id, objective, started, now, thread_id),
+                )
+            else:
+                c.execute(
+                    "INSERT INTO runs(thread_id,message_id,status,objective,started,updated) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (thread_id, message_id, status or "idle", objective, started or now, now),
+                )
+    except Exception:
+        pass
+
+
+def _run_touch(thread_id: str) -> None:
+    try:
+        with _db() as c:
+            c.execute("UPDATE runs SET updated=? WHERE thread_id=?", (_now(), thread_id))
+    except Exception:
+        pass
+
+
+def _mark_orphan_runs() -> None:
+    """A run left 'running' after a restart is interrupted; keep its partial message."""
+    try:
+        with _db() as c:
+            rows = c.execute(
+                "SELECT thread_id, message_id FROM runs WHERE status='running'"
+            ).fetchall()
+            now = _now()
+            for r in rows:
+                c.execute(
+                    "UPDATE runs SET status='interrupted', updated=? WHERE thread_id=?",
+                    (now, r["thread_id"]),
+                )
+                mid = r["message_id"]
+                if not mid:
+                    continue
+                m = c.execute("SELECT content, parts, meta FROM messages WHERE id=?", (mid,)).fetchone()
+                if not m:
+                    continue
+                try:
+                    meta = json.loads(m["meta"] or "{}")
+                except Exception:
+                    meta = {}
+                try:
+                    parts = json.loads(m["parts"] or "[]")
+                except Exception:
+                    parts = []
+                _mark_partial_parts(parts)
+                meta["run_status"] = "interrupted"
+                meta["partial"] = False
+                content = (m["content"] or "").strip()
+                if not content:
+                    content = ("**Task interrupted before completion.** "
+                               "Send `continue`, `.`, `k`, or `u` to resume from the saved state.")
+                c.execute(
+                    "UPDATE messages SET content=?, parts=?, meta=? WHERE id=?",
+                    (content, json.dumps(parts, ensure_ascii=False),
+                     json.dumps(meta, ensure_ascii=False), mid),
+                )
+    except Exception:
+        pass
+
+
+CONTINUE_RE = re.compile(
+    r"^\s*(?:"
+    r"[.,!?]+|k|u|ok(?:ay)?|y(?:es)?|go|next|more|"
+    r"continue(?:\b.*)?|resume(?:\b.*)?|proceed(?:\b.*)?|"
+    r"keep\s+going|go\s+on|carry\s+on|finish(?:\s+it)?|"
+    r"pick\s+up(?:\b.*)?|where\s+were\s+we"
+    r")\s*[.,!?]*\s*$",
+    re.I,
+)
+
+
+def _resume_context(thread_id: str, text: str) -> Optional[Dict[str, Any]]:
+    """Return resume info when the operator sends a continuation token after an interruption."""
+    if not CONTINUE_RE.match((text or "").strip()):
+        return None
+    run = _run_get(thread_id)
+    if not run or run.get("status") not in ("interrupted", "cancelled", "running"):
+        return None
+    if run.get("status") == "running":
+        # A live job would have rejected this message already; treat a stale marker as resumable.
+        if _jobs.get(thread_id) and not _jobs[thread_id].get("done"):
+            return None
+    if not run.get("objective") and not _load_agent_session(thread_id):
+        return None
+    return {
+        "objective": run.get("objective") or "",
+        "status": run.get("status"),
+        "message_id": run.get("message_id"),
+    }
+
+
+_mark_orphan_runs()
 
 GUI_STYLE = (
     "\n\n[GUI OUTPUT STYLE — strict] You are rendered in a web chat UI. "
@@ -2110,6 +2290,9 @@ async def _agent_stream(body: ChatBody, request: Request):
     if not text and not atts:
         raise HTTPException(400, "empty message")
 
+    resume = _resume_context(body.thread_id, text)
+    run_objective = (resume.get("objective") if resume else "") or text
+
     router = _router_for(body.thread_id)
     if router.is_busy:
         raise HTTPException(409, "agent is already running in this chat — stop it first")
@@ -2135,8 +2318,22 @@ async def _agent_stream(body: ChatBody, request: Request):
     queue: asyncio.Queue = asyncio.Queue()
     holder = getattr(router, "_gui_holder", None)
 
+    _last_hist_save = [0.0]
+
     def cb(ev):
         loop.call_soon_threadsafe(queue.put_nowait, ev)
+        # Persist the agent's full history while it works, so a crash or
+        # restart cannot lose the run. Called on the agent thread.
+        try:
+            now = time.time()
+            cls = type(ev).__name__
+            if (now - _last_hist_save[0] >= 2.0
+                    or cls in ("CommandFinishEvent", "AssistantMessageEvent", "TaskCompleteEvent")):
+                _last_hist_save[0] = now
+                _save_agent_session(body.thread_id, router)
+                _run_touch(body.thread_id)
+        except Exception:
+            pass
 
     async def gen():
         from core.model_manager import usage_snapshot, usage_delta
@@ -2173,6 +2370,45 @@ async def _agent_stream(body: ChatBody, request: Request):
         failures: List[Dict[str, str]] = []
         retried: set = set()
         retry_rounds = 0
+
+        # Live message: persisted immediately and updated as the run progresses.
+        # If the process dies, this row keeps the partial answer and tool cards.
+        live = _persist_message(body.thread_id, "assistant", "", [], [], {
+            "mode": "agent", "engine": "cli", "effort": body.effort,
+            "objective": (run_objective or "")[:300],
+            "model": router.model_manager.display_name,
+            "run_status": "running", "partial": True, "started": started,
+        })
+        live_id = live["id"]
+        _run_set(body.thread_id, status="running", message_id=live_id,
+                 objective=run_objective, started=started)
+        _last_live_save = [0.0]
+
+        def persist_live(force: bool = False) -> None:
+            now = time.time()
+            if not force and now - _last_live_save[0] < 2.0:
+                return
+            _last_live_save[0] = now
+            # Keep the periodic snapshot small; the final write stores it all.
+            live_parts: List[Dict[str, Any]] = []
+            for p in parts:
+                q = dict(p)
+                out = q.get("output")
+                if isinstance(out, str) and len(out) > 4000:
+                    q["output"] = out[:4000] + "\n… [partial]"
+                live_parts.append(q)
+            meta = {
+                "mode": "agent", "engine": "cli", "effort": body.effort,
+                "objective": (run_objective or "")[:300],
+                "model": router.model_manager.display_name,
+                "tools": tools[-40:], "iterations": len(tools),
+                "run_status": "running", "partial": True,
+                "started": started, "thought_ms": int(thought_ms),
+                "duration_ms": int((now - started) * 1000),
+            }
+            _message_update(live_id, last_reply or "", live_parts, meta)
+
+        persist_live(True)
 
         def on_reasoning(txt: str):
             loop.call_soon_threadsafe(queue.put_nowait, ("reasoning", txt))
@@ -2276,7 +2512,20 @@ async def _agent_stream(body: ChatBody, request: Request):
                 "Create new files and projects there. You may read or access any other directory or existing "
                 "workspace on this box when the task needs it, but do not repurpose an existing project for new work.\n\n"
             )
-        prompt = (_mission_constraints(text) + session_block + GUI_TRANSPORT
+        resume_block = ""
+        if resume:
+            add_note("Resuming interrupted task — saved state loaded.")
+            resume_block = (
+                "[RESUME INTERRUPTED TASK]\n"
+                "The previous run in this chat was interrupted before it finished. "
+                "Do NOT restart from scratch.\n"
+                f"Original objective: {run_objective}\n"
+                "Review the saved conversation and tool output above, verify the current state with cheap checks, "
+                "and continue from the last completed step. Re-do only what is missing or invalid. "
+                "When finished, deliver the normal final report.\n"
+                f"Operator continuation: {text}\n\n"
+            )
+        prompt = (resume_block + _mission_constraints(text) + session_block + GUI_TRANSPORT
                   + _attachments_context(atts) + (text or "Please review the attached files."))
         followups = 0
         limit_hit = False
@@ -2325,6 +2574,7 @@ async def _agent_stream(body: ChatBody, request: Request):
                 except asyncio.TimeoutError:
                     if not router.is_busy and queue.empty():
                         break
+                    persist_live(force=True)
                     continue
 
                 if isinstance(ev, tuple) and ev and ev[0] == "reasoning":
@@ -2451,6 +2701,8 @@ async def _agent_stream(body: ChatBody, request: Request):
                     msg = getattr(ev, "error", "") or ""
                     add_note(f"> **error** · {msg}")
                     yield _sse({"type": "error", "message": msg})
+
+                persist_live()
 
             if _cancel_requested(body.thread_id):
                 aborted = True
@@ -2772,15 +3024,24 @@ async def _agent_stream(body: ChatBody, request: Request):
         if not content:
             notes = [p["text"] for p in visible if p.get("type") == "note"]
             content = "\n\n".join(notes).strip()
+        run_status = "cancelled" if aborted else "done"
+        if not content:
+            content = ("**Task stopped before completion.** Send `continue` to resume."
+                       if aborted else "Task finished.")
         meta = {"mode": "agent", "engine": "cli", "effort": body.effort,
-                "objective": (text or "")[:300],
+                "objective": (run_objective or "")[:300],
                 "model": router.model_manager.display_name, "tools": tools,
                 "iterations": len(tools), "aborted": aborted,
+                "run_status": run_status, "partial": False,
                 "thought_ms": int(thought_ms),
                 "duration_ms": int((time.time() - started) * 1000),
                 "hidden_activity": hidden_activity[:60],
                 "session_id": getattr(router, "session_id", None)}
-        assistant = _persist_message(body.thread_id, "assistant", content, ordered, [], meta)
+        _message_update(live_id, content, ordered, meta)
+        _run_set(body.thread_id, status=run_status)
+        assistant = {"id": live_id, "thread_id": body.thread_id, "role": "assistant",
+                     "content": content, "parts": ordered, "attachments": [],
+                     "meta": meta, "created": live["created"], "created_iso": live["created_iso"]}
         final_title = title
         if title_task is not None:
             try:

@@ -95,6 +95,30 @@ def main():
     r = client.post("/api/v2/chat", json={"thread_id": tid, "text": ""})
     check("chat empty message 400", r.status_code == 400)
 
+    # interrupted-run snapshot + continuation tokens
+    r = client.post("/api/v2/threads", json={})
+    rt = r.json()["id"]
+    live = server._persist_message(
+        rt, "assistant", "",
+        [{"type": "tool", "tool": "shell", "args": {"cmd": "sleep 9"},
+          "output": "", "ok": None, "status": "running", "call_id": "c1"}],
+        [], {"run_status": "running"},
+    )
+    server._run_set(rt, status="running", message_id=live["id"], objective="scan example.com")
+    server._mark_orphan_runs()
+    run = server._run_get(rt)
+    check("orphan run interrupted", run["status"] == "interrupted")
+    r = client.get(f"/api/v2/threads/{rt}/messages")
+    body = r.json()
+    partial = [m for m in body["messages"] if m["id"] == live["id"]][0]
+    check("partial tool marked cancelled",
+          partial["parts"][0]["status"] == "cancelled" and partial["parts"][0]["ok"] is False)
+    check("run exposed", body.get("run", {}).get("status") == "interrupted")
+    check("continuation tokens resume",
+          all(server._resume_context(rt, t) for t in (".", ",", "k", "k,", "u", "continue", "go on")))
+    check("normal text does not resume", server._resume_context(rt, "hello") is None)
+    client.delete(f"/api/v2/threads/{rt}")
+
     r = client.delete(f"/api/v2/threads/{tid}")
     check("thread delete", r.status_code == 200 and r.json()["ok"] is True)
 

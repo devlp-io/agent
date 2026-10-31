@@ -85,6 +85,15 @@ export type ModelProfile = {
   price_out?: number
 }
 
+export type RunInfo = {
+  thread_id: string
+  message_id?: string | null
+  status: 'running' | 'interrupted' | 'cancelled' | 'done' | 'idle'
+  objective?: string | null
+  started?: number | null
+  updated?: number | null
+}
+
 export type Usage = {
   input_tokens: number
   output_tokens: number

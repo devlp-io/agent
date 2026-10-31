@@ -1,5 +1,5 @@
 import type {
-  Attachment, Message, ModelProfile, RunningJob, Scan, Settings, SseEvent, Thread, Usage,
+  Attachment, Message, ModelProfile, RunningJob, RunInfo, Scan, Settings, SseEvent, Thread, Usage,
 } from './types'
 
 const API = '/api/v2'
@@ -77,7 +77,7 @@ export const api = {
 
   deleteThread: (id: string) => j<{ ok: boolean }>(`/threads/${id}`, { method: 'DELETE' }),
 
-  messages: (id: string) => j<{ thread: { id: string; title: string; model: string; mode: string }; messages: Message[] }>(
+  messages: (id: string) => j<{ thread: { id: string; title: string; model: string; mode: string }; run?: RunInfo | null; messages: Message[] }>(
     `/threads/${id}/messages`,
   ),
 

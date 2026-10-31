@@ -12,7 +12,7 @@ import { ScansModal } from './components/ScansModal'
 import { CommandPalette } from './components/CommandPalette'
 import { Toasts, type ToastItem } from './components/Toasts'
 import { api, streamChat, subscribeJob } from './lib/api'
-import type { AskPart, Attachment, Message, ModelProfile, SseEvent, Thread, ToolPart } from './lib/types'
+import type { AskPart, Attachment, Message, ModelProfile, RunInfo, SseEvent, Thread, ToolPart } from './lib/types'
 
 const LS = {
   theme: 'agui:theme',
@@ -36,6 +36,7 @@ export default function App() {
   const [loadingMessages, setLoadingMessages] = useState(false)
   const [models, setModels] = useState<ModelProfile[]>([])
   const [activeModel, setActiveModel] = useState<string | null>(null)
+  const [runInfo, setRunInfo] = useState<RunInfo | null>(null)
   const [online, setOnline] = useState(true)
 
   const [query, setQuery] = useState('')
@@ -140,6 +141,7 @@ export default function App() {
       const r = await api.messages(id)
       if (seq !== openSeq.current || activeRef.current !== id) return
       setMessages(r.messages)
+      setRunInfo(r.run ?? null)
       attachJobIfRunning(id)
     } catch (e) {
       if (seq !== openSeq.current) return
@@ -168,6 +170,7 @@ export default function App() {
       setActiveId(t.id)
       setMessages([])
       setStreaming(null)
+      setRunInfo(null)
       setSidebarOpen(false)
       return thread
     } catch (e) {
@@ -193,7 +196,7 @@ export default function App() {
       setThreads(prev => prev.filter(t => t.id !== id))
       if (activeRef.current === id) {
         activeRef.current = null
-        setActiveId(null); setMessages([]); setStreaming(null); setLoadingMessages(false)
+        setActiveId(null); setMessages([]); setStreaming(null); setRunInfo(null); setLoadingMessages(false)
       }
     } catch (e) {
       pushToast(e instanceof Error ? e.message : 'delete failed', 'err')
@@ -377,7 +380,14 @@ export default function App() {
         }))
         break
       case 'done':
-        setMessages(prev => prev.some(m => m.id === ev.message.id) ? prev : [...prev, ev.message])
+        setRunInfo(null)
+        setMessages(prev => {
+          const idx = prev.findIndex(m => m.id === ev.message.id)
+          if (idx === -1) return [...prev, ev.message]
+          const next = prev.slice()
+          next[idx] = ev.message
+          return next
+        })
         if (ev.title) {
           setThreads(prev => prev.map(t => t.id === ev.message.thread_id ? { ...t, title: String(ev.title) } : t))
         }
@@ -427,6 +437,7 @@ export default function App() {
       await new Promise(r => setTimeout(r, 60))
     }
     if (abortRef.current) abortRef.current.abort()
+    setRunInfo(null)
     const ctrl = new AbortController()
     abortRef.current = ctrl
     setMessages(prev => [...prev, {
@@ -452,8 +463,13 @@ export default function App() {
       }, handleEvent, ctrl.signal)
     } catch (e) {
       if (!ctrl.signal.aborted) {
-        setMessages(prev => prev.filter(m => !m.id.startsWith('local-')))
-        pushToast(e instanceof Error ? e.message : 'stream failed', 'err')
+        pushToast(e instanceof Error ? e.message : 'stream failed — state is saved locally', 'err')
+        // The run is persisted server-side; reload whatever was saved.
+        api.messages(tid).then(r => {
+          if (activeRef.current !== tid) return
+          setMessages(r.messages)
+          setRunInfo(r.run ?? null)
+        }).catch(() => {})
       }
     } finally {
       if (activeRef.current === tid) setStreaming(null)
@@ -581,6 +597,24 @@ export default function App() {
             <PanelRight size={17} />
           </button>
         </header>
+
+        {runInfo?.status === 'interrupted' && (
+          <div className="mx-auto w-full max-w-3xl px-3 pt-2 sm:px-5 xl:max-w-4xl">
+            <div className="flex items-center gap-2 rounded-xl border border-amber/40 bg-amber/10 px-3 py-2 text-[11.5px] text-amber">
+              <CircleDot size={12} />
+              <span className="min-w-0 flex-1 truncate">
+                Previous task was interrupted — saved state is available.
+              </span>
+              <button
+                type="button"
+                className="btn h-7 shrink-0 px-2.5 text-[11px]"
+                onClick={() => send('continue', [], { mode, effort, autoApprove, model: activeModel })}
+              >
+                Continue
+              </button>
+            </div>
+          </div>
+        )}
 
         <Chat
           messages={messages}
