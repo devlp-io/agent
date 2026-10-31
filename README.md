@@ -180,12 +180,34 @@ Run the Linux installer inside the WSL shell. `somscan gui` starts the server in
 prints `http://127.0.0.1:8788/gui`; open that URL in your Windows browser. To expose it on the
 LAN for a phone, run `somscan gui --host 0.0.0.0 --no-open`.
 
-### What the first run does
+### Setup, repair, and the installer TUI
 
-1. Creates `.venv` (or `.venv_linux`) in the repo.
-2. Installs `requirements.txt`.
-3. Preinstalls the core toolkit profile (ProjectDiscovery, OSINT, AD, cloud, RE).
-4. Launches the CLI (or the requested command).
+The first launch opens a guided setup screen. It creates `.venv`, installs the
+core CLI packages, then the web console packages (separately, so a web failure
+never blocks the CLI), verifies the imports, and optionally installs the core
+toolkit profile.
+
+```bash
+./somscan setup            # guided setup / repair, interactive
+./somscan setup --auto     # non-interactive
+somscan setup              # after install, re-run setup anywhere
+```
+
+If an install is interrupted, the launcher detects the incomplete environment
+on the next run and repairs it instead of trusting the `.venv` folder. Core
+packages (`textual`, `rich`, `openai`, `httpx`, `requests`) are checked before
+every launch; missing packages are reinstalled automatically.
+
+Termux additionally needs `pkg install -y python clang openssl libffi`; if a
+package has to build from Rust, setup installs `rust` and retries. The CLI set
+does not require `cryptography`, so no Rust build is needed for a normal
+Termux install.
+
+1. Creates `.venv` in the repo.
+2. Installs `requirements-core.txt` (CLI/TUI).
+3. Installs `requirements-web.txt` (web console; optional for CLI).
+4. Preinstalls the core toolkit profile (unless `--no-toolkits`).
+5. Launches the CLI (or the requested command).
 
 The bootstrap runs once. Later launches go straight to the CLI.
 

@@ -24,7 +24,19 @@ echo "  SOM-SCAN installer"
 echo "  repo: $DIR"
 echo "========================================================"
 
-SOMSCAN_SKIP_TOOLKITS="$SKIP_TOOLKITS" "$DIR/somscan" --version >/dev/null
+PY_SYS="$(command -v python3 || command -v python)"
+[ -n "$PY_SYS" ] || { echo "[!] Python 3.10+ not found." >&2; exit 1; }
+SETUP_ARGS=(--auto)
+[ "$SKIP_TOOLKITS" = "1" ] && SETUP_ARGS+=(--no-toolkits)
+"$PY_SYS" "$DIR/setup_tui.py" "${SETUP_ARGS[@]}" || {
+    echo "[!] setup failed — fix the error above and re-run ./install.sh" >&2
+    exit 1
+}
+VENV_PY="$DIR/.venv/bin/python"
+if [ ! -x "$VENV_PY" ] || ! "$VENV_PY" -c "import rich, textual, openai, httpx, dotenv, requests" >/dev/null 2>&1; then
+    echo "[!] core environment is incomplete — run ./somscan setup" >&2
+    exit 1
+fi
 
 mkdir -p "$BIN"
 ln -sf "$DIR/somscan" "$BIN/somscan"

@@ -1,0 +1,5 @@
+# SOM-SCAN web console dependencies
+pydantic>=2.0.0
+fastapi>=0.100.0
+uvicorn>=0.22.0
+python-multipart>=0.0.9

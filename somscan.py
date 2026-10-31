@@ -248,6 +248,11 @@ def main():
     try:
         args = sys.argv[1:]
 
+        # Guided environment setup / repair (stdlib only; works before deps).
+        if args and args[0].lower() in ("setup", "install", "--setup"):
+            from setup_tui import run_setup
+            raise SystemExit(run_setup(args[1:]))
+
         # Web console: somscan gui [start|stop|status] [--host H] [--port P] [--no-open]
         if args and args[0].lower() == "gui":
             raise SystemExit(run_gui(args[1:]))

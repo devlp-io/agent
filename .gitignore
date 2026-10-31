@@ -133,3 +133,6 @@ scans/
 
 # first-run bootstrap marker
 .bootstrap_done
+
+# setup status
+.bootstrap.json
