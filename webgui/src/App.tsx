@@ -318,6 +318,9 @@ export default function App() {
         break
       case 'done':
         setMessages(prev => prev.some(m => m.id === ev.message.id) ? prev : [...prev, ev.message])
+        if (ev.title) {
+          setThreads(prev => prev.map(t => t.id === ev.message.thread_id ? { ...t, title: String(ev.title) } : t))
+        }
         setStreaming(null)
         loadThreads()
         break

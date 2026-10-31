@@ -813,6 +813,48 @@ def _history_for_model(thread_id: str, limit: int = 40) -> List[Dict[str, Any]]:
     return msgs
 
 
+
+def _generate_title(first_text: str, reply_hint: str = "") -> str:
+    """LLM-written short session name."""
+    from core.model_manager import ModelManager
+    text = (first_text or "").strip()
+    if not text:
+        return ""
+    mm = ModelManager()
+    try:
+        mm.set_effort("low")
+    except Exception:
+        pass
+    try:
+        client, model = mm.get_client()
+        sys_prompt = (
+            "Name this chat session. Reply with ONLY a short title of 3 to 6 words, "
+            "in the same language as the user's message. No quotes, no punctuation at the end, "
+            "no 'Title:' prefix, no explanation."
+        )
+        user = f"User: {text[:1200]}\nAssistant: {reply_hint[:600]}"
+        extra = {}
+        if model in ("deepseek-flash", "deepseek-v4-pro"):
+            extra["reasoning_effort"] = "low"
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "system", "content": sys_prompt},
+                      {"role": "user", "content": user}],
+            max_tokens=600,
+            temperature=0.3,
+            **extra,
+        )
+        msg = resp.choices[0].message
+        title = (getattr(msg, "content", None) or "").strip()
+        if not title:
+            title = (getattr(msg, "reasoning_content", None) or "").strip()
+    except Exception:
+        return ""
+    title = title.replace("\n", " ").strip().strip('"').strip("'").strip("`").strip()
+    title = re.sub(r"^(title\s*[:\-]\s*)", "", title, flags=re.I)
+    title = re.sub(r"\s+", " ", title).strip(" .:-")
+    return title[:80]
+
 def _autotitle(first_text: str) -> str:
     t = re.sub(r"\s+", " ", (first_text or "").strip())
     t = re.sub(r"^[#*`>\-\s]+", "", t)
@@ -1791,7 +1833,8 @@ async def _agent_stream(body: ChatBody, request: Request):
         n = c.execute("SELECT COUNT(*) AS n FROM messages WHERE thread_id=?", (body.thread_id,)).fetchone()["n"]
         cur_title = c.execute("SELECT title FROM threads WHERE id=?", (body.thread_id,)).fetchone()["title"]
     title = None
-    if n <= 2 and cur_title == "New chat":
+    needs_title = n <= 2 and cur_title == "New chat"
+    if needs_title:
         title = _autotitle(text or (atts[0]["filename"] if atts else ""))
         with _db() as c:
             c.execute("UPDATE threads SET title=? WHERE id=?", (title, body.thread_id))
@@ -1808,6 +1851,12 @@ async def _agent_stream(body: ChatBody, request: Request):
             holder["cb"] = cb
 
         yield _sse({"type": "start", "user_message": user_msg, "title": title or cur_title})
+
+        title_task = None
+        if needs_title:
+            title_task = asyncio.create_task(asyncio.to_thread(
+                _generate_title, text or (atts[0]["filename"] if atts else ""), ""
+            ))
 
         parts: List[Dict[str, Any]] = []
         tools: List[Dict[str, Any]] = []
@@ -2388,7 +2437,17 @@ async def _agent_stream(body: ChatBody, request: Request):
                 "hidden_activity": hidden_activity[:60],
                 "session_id": getattr(router, "session_id", None)}
         assistant = _persist_message(body.thread_id, "assistant", content, ordered, [], meta)
-        yield _sse({"type": "done", "message": assistant, "title": title})
+        final_title = title
+        if title_task is not None:
+            try:
+                generated = await asyncio.wait_for(title_task, timeout=10)
+            except Exception:
+                generated = ""
+            if generated:
+                final_title = generated
+                with _db() as c:
+                    c.execute("UPDATE threads SET title=? WHERE id=?", (generated, body.thread_id))
+        yield _sse({"type": "done", "message": assistant, "title": final_title})
 
     return gen()
 
@@ -2427,7 +2486,8 @@ async def api_chat(body: ChatBody, request: Request):
     with _db() as c:
         n = c.execute("SELECT COUNT(*) AS n FROM messages WHERE thread_id=?", (body.thread_id,)).fetchone()["n"]
         cur_title = c.execute("SELECT title FROM threads WHERE id=?", (body.thread_id,)).fetchone()["title"]
-    if n <= 2 and cur_title == "New chat":
+    needs_title = n <= 2 and cur_title == "New chat"
+    if needs_title:
         title = _autotitle(text or (atts[0]["filename"] if atts else ""))
         with _db() as c:
             c.execute("UPDATE threads SET title=? WHERE id=?", (title, body.thread_id))
@@ -2437,7 +2497,12 @@ async def api_chat(body: ChatBody, request: Request):
 
     async def gen():
         yield _sse({"type": "start", "user_message": user_msg,
-                    "title": _autotitle(text or (atts[0]["filename"] if atts else "")) if n <= 2 and cur_title == "New chat" else cur_title})
+                    "title": _autotitle(text or (atts[0]["filename"] if atts else "")) if needs_title else cur_title})
+        title_task = None
+        if needs_title:
+            title_task = asyncio.create_task(asyncio.to_thread(
+                _generate_title, text or (atts[0]["filename"] if atts else ""), ""
+            ))
 
         try:
             await _compliance_gate(text or "review attached files: " + ", ".join(a.get("filename", "") for a in atts))
@@ -2644,8 +2709,17 @@ async def api_chat(body: ChatBody, request: Request):
                 "aborted": aborted, "thought_ms": thought_ms,
                 "duration_ms": int((time.time() - started) * 1000)}
         assistant = _persist_message(body.thread_id, "assistant", content, parts, [], meta)
-        yield _sse({"type": "done", "message": assistant,
-                    "title": None})
+        final_title = cur_title
+        if needs_title and title_task is not None:
+            try:
+                generated = await asyncio.wait_for(title_task, timeout=10)
+            except Exception:
+                generated = ""
+            if generated:
+                final_title = generated
+                with _db() as c:
+                    c.execute("UPDATE threads SET title=? WHERE id=?", (generated, body.thread_id))
+        yield _sse({"type": "done", "message": assistant, "title": final_title})
 
     job = _start_job(body.thread_id, gen())
     return StreamingResponse(
