@@ -49,6 +49,17 @@ function Pre({ children }: { children?: ReactNode }) {
 
 const CODE_SIGNAL = /(<!doctype|<html|<\/html|<head|<body|<div|<style|<script|function\s+\w+\s*\(|class\s+\w+|def\s+\w+\s*\(|import\s+[\w.]+|from\s+[\w.]+\s+import|const\s+\w+\s*=|let\s+\w+\s*=|#include|public\s+static)/i
 
+function unwrapMarkdownFence(text: string): string {
+  const re = /```([a-zA-Z0-9_-]*)\n([\s\S]*?)\n```/g
+  return text.replace(re, (full, lang: string, body: string) => {
+    const l = (lang || '').toLowerCase()
+    if (l && !['md', 'markdown', 'text', 'txt'].includes(l)) return full
+    const markdownShapes = /(^|\n)\s*(#{1,6}\s|\*\*|[-*]\s|\d+\.\s|\|.*\|)/.test(body)
+    const codeShapes = /(^|\n)\s*(function\s|def\s|class\s|import\s|from\s|#include|const\s|let\s|var\s|public\s|<\/?[a-zA-Z][\w-]*[\s>])/.test(body)
+    return markdownShapes && !codeShapes ? body.trim() : full
+  })
+}
+
 function autoFence(text: string): string {
   if (!text || text.includes('```')) return text
   if (!CODE_SIGNAL.test(text)) return text
@@ -66,7 +77,7 @@ function autoFence(text: string): string {
   return '```' + lang + '\n' + text.trim() + '\n```'
 }
 
-export const Markdown = memo(function Markdown({ text, raw = false }: { text: string; raw?: boolean }) {
+export const Markdown = memo(function Markdown({ text, raw = false, plain = false }: { text: string; raw?: boolean; plain?: boolean }) {
   return (
     <div className="prose-md">
       <ReactMarkdown
@@ -79,7 +90,7 @@ export const Markdown = memo(function Markdown({ text, raw = false }: { text: st
           ),
         }}
       >
-        {raw ? text : autoFence(text)}
+        {raw ? text : plain ? unwrapMarkdownFence(text) : autoFence(unwrapMarkdownFence(text))}
       </ReactMarkdown>
     </div>
   )

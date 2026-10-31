@@ -11,7 +11,7 @@ import { SettingsModal } from './components/SettingsModal'
 import { ScansModal } from './components/ScansModal'
 import { CommandPalette } from './components/CommandPalette'
 import { Toasts, type ToastItem } from './components/Toasts'
-import { api, streamChat } from './lib/api'
+import { api, streamChat, subscribeJob } from './lib/api'
 import type { AskPart, Attachment, Message, ModelProfile, SseEvent, Thread, ToolPart } from './lib/types'
 
 const LS = {
@@ -54,6 +54,7 @@ export default function App() {
 
   const [toasts, setToasts] = useState<ToastItem[]>([])
   const abortRef = useRef<AbortController | null>(null)
+  const jobAbortRef = useRef<AbortController | null>(null)
   const toastId = useRef(0)
 
   const pushToast = useCallback((msg: string, kind: 'ok' | 'err' = 'ok') => {
@@ -114,7 +115,10 @@ export default function App() {
       await Promise.all([loadModels(), loadThreads()])
     })()
     const t = setInterval(() => { api.health().then(() => setOnline(true)).catch(() => setOnline(false)) }, 20000)
-    return () => clearInterval(t)
+    return () => {
+      clearInterval(t)
+      jobAbortRef.current?.abort()
+    }
   }, [loadModels, loadThreads])
 
   const openThread = useCallback(async (id: string) => {
@@ -123,9 +127,11 @@ export default function App() {
     setLoadingMessages(true)
     setStreaming(null)
     abortRef.current?.abort()
+    jobAbortRef.current?.abort()
     try {
       const r = await api.messages(id)
       setMessages(r.messages)
+      attachJobIfRunning(id)
     } catch (e) {
       pushToast(e instanceof Error ? e.message : 'failed to load chat', 'err')
       setMessages([])
@@ -325,6 +331,29 @@ export default function App() {
     }
   }
 
+  const attachJobIfRunning = async (id: string) => {
+    try {
+      const st = await api.jobStatus(id)
+      if (!st.running) return
+      jobAbortRef.current?.abort()
+      const ctrl = new AbortController()
+      jobAbortRef.current = ctrl
+      setStreaming({
+        id: `stream-job-${Date.now()}`,
+        thread_id: id,
+        role: 'assistant',
+        content: '',
+        parts: [],
+        attachments: [],
+        meta: { status: 'THINKING' },
+        created: Date.now() / 1000,
+        created_iso: new Date().toISOString(),
+        streaming: true,
+      })
+      await subscribeJob(id, handleEvent, ctrl.signal)
+    } catch { /* job may have finished */ }
+  }
+
   const send = async (text: string, attachments: Attachment[], opts: ComposerOptions) => {
     let tid = activeId
     if (!tid) {
@@ -369,11 +398,16 @@ export default function App() {
   }
 
   const stop = () => {
-    if (activeId) api.agentStop(activeId).catch(() => {})
-    abortRef.current?.abort()
-    abortRef.current = null
-    setStreaming(null)
-    pushToast('stopped', 'ok')
+    const tid = activeId
+    if (tid) {
+      api.cancelJob(tid).catch(() => {})
+      api.agentStop(tid).catch(() => {})
+    }
+    pushToast('stopping…', 'ok')
+    // never abort the background job; wait for the done event, then reconcile
+    setTimeout(() => {
+      if (tid && !jobAbortRef.current?.signal.aborted) openThread(tid)
+    }, 7000)
   }
 
   // ── keyboard ─────────────────────────────────────────────────────────

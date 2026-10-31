@@ -301,7 +301,10 @@ function Footer({ m, actions }: { m: Message; actions: number }) {
     )
   }
 
-  const bits: string[] = [`Worked ${totalSecs > 0.2 ? totalSecs.toFixed(1) : Math.max(0.1, elapsed).toFixed(1)}s`]
+  const stopped = Boolean(m.meta?.aborted)
+  const bits: string[] = [stopped
+    ? `Stopped after ${totalSecs > 0.2 ? totalSecs.toFixed(1) : Math.max(0.1, elapsed).toFixed(1)}s`
+    : `Worked ${totalSecs > 0.2 ? totalSecs.toFixed(1) : Math.max(0.1, elapsed).toFixed(1)}s`]
   if (actions > 0) bits.push(`${actions} action${actions === 1 ? '' : 's'}`)
   return <div className="mt-2 text-[11px] text-faint">{bits.join(' · ')}</div>
 }
@@ -317,6 +320,7 @@ function ThinkingBlock({ text }: { text: string }) {
 /* ── message ────────────────────────────────────────────────────────── */
 
 export function MessageItem({ m, showThinking }: { m: Message; showThinking: boolean }) {
+  const [showAllSteps, setShowAllSteps] = useState(false)
   const isUser = m.role === 'user'
   const parts: Part[] = m.parts?.length
     ? m.parts
@@ -346,6 +350,9 @@ export function MessageItem({ m, showThinking }: { m: Message; showThinking: boo
     .map((p, i) => (p.type === 'tool' && p.tool === 'shell' ? i : -1))
     .filter(i => i >= 0)
   const lastShell = shellIdx.length ? shellIdx[shellIdx.length - 1] : -1
+  const collapse = !showAllSteps && actionIdx.length > 6
+  const firstShownAction = collapse ? actionIdx[actionIdx.length - 3] : -1
+  const hiddenSteps = collapse ? actionIdx.length - 3 : 0
 
   return (
     <div className="rise px-0.5">
@@ -356,14 +363,50 @@ export function MessageItem({ m, showThinking }: { m: Message; showThinking: boo
           </svg>
         </span>
         <span className="text-[11.5px] font-medium text-muted">SOM-SCAN</span>
+        {!m.streaming && (
+          <span className={`rounded-full border px-1.5 py-0 text-[9px] uppercase tracking-wide ${
+            m.meta?.aborted
+              ? 'border-amber/40 text-amber'
+              : 'border-mint/30 text-mint/90'
+          }`}>
+            {m.meta?.aborted ? 'stopped' : 'done'}
+          </span>
+        )}
       </div>
 
       <div className="pl-7">
+        {!m.streaming && Boolean(m.meta?.objective) && (
+          <div className="mb-2 rounded-lg border border-line bg-panel2/40 px-3 py-2">
+            <div className="text-[9.5px] font-semibold uppercase tracking-[0.14em] text-faint">Objective</div>
+            <div className="mt-0.5 line-clamp-2 text-[11.5px] leading-snug text-muted">
+              {String(m.meta.objective)}
+            </div>
+          </div>
+        )}
+
         {parts.map((p, i) => {
-          if (p.type === 'tool') return <ToolCard key={p.call_id || i} part={p} defaultOpen={p.tool === 'shell' && i === lastShell} />
+          if (p.type === 'tool') {
+            if (collapse && i < firstShownAction) return null
+            return (
+              <>
+                {collapse && i === firstShownAction && (
+                  <button
+                    key={`more-${i}`}
+                    onClick={() => setShowAllSteps(true)}
+                    className="my-1.5 flex items-center gap-1.5 text-[11px] text-faint transition hover:text-muted"
+                  >
+                    <ChevronRight size={11} />
+                    Show {hiddenSteps} earlier step{hiddenSteps === 1 ? '' : 's'}
+                  </button>
+                )}
+                <ToolCard key={p.call_id || i} part={p} defaultOpen={p.tool === 'shell' && i === lastShell} />
+              </>
+            )
+          }
           if (p.type === 'ask') return <AskCard key={p.question_id || i} part={p} threadId={m.thread_id} />
           if (p.type === 'thought') return showThinking && p.text?.trim() ? <ThinkingBlock key={i} text={p.text} /> : null
           if (p.type === 'note') {
+            if (collapse && firstShownAction >= 0 && i < firstShownAction) return null
             return (
               <div key={i} className="my-1 flex items-start gap-1.5 text-[11.5px] leading-snug text-faint">
                 <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-faint/70" />
@@ -371,7 +414,7 @@ export function MessageItem({ m, showThinking }: { m: Message; showThinking: boo
               </div>
             )
           }
-          return p.text?.trim() ? <Markdown key={i} text={p.text} /> : null
+          return p.text?.trim() ? <Markdown key={i} text={p.text} plain={m.meta?.engine === 'cli'} /> : null
         })}
 
         <Footer m={m} actions={actionIdx.length} />

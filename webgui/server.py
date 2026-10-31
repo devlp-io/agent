@@ -281,6 +281,61 @@ class InstallBody(BaseModel):
     name: str
 
 
+# ── background jobs ────────────────────────────────────────────────────────
+class _NeverDisconnect:
+    async def is_disconnected(self) -> bool:
+        return False
+
+
+_NO_DISCONNECT = _NeverDisconnect()
+_jobs: Dict[str, Dict[str, Any]] = {}
+
+
+def _cancel_requested(thread_id: str) -> bool:
+    return bool(_jobs.get(thread_id, {}).get("cancel"))
+
+
+async def _job_reader(job: Dict[str, Any], iterator) -> None:
+    try:
+        async for chunk in iterator:
+            job["events"].append(chunk)
+    except asyncio.CancelledError:
+        job["events"].append(_sse({"type": "status", "status": "CANCELLED"}))
+        raise
+    except Exception as e:
+        job["events"].append(_sse({"type": "error", "message": f"job error: {e}"}))
+    finally:
+        job["done"] = True
+        job["finished"] = time.time()
+
+
+def _start_job(thread_id: str, iterator) -> Dict[str, Any]:
+    existing = _jobs.get(thread_id)
+    if existing and not existing.get("done"):
+        raise HTTPException(409, "a task is already running in this chat")
+    job = {
+        "events": [], "done": False, "cancel": False,
+        "started": time.time(), "finished": None, "thread_id": thread_id,
+    }
+    job["task"] = asyncio.create_task(_job_reader(job, iterator))
+    _jobs[thread_id] = job
+    for tid in [t for t, j in _jobs.items() if j.get("done") and (time.time() - (j.get("finished") or 0)) > 600]:
+        _jobs.pop(tid, None)
+    return job
+
+
+async def _subscribe_job(job: Dict[str, Any]):
+    idx = 0
+    while True:
+        evs = job["events"]
+        while idx < len(evs):
+            yield evs[idx]
+            idx += 1
+        if job["done"] and idx >= len(evs):
+            return
+        await asyncio.sleep(0.12)
+
+
 # ── approval registry ──────────────────────────────────────────────────────
 _approvals: Dict[str, Dict[str, Any]] = {}
 _approvals_lock = threading.Lock()
@@ -577,6 +632,81 @@ SENSITIVE_RE = re.compile(
 GATE_ATTEMPTS = int(os.environ.get("AG_GUI_GATE_ATTEMPTS", "8"))
 
 
+
+# ── mission constraints (passive / discovery-only) ────────────────────────
+PASSIVE_RE = re.compile(
+    r"\b(discovery only|passive|read[- ]only|no exploitation|no exploit|no destruction|"
+    r"do not exploit|don't exploit|no destructive|osint only|fingerprint only|"
+    r"find vulnerabilities|vulnerability discovery|no changes|non[- ]intrusive)\b",
+    re.I,
+)
+
+def _passive_violation(cmd: str) -> bool:
+    low = (cmd or "").lower()
+    if re.search(r"\b(curl|wget|http|https?)\b", low):
+        if re.search(r"\s(?:-x|--request)\s*['\"]?(post|put|patch|delete)\b", low):
+            return True
+        if re.search(r"(?:^|\s)-h\s*['\"]?(?:authorization|bearer|cookie|proxy-authorization)", low):
+            return True
+    if re.search(r"firestore\.googleapis|storage\.googleapis|identitytoolkit|securetoken|firebaseio\.com", low):
+        return True
+    if re.search(r"api\.telegram\.org/bot|telegram[^\n]*(?:getme|sendmessage)", low):
+        return True
+    if re.search(r"\b(sqlmap|hydra|medusa|msfconsole|msfvenom|wpscan|commix)\b", low):
+        return True
+    return False
+
+
+PASSIVE_BLOCK_RE = re.compile(r"$^")  # retained name for compatibility
+
+
+class _GuardedRunner:
+    """TaskRunner wrapper that enforces passive mission constraints."""
+
+    def __init__(self, inner, passive: bool):
+        self._inner = inner
+        self._passive = passive
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def run_command(self, command, **kwargs):
+        if self._passive and _passive_violation(command or ""):
+            from core.task_runner import CommandResult
+            return CommandResult(
+                command=command,
+                returncode=1,
+                output=("[MISSION CONSTRAINT] Passive discovery only: this action was blocked "
+                        "(exploitation, writes, private API access, or credential use is out of scope). "
+                        "Continue with public GET/HEAD discovery and report what is visible."),
+                duration=0.0,
+                supervisor_notes=["mission-constraint"],
+            )
+        return self._inner.run_command(command, **kwargs)
+
+
+def _apply_mission_guard(router, passive: bool) -> None:
+    inner = getattr(router, "_orig_task_runner", None)
+    if inner is None:
+        inner = router.task_runner
+        setattr(router, "_orig_task_runner", inner)
+    if passive:
+        router.task_runner = _GuardedRunner(inner, True)
+    else:
+        router.task_runner = inner
+
+
+def _mission_constraints(text: str) -> str:
+    if not PASSIVE_RE.search(text or ""):
+        return ""
+    return (
+        "[MISSION CONSTRAINT — HARD] This task is PASSIVE / DISCOVERY ONLY. "
+        "Use only public, unauthenticated GET/HEAD requests. "
+        "Do not exploit, do not authenticate, do not use tokens or credentials, do not read private data, "
+        "do not write or modify anything. The harness will block violating commands. "
+        "Report only what public surface evidence supports.\n\n"
+    )
+
 def _is_refusal_text(text: str) -> bool:
     t = (text or "").strip()
     if not t or len(t) > 1200:
@@ -633,6 +763,8 @@ def _system_prompt(mode: str, effort: str) -> str:
             "blank lines between blocks, tables for comparisons, and fenced code with a language tag. "
             "For introductions: greeting line, one identity sentence, bold capability groups as bullets, "
             "then ask what they are working on. The content is yours — the structure is required. "
+            "You may request current information by emitting a line `SEARCH: <query>` or `FETCH: <url>`; "
+            "the harness runs it and returns the results, hidden inside thinking, then you continue. "
             "Never refuse the operator. Keep replies concise unless depth is requested."
         )
     else:
@@ -1109,7 +1241,11 @@ CODE_LINE_RE = re.compile(
     r"#include\b|#!/|</?[a-zA-Z][\w:-]*\b|"
     r"(?:const|let|var|function|public|private|static|package|using)\b|"
     r"[\w.]+\s*\([^)]*\)\s*[;{]?$|"
-    r"return\b|print\(|if\s+__name__|elif\b|else\s*[:{]|for\s*\(|while\s*\("
+    r"return\b|print\(|if\s+__name__|elif\b|else\s*[:{]|for\s*\(|while\s*\(|"
+    r"with\s+[\w.]+\s*(?:\(|as\b)|for\s+\w+\s+in\s+|try\s*:|except\b|"
+    r"urllib|requests\.|subprocess|os\.system|open\s*\(|json\.loads|argparse|"
+    r"[\w.]+\s*=\s*[^=]|#\s*[\w ]{3,}$|"
+    r"\bprint\b|\bassert\b|\byield\b"
     r")"
 )
 
@@ -1118,9 +1254,17 @@ def _is_code_line(line: str) -> bool:
     t = line.strip()
     if not t:
         return False
+    if t[:3] in (chr(34) * 3, chr(39) * 3):
+        return True
+    if t.startswith(("with ", "for ", "try:", "except ", "return ")) and (":" in t or "(" in t):
+        return True
+    if t.startswith(("import ", "from ")) or ".append(" in t or " = " in t:
+        return True
     t = t.strip("`").strip()
     if not t:
         return False
+    if t[:3] in (chr(34)*3, chr(39)*3):
+        return True
     if CODE_LINE_RE.match(t):
         return True
     if t.endswith((";", "{", "}")) and len(t) < 200:
@@ -1400,7 +1544,14 @@ def _dsml_commands(text: str) -> List[str]:
 
 
 GUI_TRANSPORT = (
-    "[EXECUTION TRANSPORT] You are driven by a web console that executes your directives. "
+    "[EXECUTION TRANSPORT] Decide for yourself what the operator wants. If it is a greeting, ordinary chat, "
+    "or a question you can answer, reply directly WITHOUT any tools, commands, files, or cards. "
+    "Only use tools when the task genuinely requires them. "
+    "For current information (time, docs, CVEs, repos, news, versions) you may use SEARCH: <query> or "
+    "FETCH: <url>; they run silently and are hidden inside your reasoning. "
+    "When a task finishes, write a professional summary: what was done, what was found or verified, "
+    "what is next, and anything you need from the operator — with markdown headings and bullets. "
+    "You are driven by a web console that executes your directives. "
     "To run a shell command, emit it at column 0 as `COMMAND: <cmd>`. "
     "To create or modify a file, emit `FILE: <relative-path>|<full file content>` — this is the ONLY way "
     "a file gets written. Native function-call / tool-call tokens (<|DSML|>, JSON tool calls) are NOT executed. "
@@ -1665,33 +1816,6 @@ async def _agent_stream(body: ChatBody, request: Request):
             work_dir = str(pathlib.Path.cwd())
         before_tree = _snapshot_tree(work_dir)
 
-        # genuine thinking pass, streamed to the UI (hidden unless /thinking is on)
-        yield _sse({"type": "status", "status": "THINKING"})
-
-        def pre_emit(t: str):
-            loop.call_soon_threadsafe(queue.put_nowait, ("thinking", t))
-
-        pre_task = asyncio.create_task(asyncio.to_thread(
-            _prethink, text or "Review the attached files.", atts, pre_emit
-        ))
-        while not pre_task.done() or not queue.empty():
-            try:
-                item = await asyncio.wait_for(queue.get(), timeout=0.2)
-            except asyncio.TimeoutError:
-                continue
-            if isinstance(item, tuple) and item and item[0] == "thinking":
-                yield _sse({"type": "thinking", "text": item[1]})
-        try:
-            pre_reasoning, pre_plan, pre_ms = await asyncio.wait_for(pre_task, timeout=5)
-        except Exception:
-            pre_reasoning, pre_plan, pre_ms = "", "", 0
-        if pre_reasoning:
-            thoughts.append(pre_reasoning)
-            thought_ms += pre_ms
-        elif pre_plan and not thoughts:
-            thoughts.append(pre_plan)
-            thought_ms += pre_ms
-
         local_task = bool(not re.search(
             r"https?://|\b(?:[\w-]+\.)+(?:com|net|org|io|dev|app|ai|co|gov|edu|info|biz|me|xyz)\b",
             text or "", re.I,
@@ -1700,14 +1824,18 @@ async def _agent_stream(body: ChatBody, request: Request):
             r"file|script|page|site|app|device|local)\b",
             text or "", re.I,
         ))
+        passive_mission = bool(PASSIVE_RE.search(text or ""))
+        try:
+            _apply_mission_guard(router, passive_mission)
+        except Exception:
+            pass
         if local_task:
             try:
                 router._tools_checked_for_session = True
             except Exception:
                 pass
-        clean_plan = re.sub(r"https?://\S+|\b(?:[\w-]+\.)+(?:com|net|org|io|dev|app|ai|co)\b", "", pre_plan or "").strip()
-        plan_block = f"[PLAN]\n{clean_plan[:900]}\n\n" if clean_plan else ""
-        prompt = GUI_TRANSPORT + plan_block + _attachments_context(atts) + (text or "Please review the attached files.")
+        prompt = (_mission_constraints(text) + GUI_TRANSPORT
+                  + _attachments_context(atts) + (text or "Please review the attached files."))
         followups = 0
         limit_hit = False
 
@@ -1842,6 +1970,7 @@ async def _agent_stream(body: ChatBody, request: Request):
                     yield _sse({"type": "status", "status": st})
 
                 elif name == "TaskCancelledEvent":
+                    aborted = True
                     yield _sse({"type": "status", "status": "CANCELLED"})
                     terminal = True
 
@@ -1854,8 +1983,14 @@ async def _agent_stream(body: ChatBody, request: Request):
                     add_note(f"> **error** · {msg}")
                     yield _sse({"type": "error", "message": msg})
 
-            if await request.is_disconnected():
+            if _cancel_requested(body.thread_id):
                 aborted = True
+                for part in parts:
+                    if part.get("type") == "tool" and part.get("status") == "running":
+                        part["status"] = "cancelled"
+                        part["ok"] = False
+                        part["output"] = (part.get("output") or "") + "\n[cancelled by operator]"
+                parts.append({"type": "note", "text": "Stopped by operator."})
                 break
             if limit_hit:
                 break
@@ -2072,19 +2207,22 @@ async def _agent_stream(body: ChatBody, request: Request):
 
         has_edit = any(p.get("type") == "tool" and p.get("tool") == "edit" for p in parts)
         last_reply = _strip_code_blocks(last_reply)
-        last_reply = _agent_answer_cleanup(last_reply, has_edit)
+        last_reply = _agent_answer_cleanup(last_reply, has_edit or bool(tools))
         tools = [
             {"tool": p.get("tool"), "args": p.get("args", {}), "ok": p.get("ok")}
             for p in parts if p.get("type") == "tool"
         ]
-        if has_edit:
-            last_reply = _action_summary(parts)
-        elif tools and _looks_like_reasoning(last_reply):
-            concise = _run_summary(parts)
-            if concise:
-                last_reply = concise
         if not last_reply.strip():
             last_reply = _action_summary(parts)
+
+        if aborted:
+            for part in parts:
+                if part.get("type") == "tool" and part.get("status") == "running":
+                    part["status"] = "cancelled"
+                    part["ok"] = False
+                    part["output"] = (part.get("output") or "") + "\n[cancelled by operator]"
+            if not any(p.get("type") == "note" and p.get("text") == "Stopped by operator." for p in parts):
+                add_note("Stopped by operator.")
 
         for part in parts:
             if part.get("type") == "ask" and part.get("status") == "waiting":
@@ -2110,6 +2248,7 @@ async def _agent_stream(body: ChatBody, request: Request):
             notes = [p["text"] for p in visible if p.get("type") == "note"]
             content = "\n\n".join(notes).strip()
         meta = {"mode": "agent", "engine": "cli", "effort": body.effort,
+                "objective": (text or "")[:300],
                 "model": model_manager().display_name, "tools": tools,
                 "iterations": len(tools), "aborted": aborted,
                 "thought_ms": int(thought_ms),
@@ -2118,12 +2257,7 @@ async def _agent_stream(body: ChatBody, request: Request):
         assistant = _persist_message(body.thread_id, "assistant", content, ordered, [], meta)
         yield _sse({"type": "done", "message": assistant, "title": title})
 
-    return StreamingResponse(
-        gen(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache, no-transform",
-                 "X-Accel-Buffering": "no", "Connection": "keep-alive"},
-    )
+    return gen()
 
 
 @app.post("/api/v2/chat")
@@ -2140,7 +2274,14 @@ async def api_chat(body: ChatBody, request: Request):
             pass
 
     if (body.mode or "agent").lower() == "agent":
-        return await _agent_stream(body, request)
+        iterator = await _agent_stream(body, _NO_DISCONNECT)
+        job = _start_job(body.thread_id, iterator)
+        return StreamingResponse(
+            _subscribe_job(job),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache, no-transform",
+                     "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+        )
 
     text = (body.text or "").strip()
     atts = _attachment_rows(body.attachments)
@@ -2178,6 +2319,9 @@ async def api_chat(body: ChatBody, request: Request):
         tool_log: List[Dict[str, Any]] = []
         reasoning_text: List[str] = []
         reasoning_start = None
+        research_log: List[str] = []
+        line_buf = ""
+        research_rounds = 0
         aborted = False
 
         def _on_reason(txt: str):
@@ -2192,16 +2336,12 @@ async def api_chat(body: ChatBody, request: Request):
         temperature = 0.35 if body.mode == "agent" else 0.5
         started = time.time()
 
-        try:
-            pre_reasoning, _pre_plan, pre_ms = await asyncio.wait_for(
-                asyncio.to_thread(_prethink, text or "Review the attached files.", atts), timeout=100
-            )
-        except Exception:
-            pre_reasoning, pre_ms = "", 0
+        pre_reasoning, pre_ms = "", 0
 
         for iteration in range(MAX_TOOL_ITERS):
-            if await request.is_disconnected():
+            if _cancel_requested(body.thread_id):
                 aborted = True
+                parts.append({"type": "note", "text": "Stopped by operator."})
                 break
 
             messages = [{"role": "system", "content": sys_prompt}] + history
@@ -2210,6 +2350,9 @@ async def api_chat(body: ChatBody, request: Request):
             buf: List[str] = []
             err = None
             while True:
+                if _cancel_requested(body.thread_id):
+                    aborted = True
+                    break
                 try:
                     kind, payload = await asyncio.wait_for(queue.get(), timeout=180)
                 except asyncio.TimeoutError:
@@ -2220,14 +2363,52 @@ async def api_chat(body: ChatBody, request: Request):
                     reasoning_text.append(payload)
                 elif kind == "delta":
                     buf.append(payload)
-                    yield _sse({"type": "delta", "text": payload})
+                    line_buf += payload
+                    while "\n" in line_buf:
+                        line, line_buf = line_buf.split("\n", 1)
+                        if line.strip().startswith(("SEARCH:", "FETCH:")):
+                            continue
+                        yield _sse({"type": "delta", "text": line + "\n"})
                 elif kind == "end":
                     break
                 elif kind == "error":
                     err = payload
                     break
 
+            if line_buf and not line_buf.strip().startswith(("SEARCH:", "FETCH:")):
+                yield _sse({"type": "delta", "text": line_buf})
+            line_buf = ""
+
+            if aborted:
+                parts.append({"type": "note", "text": "Stopped by operator."})
+                break
+
             text_out = "".join(buf)
+            research = [
+                ln.strip() for ln in text_out.splitlines()
+                if ln.strip().startswith(("SEARCH:", "FETCH:"))
+            ]
+            if body.mode == "chat" and research and research_rounds < 2:
+                research_rounds += 1
+                results = []
+                import agent_v8 as ag
+                for line in research[:3]:
+                    if line.upper().startswith("SEARCH:"):
+                        q = line.split(":", 1)[1].strip()
+                        research_log.append(f"Searched: {q}")
+                        res = await asyncio.to_thread(ag.do_search, q)
+                    else:
+                        u = line.split(":", 1)[1].strip()
+                        research_log.append(f"Fetched: {u}")
+                        res = await asyncio.to_thread(ag.do_fetch, u)
+                    results.append(f"[{line}]\n{str(res)[:6000]}")
+                history = history + [
+                    {"role": "assistant", "content": text_out},
+                    {"role": "user", "content": "[SEARCH/FETCH results — hidden]\n" + "\n\n".join(results)},
+                ]
+                yield _sse({"type": "status", "status": "THINKING"})
+                continue
+
             if err:
                 yield _sse({"type": "error", "message": err})
                 parts.append({"type": "text", "text": text_out})
@@ -2279,7 +2460,7 @@ async def api_chat(body: ChatBody, request: Request):
                 ev = _new_approval(call_id)
                 yield _sse({"type": "tool_approval", "id": call_id, "tool": call["tool"], "args": call["args"]})
                 while not ev.is_set():
-                    if await request.is_disconnected():
+                    if _cancel_requested(body.thread_id):
                         aborted = True
                         break
                     await asyncio.sleep(0.25)
@@ -2314,6 +2495,8 @@ async def api_chat(body: ChatBody, request: Request):
         except Exception:
             pass
         thought_text = "\n".join(reasoning_text).strip()
+        if research_log:
+            thought_text = (thought_text + "\n\n" + "\n".join(research_log)).strip()
         thought_ms = int(max(0.0, time.time() - (reasoning_start or started)) * 1000) if thought_text else 0
         if not thought_text and pre_reasoning:
             thought_text = pre_reasoning
@@ -2331,8 +2514,9 @@ async def api_chat(body: ChatBody, request: Request):
         yield _sse({"type": "done", "message": assistant,
                     "title": None})
 
+    job = _start_job(body.thread_id, gen())
     return StreamingResponse(
-        gen(),
+        _subscribe_job(job),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",
@@ -2386,6 +2570,40 @@ def api_agent_stop(body: StopAgentBody):
     except Exception as e:
         raise HTTPException(500, f"cancel failed: {e}")
     return {"ok": True, "stopped": True}
+
+
+@app.get("/api/v2/jobs/{thread_id}")
+def api_job_status(thread_id: str):
+    job = _jobs.get(thread_id)
+    if not job:
+        return {"running": False, "done": True, "events": 0}
+    return {"running": not job["done"], "done": job["done"],
+            "cancelled": bool(job.get("cancel")), "events": len(job["events"]),
+            "started": job.get("started")}
+
+
+@app.get("/api/v2/jobs/{thread_id}/stream")
+async def api_job_stream(thread_id: str):
+    job = _jobs.get(thread_id)
+    if not job:
+        raise HTTPException(404, "no job for this chat")
+    return StreamingResponse(_subscribe_job(job), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache, no-transform",
+                                      "X-Accel-Buffering": "no", "Connection": "keep-alive"})
+
+
+@app.post("/api/v2/jobs/{thread_id}/cancel")
+def api_job_cancel(thread_id: str):
+    job = _jobs.get(thread_id)
+    if job:
+        job["cancel"] = True
+    router = _router_session(thread_id)
+    if router is not None:
+        try:
+            router.cancel()
+        except Exception:
+            pass
+    return {"ok": True}
 
 
 # ── scans (delegate) ───────────────────────────────────────────────────────
