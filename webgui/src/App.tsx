@@ -59,6 +59,7 @@ export default function App() {
   const activeRef = useRef<string | null>(null)
   const openSeq = useRef(0)
   const textBuf = useRef('')
+  const replaceNextText = useRef(false)
   const toolBuf = useRef<Record<string, string>>({})
   const flushTimer = useRef<number | null>(null)
   const toastId = useRef(0)
@@ -255,6 +256,12 @@ export default function App() {
   const appendText = (text: string) => patchStreaming(m => {
     const parts = [...m.parts]
     const last = parts[parts.length - 1]
+    if (replaceNextText.current) {
+      replaceNextText.current = false
+      if (last && last.type === 'text') parts[parts.length - 1] = { type: 'text', text }
+      else parts.push({ type: 'text', text })
+      return { ...m, parts }
+    }
     if (last && last.type === 'text') {
       parts[parts.length - 1] = { type: 'text', text: last.text + text }
     } else {
@@ -279,6 +286,7 @@ export default function App() {
           ...prev.filter(m => !m.id.startsWith('local-')),
           ...(prev.some(m => m.id === ev.user_message.id) ? [] : [ev.user_message]),
         ])
+        replaceNextText.current = false
         setStreaming({
           id: `stream-${Date.now()}`,
           thread_id: ev.user_message.thread_id,
@@ -354,6 +362,8 @@ export default function App() {
           else parts.push({ type: 'text', text: ev.text })
           return { ...m, parts }
         })
+        // the next assistant turn replaces this reply instead of stacking
+        replaceNextText.current = true
         break
       case 'tool_start':
       case 'tool_approval':
@@ -380,6 +390,7 @@ export default function App() {
         }))
         break
       case 'done':
+        replaceNextText.current = false
         setRunInfo(null)
         setMessages(prev => {
           const idx = prev.findIndex(m => m.id === ev.message.id)

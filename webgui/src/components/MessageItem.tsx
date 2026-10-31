@@ -411,8 +411,51 @@ export function MessageItem({ m, showThinking }: { m: Message; showThinking: boo
     .map(({ i }) => i)
   const lastShell = shellIdx.length ? shellIdx[shellIdx.length - 1] : -1
   const hiddenActionCount = Math.max(0, toolParts.length - 3)
-  const expanded = showAllSteps || hiddenActionCount === 0
-  const shownActions = expanded ? toolParts : toolParts.slice(-3)
+  const isDone = !m.streaming
+  const showToggle = isDone || hiddenActionCount > 0
+  const streamingExpanded = showAllSteps || hiddenActionCount === 0
+  const visibleActions = isDone
+    ? (showAllSteps ? toolParts : [])
+    : (streamingExpanded ? toolParts : toolParts.slice(-3))
+  const actionOpen = isDone ? showAllSteps : streamingExpanded
+
+  const textBlock = textParts.map(({ p, i }) => {
+    if (p.type === 'ask') return <AskCard key={p.question_id || i} part={p} threadId={m.thread_id} />
+    if (p.type === 'thought') return showThinking && p.text?.trim() ? <ThinkingBlock key={i} text={p.text} /> : null
+    if (p.type === 'note') {
+      return (
+        <div key={i} className="my-1 flex items-start gap-1.5 text-[11.5px] leading-snug text-faint">
+          <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-faint/70" />
+          <span className="min-w-0 break-words">{p.text.length > 220 ? p.text.slice(0, 217) + '…' : p.text}</span>
+        </div>
+      )
+    }
+    return p.text?.trim() ? <Markdown key={i} text={p.text} plain={m.meta?.engine === 'cli'} /> : null
+  })
+
+  const actionBlock = toolParts.length === 0 ? null : (
+    <div className={isDone
+      ? 'mb-2 border-b border-line/60 pb-1.5'
+      : 'mt-2 border-t border-line/60 pt-1.5'}>
+      {showToggle && (
+        <button
+          type="button"
+          onClick={() => setShowAllSteps(v => !v)}
+          className="my-1.5 flex items-center gap-1.5 text-[11px] text-faint transition hover:text-muted"
+        >
+          <ChevronRight size={11} className={actionOpen ? 'rotate-90' : ''} />
+          {isDone
+            ? (showAllSteps ? 'Hide actions' : `Show ${toolParts.length} action${toolParts.length === 1 ? '' : 's'}`)
+            : (showAllSteps ? 'Hide actions'
+                : `Show ${hiddenActionCount} earlier action${hiddenActionCount === 1 ? '' : 's'}`)}
+        </button>
+      )}
+      {visibleActions.map(({ p, i }) => (
+        <ToolCard key={p.call_id || i} part={p}
+          defaultOpen={Boolean(m.streaming) && p.tool === 'shell' && i === lastShell} />
+      ))}
+    </div>
+  )
 
   return (
     <div className="rise px-0.5">
@@ -426,41 +469,11 @@ export function MessageItem({ m, showThinking }: { m: Message; showThinking: boo
       </div>
 
       <div className="pl-7">
-        {/* Reply / notes / thinking stay above the action log */}
-        {textParts.map(({ p, i }) => {
-          if (p.type === 'ask') return <AskCard key={p.question_id || i} part={p} threadId={m.thread_id} />
-          if (p.type === 'thought') return showThinking && p.text?.trim() ? <ThinkingBlock key={i} text={p.text} /> : null
-          if (p.type === 'note') {
-            return (
-              <div key={i} className="my-1 flex items-start gap-1.5 text-[11.5px] leading-snug text-faint">
-                <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-faint/70" />
-                <span className="min-w-0 break-words">{p.text.length > 220 ? p.text.slice(0, 217) + '…' : p.text}</span>
-              </div>
-            )
-          }
-          return p.text?.trim() ? <Markdown key={i} text={p.text} plain={m.meta?.engine === 'cli'} /> : null
-        })}
-
-        {/* Shell / file actions, grouped at the bottom; older ones fold past 3 */}
-        {toolParts.length > 0 && (
-          <div className="mt-2 border-t border-line/60 pt-1.5">
-            {hiddenActionCount > 0 && (
-              <button
-                type="button"
-                onClick={() => setShowAllSteps(v => !v)}
-                className="my-1.5 flex items-center gap-1.5 text-[11px] text-faint transition hover:text-muted"
-              >
-                <ChevronRight size={11} className={expanded ? 'rotate-90' : ''} />
-                {expanded
-                  ? 'Hide actions'
-                  : `Show ${hiddenActionCount} earlier action${hiddenActionCount === 1 ? '' : 's'}`}
-              </button>
-            )}
-            {shownActions.map(({ p, i }) => (
-              <ToolCard key={p.call_id || i} part={p} defaultOpen={p.tool === 'shell' && i === lastShell} />
-            ))}
-          </div>
-        )}
+        {/* While working: reply above, actions below. When done: actions fold
+            to the top and the final report/summary sits at the bottom. */}
+        {isDone && actionBlock}
+        {textBlock}
+        {!isDone && actionBlock}
 
         <Footer m={m} actions={toolParts.length} />
       </div>

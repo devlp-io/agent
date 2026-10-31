@@ -2182,6 +2182,24 @@ GUI_TRANSPORT = (
     "Emit one action, wait for its real result, then continue. For builds, create files one at a time and show "
     "each step; do not claim a kit/scaffold is 'already done' unless this run created the files and the output "
     "confirms them. Report each created file path as you go.\n\n"
+    "[NETWORK FAILURE LADDER — DO NOT GIVE UP AT THE FIRST TIMEOUT]\n"
+    "If a host times out or refuses connections, diagnose and try alternatives before reporting failure:\n"
+    "1) DNS: `dig +short HOST A`, `dig +short HOST AAAA`, and DoH (`https://dns.google/resolve?name=HOST&type=A`).\n"
+    "2) TCP: `nc -vz -w 3 HOST 80 443 8080 8443`; test IPv4 and IPv6; try `nmap -Pn -p80,443,8080,8443 HOST`.\n"
+    "3) TLS/HTTP: `openssl s_client -connect HOST:443 -servername HOST`; curl with `--http1.1`, `-k`, a browser "
+    "User-Agent, a `Host` header, and `--resolve`; try http and https.\n"
+    "4) Egress: if `AG_PROXY`/`HTTPS_PROXY` is set, use it; if a local Tor SOCKS proxy is present "
+    "(`127.0.0.1:9050`), try `curl --socks5-hostname 127.0.0.1:9050`.\n"
+    "5) External fetchers (their network fetches the target when yours is blocked): "
+    "`https://api.hackertarget.com/httpheaders/?q=https://HOST`, `https://r.jina.ai/http://HOST`, "
+    "Wayback CDX + newest snapshot, Shodan InternetDB for the resolved IP, crt.sh for certificates/subdomains, "
+    "urlscan.io search. These often reveal Server headers, WordPress/REST hints, CPEs, hosting, and hostnames.\n"
+    "6) Tech-stack fallbacks: response headers, HTML `generator` meta, `/wp-json/`, `/api/`, favicon hash, "
+    "JS bundle names, certificate SANs, CPEs, archived pages.\n"
+    "Budget the direct path: after two direct attempts time out, stop repeating direct curls and switch to the "
+    "external fetchers above. Do not burn minutes on the same blocked layer.\n"
+    "Only after those fail, report exactly which layer failed and include any external evidence. Never say "
+    "'could not find the tech stack' when an external source returned headers, CPEs, or hostnames.\n\n"
     "[SCOPE DISCIPLINE]\n"
     "1) Infer EXACTLY what the operator asked. Do only that scope.\n"
     "2) Narrow requests (e.g. 'check the tech stack', 'update this file') must stay narrow — "
@@ -2523,6 +2541,8 @@ async def _agent_stream(body: ChatBody, request: Request):
                 clean = _professionalise(raw_stream)
             if clean and not FILE_NOTE_RE.search(reply_text or "") and not _is_event_note(reply_text or ""):
                 last_reply = clean
+                return clean
+            return ""
 
         try:
             await _compliance_gate(text or "review attached files: " + ", ".join(a.get("filename", "") for a in atts))
@@ -2660,7 +2680,9 @@ async def _agent_stream(body: ChatBody, request: Request):
 
                 elif name == "AssistantMessageEvent":
                     txt = getattr(ev, "text", "") or ""
-                    finalize_turn(txt)
+                    clean = finalize_turn(txt)
+                    if clean and not _has_dsml(clean):
+                        yield _sse({"type": "text_final", "text": clean})
                     if add_file_edit(txt):
                         last = parts[-1]
                         yield _sse({"type": "file_edit", "id": last["call_id"],

@@ -1351,10 +1351,46 @@ class AgentRouter:
             root_cause = "Permission Denied (filesystem or port binding)"
             alternatives.append("Ensure target file has executable permissions (`chmod +x <file>`)")
             alternatives.append("Ensure target path is inside workspace directory (`scans/workspace`)")
+        elif any(err in out_low for err in (
+                "timed out", "timeout", "curl: (28)", "curl: (7)", "failed to connect",
+                "connection timed out", "operation timed out", "no route to host",
+                "network is unreachable", "connection reset", "tls handshake", "ssl connect error")):
+            import re as _re
+            m = _re.search(r"https?://([^/\s'\"]+)", cmd) or _re.search(
+                r"\b([a-z0-9.-]+\.[a-z]{2,}|(?:\d{1,3}\.){3}\d{1,3})\b", cmd, _re.I)
+            host = m.group(1) if m else "<target>"
+            root_cause = (
+                f"Network path to `{host}` is timing out/blocked from this host "
+                "(DNS may still resolve). Do not conclude 'unreachable' yet."
+            )
+            alternatives.extend([
+                f"Layer check DNS/TCP: `COMMAND: dig +short {host} A; dig +short {host} AAAA` and "
+                f"`COMMAND: nc -vz -w 3 {host} 80 443 8080 8443`",
+                f"Layer check TLS: `COMMAND: timeout 8 openssl s_client -connect {host}:443 "
+                f"-servername {host} </dev/null 2>&1 | head -30`",
+                f"Layer check HTTP variants: `COMMAND: curl -4 -sS --max-time 12 -k -L "
+                f"-A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36' "
+                f"--http1.1 -D - -o /dev/null https://{host}/`",
+                f"Bypass local egress with an external fetcher (works when direct TCP is blocked): "
+                f"`COMMAND: curl -sS --max-time 25 'https://api.hackertarget.com/httpheaders/?q=https://{host}'`",
+                f"External page render: `COMMAND: curl -sS --max-time 25 'https://r.jina.ai/http://{host}' | head -80`",
+                f"Archive evidence: `COMMAND: curl -sS --max-time 25 "
+                f"'https://web.archive.org/cdx/search/cdx?url={host}&output=json&limit=5&filter=statuscode:200'` "
+                f"then fetch the newest snapshot",
+                f"Infrastructure/CPEs: resolve then `COMMAND: curl -sS --max-time 15 "
+                f"'https://internetdb.shodan.io/<resolved-ip>'`",
+                f"Certificates/subdomains: `COMMAND: curl -sS --max-time 25 'https://crt.sh/?q={host}&output=json'`",
+                "If configured, retry through `$AG_PROXY`/`$HTTPS_PROXY` or a local Tor SOCKS "
+                "(`curl --socks5-hostname 127.0.0.1:9050 ...`) before giving up",
+                "After two direct timeouts, switch to the external fetchers instead of repeating direct curls; "
+                "only after these report the exact failing layer plus whatever external headers, CPEs, "
+                "hostnames, or archived pages returned",
+            ])
         elif any(err in out_low for err in ("connection refused", "could not resolve host", "name or service not known")):
             root_cause = "Target host unreachable or DNS resolution failure"
             alternatives.append("Verify hostname resolution with `COMMAND: nslookup <domain>` or `COMMAND: dig <domain>`")
             alternatives.append("Test port reachability on alternate scheme (`http://` vs `https://`)")
+            alternatives.append("Try external fetchers (api.hackertarget.com/httpheaders, r.jina.ai) before declaring failure")
 
         if not alternatives:
             alternatives.append("Pivot attack surface to secondary endpoints, alternate parameters, or different HTTP methods (POST/PUT/OPTIONS)")
