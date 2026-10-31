@@ -1985,17 +1985,21 @@ def _final_summary(objective: str, draft: str, parts, hidden: List[str]) -> str:
         "- No code fences, no raw output blocks, no shell transcripts in the report.\n"
         "- Never ask about authorization, ownership, or scope; the operator owns the engagement. "
         "Next steps are technical actions, not permission requests.\n\n"
-        "FORMAT — clean markdown only:\n"
+        "FORMAT — clean markdown only. THE FIRST CONTENT LINE AFTER THE TITLE MUST ANSWER THE OPERATOR.\n"
         "## <specific report title>\n"
-        "**Objective:** <one-line restatement>\n"
-        "**Bottom line:** <2-4 sentences: the answer to the objective, or the true state of the job>\n"
-        "Then pick the sections that fit the task (omit empty ones):\n"
-        "- Offensive / scans / pentest: **Targets**, **Findings** (with severity + evidence), "
-        "**Access / Exploitation**, **Artifacts**, **Limitations**\n"
-        "- OSINT / research: **Entities & facts**, **Corroboration**, **Open questions**\n"
-        "- Code / build / fix: **What changed**, **Where**, **Verification**, **How to use**\n"
-        "- Investigation / analysis: **Key evidence**, **Conclusions**, **Unknowns**\n"
-        "End with **Next steps** — 2-5 concrete actions the operator can take.\n\n"
+        "**Answer:** <1-3 short lines with the concrete result only. For a tech-stack request name the stack "
+        "immediately (CMS + version, framework/page builder, theme, server, hosting). For a scan, the key "
+        "finding/state. For a question, the answer itself. Do NOT open with 'Objective', 'Bottom line', or "
+        "narrative, and do NOT put access caveats or methodology in the Answer — those go under Limitations. "
+        "Example for a tech-stack request: `**Answer:** WordPress 6.5 · Elementor 3.21 · Astra theme · nginx · Cloudflare` "
+        "(result only; no caveats).>\n"
+        "<OPTIONAL: straight after the answer, a compact `Layer | Technology` table when there are 3+ "
+        "comparable layers (e.g. CMS, builder, theme, server, hosting). Skip it if a line is clearer.>\n"
+        "Then, below the answer, use only what the evidence supports:\n"
+        "- **Evidence:** short bullets naming the source of each key fact\n"
+        "- **Limitations / gaps:** what could not be verified and the failing layer\n"
+        "- **Next steps:** 2-5 concrete actions\n"
+        "Task-specific detail may follow the answer, but never before it. Omit empty sections.\n\n"
         "TABLES (optional, use judgment): when you are comparing 3 or more comparable items — "
         "ports/services, hosts, findings with severity, accounts/entities, versions, scan results — "
         "a compact markdown table (header row + |---| separator) usually reads better than bullets. "
@@ -2994,7 +2998,7 @@ async def _agent_stream(body: ChatBody, request: Request):
                 {"tool": p.get("tool"), "args": p.get("args", {}), "ok": p.get("ok")}
                 for p in parts if p.get("type") == "tool"
             ]
-            add_note(f"Cleaned up {len(removed_paths)} temporary file(s) created for this task.")
+            hidden_activity.append(f"Cleaned up {len(removed_paths)} temporary file(s) created for this task.")
         _save_agent_session(body.thread_id, router)
 
         # report real workspace changes even if the agent used shell redirection/sed
@@ -3043,7 +3047,7 @@ async def _agent_stream(body: ChatBody, request: Request):
         if vanished:
             dead = {id(p) for p in vanished}
             parts = [p for p in parts if id(p) not in dead]
-            add_note(f"Cleaned up {len(vanished)} temporary file(s) created for this task.")
+            hidden_activity.append(f"Cleaned up {len(vanished)} temporary file(s) created for this task.")
 
         has_edit = any(p.get("type") == "tool" and p.get("tool") == "edit" for p in parts)
         if _has_dsml(last_reply or ""):
