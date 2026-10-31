@@ -433,9 +433,6 @@ async def _job_reader(job: Dict[str, Any], iterator) -> None:
                         meta["partial"] = False
                         _mark_partial_parts(parts)
                         content = (m["content"] or "").strip()
-                        if not content:
-                            content = ("**Task interrupted before completion.** "
-                                       "Send `continue` to resume from the saved state.")
                         _message_update(mid, content, parts, meta)
         except Exception:
             pass
@@ -1573,9 +1570,6 @@ def _mark_orphan_runs() -> None:
                 meta["run_status"] = "interrupted"
                 meta["partial"] = False
                 content = (m["content"] or "").strip()
-                if not content:
-                    content = ("**Task interrupted before completion.** "
-                               "Send `continue`, `.`, `k`, or `u` to resume from the saved state.")
                 c.execute(
                     "UPDATE messages SET content=?, parts=?, meta=? WHERE id=?",
                     (content, json.dumps(parts, ensure_ascii=False),
@@ -2758,12 +2752,10 @@ async def _agent_stream(body: ChatBody, request: Request):
                     kind = getattr(ev, "subagent_type", "") or getattr(ev, "name", "") or "specialist"
                     detail = getattr(ev, "task", "") or getattr(ev, "summary", "") or ""
                     verb = "started" if name == "SubagentStartEvent" else "finished"
-                    add_note(f"**Subagent {verb}:** {kind} — {str(detail)[:180]}")
+                    pass
 
                 elif name == "PhaseTransitionEvent":
-                    phase = getattr(ev, "phase_name", "") or ""
-                    if phase:
-                        add_note(f"**Phase:** {phase}")
+                    pass
 
                 elif name == "StatusChangeEvent":
                     st = getattr(ev, "status", "") or ""
@@ -2804,8 +2796,6 @@ async def _agent_stream(body: ChatBody, request: Request):
                         part["status"] = "cancelled"
                         part["ok"] = False
                         part["output"] = (part.get("output") or "") + "\n[cancelled by operator]"
-                if stop_reason == "operator stop":
-                    parts.append({"type": "note", "text": "Stopped by operator."})
                 break
             if limit_hit:
                 break
@@ -3034,26 +3024,6 @@ async def _agent_stream(body: ChatBody, request: Request):
             add_note(f"Cleaned up {len(vanished)} temporary file(s) created for this task.")
 
         has_edit = any(p.get("type") == "tool" and p.get("tool") == "edit" for p in parts)
-        if stop_reason:
-            fails = [t for t in tools if t.get("ok") is False]
-            lines = [f"**Task not completed — {stop_reason}.**", "",
-                     f"Ran **{len(tools)}** action(s) before it stopped."]
-            if has_edit:
-                edits = [p for p in parts if p.get("type") == "tool" and p.get("tool") == "edit"]
-                lines.append("")
-                lines.append("**Files touched:**")
-                for e in edits[:6]:
-                    name = str(e.get("args", {}).get("path", "")).rsplit("/", 1)[-1]
-                    lines.append(f"- `{name}`")
-            if fails:
-                lines.append("")
-                lines.append("**Last failures:**")
-                for f in fails[-3:]:
-                    cmd = str(f.get("args", {}).get("cmd", ""))[:100]
-                    lines.append(f"- `{cmd}`")
-            lines.append("")
-            lines.append("Continue in this chat to resume.")
-            last_reply = "\n".join(lines)
         if _has_dsml(last_reply or ""):
             last_reply = re.sub(r"<[\uff5c|][^>]*>", "", last_reply or "").strip()
         last_reply = _strip_code_blocks(last_reply)
@@ -3082,7 +3052,7 @@ async def _agent_stream(body: ChatBody, request: Request):
                 pass
         if not stop_reason and _looks_like_code_dump(last_reply):
             last_reply = _action_summary(parts) or _run_summary(parts)
-        if not last_reply.strip():
+        if not aborted and not last_reply.strip():
             last_reply = _action_summary(parts)
 
         if aborted:
@@ -3091,10 +3061,6 @@ async def _agent_stream(body: ChatBody, request: Request):
                     part["status"] = "cancelled"
                     part["ok"] = False
                     part["output"] = (part.get("output") or "") + "\n[cancelled by operator]"
-            if stop_reason == "operator stop" and not any(
-                p.get("type") == "note" and p.get("text") == "Stopped by operator." for p in parts
-            ):
-                add_note("Stopped by operator.")
 
         for part in parts:
             if part.get("type") == "ask" and part.get("status") == "waiting":
@@ -3122,9 +3088,8 @@ async def _agent_stream(body: ChatBody, request: Request):
             notes = [p["text"] for p in visible if p.get("type") == "note"]
             content = "\n\n".join(notes).strip()
         run_status = "cancelled" if aborted else "done"
-        if not content:
-            content = ("**Task stopped before completion.** Send `continue` to resume."
-                       if aborted else "Task finished.")
+        if not content and not aborted:
+            content = "Task finished."
         meta = {"mode": "agent", "engine": "cli", "effort": body.effort,
                 "objective": (run_objective or "")[:300],
                 "model": router.model_manager.display_name, "tools": tools,
@@ -3289,7 +3254,6 @@ async def api_chat(body: ChatBody, request: Request):
         for iteration in range(MAX_TOOL_ITERS):
             if _cancel_requested(body.thread_id):
                 aborted = True
-                parts.append({"type": "note", "text": "Stopped by operator."})
                 break
 
             messages = [{"role": "system", "content": sys_prompt}] + history
@@ -3328,7 +3292,6 @@ async def api_chat(body: ChatBody, request: Request):
             line_buf = ""
 
             if aborted:
-                parts.append({"type": "note", "text": "Stopped by operator."})
                 break
 
             text_out = "".join(buf)

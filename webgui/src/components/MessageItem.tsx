@@ -382,7 +382,23 @@ export function MessageItem({ m, showThinking }: { m: Message; showThinking: boo
     )
   }
 
-  if (!parts.length && !m.content && !m.streaming) return null
+  const visibleBody = Boolean(m.content?.trim()) || parts.some(p =>
+    p.type === 'tool' || p.type === 'ask'
+    || (p.type === 'text' && p.text?.trim())
+    || (p.type === 'note' && p.text?.trim())
+    || (showThinking && p.type === 'thought' && p.text?.trim()))
+  if (!visibleBody && !m.streaming) {
+    const interrupted = String(m.meta?.run_status ?? '') === 'interrupted'
+    if (m.meta?.aborted || interrupted || String(m.meta?.run_status ?? '') === 'cancelled') {
+      const secs = Math.max(0.1, Number(m.meta?.duration_ms ?? 0) / 1000)
+      return (
+        <div className="px-0.5 pl-7 text-[11px] text-faint">
+          {interrupted ? 'Interrupted' : 'Stopped'} after {secs.toFixed(1)}s
+        </div>
+      )
+    }
+    return null
+  }
 
   const actionIdx = parts
     .map((p, i) => (p.type === 'tool' ? i : -1))
