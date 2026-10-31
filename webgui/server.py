@@ -1671,7 +1671,12 @@ def _final_summary(objective: str, draft: str, parts, hidden: List[str]) -> str:
         "- OSINT / research: **Entities & facts**, **Corroboration**, **Open questions**\n"
         "- Code / build / fix: **What changed**, **Where**, **Verification**, **How to use**\n"
         "- Investigation / analysis: **Key evidence**, **Conclusions**, **Unknowns**\n"
-        "End with **Next steps** — 2-5 concrete actions the operator can take.\n"
+        "End with **Next steps** — 2-5 concrete actions the operator can take.\n\n"
+        "TABLES (optional, use judgment): when you are comparing 3 or more comparable items — "
+        "ports/services, hosts, findings with severity, accounts/entities, versions, scan results — "
+        "a compact markdown table (header row + |---| separator) usually reads better than bullets. "
+        "For 1-2 items or narrative findings, prefer bullets or short paragraphs. Never force a table "
+        "and never split one finding across a table and a bullet.\n"
         "Keep it tight: 200-600 words unless the evidence genuinely needs more."
     )
     user = (
