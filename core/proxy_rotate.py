@@ -20,7 +20,7 @@ import random
 import pathlib
 import threading
 import concurrent.futures
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
@@ -54,7 +54,7 @@ def _safe(t):
 
 
 def _now_iso():
-    return datetime.utcnow().isoformat() + "Z"
+    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
 
 
 def _parse_iso(s):
@@ -70,7 +70,7 @@ def _age_secs(iso_str):
     t = _parse_iso(iso_str)
     if not t:
         return 10**9
-    return (datetime.utcnow() - t).total_seconds()
+    return (datetime.now(timezone.utc).replace(tzinfo=None) - t).total_seconds()
 
 
 # ── env ───────────────────────────────────────────────────────────

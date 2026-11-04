@@ -10,7 +10,7 @@ import json
 import time
 import pathlib
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 
 SCAN_ROOT = pathlib.Path(os.environ.get("AG_SCAN_ROOT", os.path.expanduser("~/scans")))
 _LOCK = threading.Lock()
@@ -28,7 +28,7 @@ def record(target: str, kind: str, payload: dict, run_dir=None):
         p = _path_for(target)
         p.parent.mkdir(parents=True, exist_ok=True)
         entry = {
-            "ts": datetime.utcnow().isoformat() + "Z",
+            "ts": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
             "kind": kind,
             "run_dir": str(run_dir) if run_dir else None,
             **payload,

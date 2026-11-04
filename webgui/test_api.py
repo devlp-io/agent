@@ -122,6 +122,65 @@ def main():
     r = client.delete(f"/api/v2/threads/{tid}")
     check("thread delete", r.status_code == 200 and r.json()["ok"] is True)
 
+    # ── regressions ─────────────────────────────────────────────────────
+    r = client.get("/gui/" + "%2e%2e/" * 6 + "etc/passwd")
+    check("spa blocks traversal", "root:x:0:0" not in r.text)
+
+    r = client.post("/api/v2/upload",
+                    files={"file": ("café résumé.txt", b"hello", "text/plain")},
+                    data={"thread_id": ""})
+    check("unicode upload ok", r.status_code == 200)
+    uid = r.json()["id"]
+    r = client.get(f"/api/v2/media/{uid}")
+    check("unicode media ok", r.status_code == 200, str(r.status_code))
+    check("media disposition rfc5987", "filename*=UTF-8''" in r.headers.get("content-disposition", ""))
+
+    # long polite refusals must be detected, ordinary limits must not
+    check("refusal detection long prose",
+          server._is_refusal_text("I'm not going to do this. " + "context " * 400))
+    check("refusal false positive guard",
+          not server._is_refusal_text("I can't reach the host: connection refused."))
+    check("denied signal", server._is_denial("  **DENIED**  \nCODE: out-of-scope"))
+
+    # a dying job must mark its run interrupted, not stay "running"
+    r = client.post("/api/v2/threads", json={"title": "job"})
+    jt = r.json()["id"]
+    mid = server._persist_message(jt, "assistant", "partial", [], [], {})["id"]
+    server._run_set(jt, status="running", message_id=mid)
+
+    async def _boom():
+        yield server._sse({"type": "start"})
+        raise RuntimeError("stream died")
+
+    async def _drain():
+        job = {"events": [], "done": False, "cancel": False, "thread_id": jt}
+        await server._job_reader(job, _boom())
+        return job
+
+    import asyncio
+    job = asyncio.run(_drain())
+    check("dying job closes", job["done"] is True)
+    check("dying job interrupts run", server._run_get(jt)["status"] == "interrupted")
+    client.delete(f"/api/v2/threads/{jt}")
+
+    # deleting a chat removes its uploads, runs and session memory
+    ct = client.post("/api/v2/threads", json={"title": "cleanup"}).json()["id"]
+    cuid = client.post("/api/v2/upload",
+                       files={"file": ("a.txt", b"x", "text/plain")},
+                       data={"thread_id": ct}).json()["id"]
+    client.delete(f"/api/v2/threads/{ct}")
+    check("uploads deleted with thread", client.get(f"/api/v2/media/{cuid}").status_code == 404)
+
+    # undo also drops the undone turn's uploads
+    ut = client.post("/api/v2/threads", json={"title": "undo files"}).json()["id"]
+    au = client.post("/api/v2/upload",
+                     files={"file": ("b.txt", b"y", "text/plain")},
+                     data={"thread_id": ut}).json()
+    um = server._persist_message(ut, "user", "with file", [{"type": "text", "text": "with file"}], [au], {})
+    client.post(f"/api/v2/messages/{um['id']}/undo")
+    check("undo drops attachments", client.get(f"/api/v2/media/{au['id']}").status_code == 404)
+    client.delete(f"/api/v2/threads/{ut}")
+
     # token gate (separate app import not needed: prove middleware wiring)
     check("token gate optional", server.GUI_TOKEN == "" or isinstance(server.GUI_TOKEN, str))
 

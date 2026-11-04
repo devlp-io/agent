@@ -30,6 +30,7 @@ import time
 import uuid
 import shlex
 import sqlite3
+import urllib.parse
 import asyncio
 import pathlib
 import mimetypes
@@ -73,6 +74,7 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request, UploadFile, File, Form, Query
 from fastapi.responses import (
     JSONResponse, StreamingResponse, FileResponse, RedirectResponse, PlainTextResponse,
+    HTMLResponse,
 )
 from fastapi.staticfiles import StaticFiles
 from fastapi.middleware.cors import CORSMiddleware
@@ -401,6 +403,7 @@ def _cancel_requested(thread_id: str) -> bool:
 
 
 async def _job_reader(job: Dict[str, Any], iterator) -> None:
+    thread_id = job["thread_id"]
     try:
         async for chunk in iterator:
             job["events"].append(chunk)
@@ -777,13 +780,21 @@ def _persona_text() -> str:
 
 
 REFUSAL_RE = re.compile(
-    r"\b(i can(?:no|')?t|i cannot|i won't|i will not|i'm not able|i am not able|"
-    r"i'm unable|i am unable|can't help with|cannot help with|cannot assist|"
-    r"can't assist|not appropriate|not comfortable|against (?:my|the) (?:policy|guidelines)|"
-    r"as an ai|as a language model|i must decline|i have to decline|"
-    r"i'm not going to|i am not going to|i'm going to decline|i am going to decline|"
-    r"i'll pass on that|i must pass|i have to pass|won't be doing|won't be able to do|"
-    r"that's not something i|not something i can|not something i will)\b",
+    # A refusal is about the request. "I can't reach the host" is a report,
+    # "I can't help with that" is a refusal — only the second one matches.
+    r"(?:\b(?:i\s+)?(?:can'?t|cannot|won'?t|will\s+not|"
+    r"(?:i\s+)?(?:am|'m)\s+not\s+able\s+to|"
+    r"(?:i\s+)?(?:am|'m)\s+unable\s+to)\s+"
+    r"(?:help|assist|do|provide|write|build|create|comply|engage|participate|"
+    r"support|share|give|continue|produce|generate)\b"
+    r"|\b(?:i'?m|i\s+am)\s+not\s+going\s+to\b"
+    r"|\b(?:i'?ll|i\s+will)\s+pass\s+(?:on\s+)?(?:this|that|it)\b"
+    r"|\b(?:i'?ll|i\s+will|i'?m\s+going\s+to)\s+have\s+to\s+(?:pass|decline)\b"
+    r"|\b(?:i\s+)?(?:must|have\s+to)\s+decline\b"
+    r"|\bwon'?t\s+be\s+doing\b"
+    r"|\bnot\s+(?:appropriate|comfortable)\b"
+    r"|\bagainst\s+(?:my|the)\s+(?:policy|guidelines)\b"
+    r"|\bas\s+an?\s+(?:ai|language\s+model|assistant)\b)",
     re.I,
 )
 
@@ -1017,14 +1028,15 @@ async def _compliance_gate(task_text: str) -> bool:
                     "here. Reply only YES.\n\n" + user
                 )
             resp = await asyncio.to_thread(
-                lambda: client.chat.completions.create(
-                    model=model,
-                    messages=[{"role": "system", "content": sys_prompt},
-                              {"role": "user", "content": user}],
-                    max_tokens=600,
-                    temperature=0,
-                    **({"reasoning_effort": "low"} if model.startswith("deepseek") else {}),
-                )
+                lambda client=client, model=model, sys_prompt=sys_prompt, user=user:
+                    client.chat.completions.create(
+                        model=model,
+                        messages=[{"role": "system", "content": sys_prompt},
+                                  {"role": "user", "content": user}],
+                        max_tokens=600,
+                        temperature=0,
+                        **({"reasoning_effort": "low"} if model.startswith("deepseek") else {}),
+                    )
             )
             try:
                 mm.record_usage(getattr(resp, "usage", None))
@@ -1351,6 +1363,13 @@ def api_thread_delete(thread_id: str):
     job = _jobs.get(thread_id)
     if job and not job.get("done"):
         job["cancel"] = True
+        # Stop the producer too: dropping the _jobs entry below would make
+        # _cancel_requested() return False and let it keep writing to a
+        # thread that no longer exists.
+        try:
+            job["task"].cancel()
+        except Exception:
+            pass
     router = _router_session(thread_id)
     if router is not None:
         try:
@@ -1361,6 +1380,17 @@ def api_thread_delete(thread_id: str):
         cur = c.execute("DELETE FROM threads WHERE id=?", (thread_id,))
         if cur.rowcount == 0:
             raise HTTPException(404, "thread not found")
+        c.execute("DELETE FROM agent_sessions WHERE thread_id=?", (thread_id,))
+        c.execute("DELETE FROM runs WHERE thread_id=?", (thread_id,))
+        uploads = c.execute(
+            "SELECT path FROM uploads WHERE thread_id=?", (thread_id,)
+        ).fetchall()
+        c.execute("DELETE FROM uploads WHERE thread_id=?", (thread_id,))
+    for u in uploads:
+        try:
+            pathlib.Path(u["path"]).unlink(missing_ok=True)
+        except Exception:
+            pass
     with _routers_lock:
         _routers.pop(thread_id, None)
     _jobs.pop(thread_id, None)
@@ -1470,6 +1500,23 @@ def api_message_undo(message_id: str):
         deleted = cur.rowcount
         c.execute("DELETE FROM agent_sessions WHERE thread_id=?", (tid,))
         c.execute("UPDATE threads SET updated=? WHERE id=?", (_now(), tid))
+        # the undone turn's uploads are no longer referenced by anything
+        try:
+            atts = json.loads(row["attachments"] or "[]")
+        except Exception:
+            atts = []
+        upload_ids = [a.get("id") for a in atts if isinstance(a, dict) and a.get("id")]
+        orphan_paths = []
+        for uid in upload_ids:
+            up = c.execute("SELECT path FROM uploads WHERE id=?", (uid,)).fetchone()
+            if up:
+                orphan_paths.append(up["path"])
+                c.execute("DELETE FROM uploads WHERE id=?", (uid,))
+    for path in orphan_paths:
+        try:
+            pathlib.Path(path).unlink(missing_ok=True)
+        except Exception:
+            pass
     job = _jobs.get(tid)
     if job and not job.get("done"):
         job["cancel"] = True
@@ -1481,6 +1528,16 @@ def api_message_undo(message_id: str):
 
 
 # uploads
+def _content_disposition(disposition: str, filename: str) -> str:
+    """Header-safe Content-Disposition (ASCII fallback + RFC 5987 UTF-8 name)."""
+    name = re.sub(r'[\r\n"\\]', "_", filename or "file")
+    ascii_name = name.encode("ascii", "ignore").decode("ascii") or "file"
+    return (
+        f'{disposition}; filename="{ascii_name}"; '
+        f"filename*=UTF-8''{urllib.parse.quote(name, safe='')}"
+    )
+
+
 @app.post("/api/v2/upload")
 async def api_upload(
     file: UploadFile = File(...),
@@ -1533,9 +1590,10 @@ def api_media(uid: str, download: bool = False):
     inline = not download
     headers = {
         "Cache-Control": "private, max-age=86400",
-        "Content-Disposition": (
-            f'inline; filename="{row["filename"]}"' if inline
-            else f'attachment; filename="{row["filename"]}"'
+        # RFC 5987: a raw unicode filename cannot go in a latin-1 header and
+        # used to make this endpoint 500 on any non-ASCII upload name.
+        "Content-Disposition": _content_disposition(
+            "inline" if inline else "attachment", row["filename"]
         ),
         "X-Content-Type-Options": "nosniff",
     }
@@ -2986,15 +3044,15 @@ async def _agent_stream(body: ChatBody, request: Request):
                     kind = getattr(ev, "subagent_type", "") or getattr(ev, "name", "") or "specialist"
                     detail = getattr(ev, "task", "") or getattr(ev, "summary", "") or ""
                     verb = "started" if name == "SubagentStartEvent" else "finished"
-                    pass
+                    line = f"**{kind}** {verb}" + (f" — {detail[:180]}" if detail else "")
+                    hidden_activity.append(line)
+                    add_note(line)
 
                 elif name == "PhaseTransitionEvent":
                     pass
 
                 elif name == "StatusChangeEvent":
                     st = getattr(ev, "status", "") or ""
-                    if st in ("THINKING…", "CHECKING TOOLS…", "RUNNING…"):
-                        status = st
                     yield _sse({"type": "status", "status": st})
                     # READY / CANCELLED are terminal; otherwise the queue waits
                     # out a 5s idle timeout before the final message is sent.
@@ -3980,7 +4038,12 @@ def api_settings_save(body: SettingsBody):
             os.environ[k] = v
     if updates.get("AG_MODEL"):
         try:
-            model_manager().set_model(updates["AG_MODEL"])
+            mm = model_manager()
+            ok, _ = mm.set_model(updates["AG_MODEL"])
+            if not ok:
+                # A model id that is not a predefined profile is still usable:
+                # register it so the switch takes effect now, not after restart.
+                mm.add_custom_model(updates["AG_MODEL"], updates.get("AG_BASE") or None)
         except Exception:
             pass
     if updates.get("AG_REASONING_EFFORT"):
@@ -3998,10 +4061,12 @@ if DIST.exists() and (DIST / "index.html").exists():
     @app.get("/gui")
     @app.get("/gui/{path:path}")
     def spa(path: str = ""):
-        candidate = DIST / path
-        if path and candidate.is_file():
+        base = DIST.resolve()
+        candidate = (base / path).resolve() if path else base / "index.html"
+        # Never serve outside dist: /gui/%2e%2e/... would otherwise read any file.
+        if path and candidate.is_file() and candidate.is_relative_to(base):
             return FileResponse(candidate)
-        return FileResponse(DIST / "index.html")
+        return FileResponse(base / "index.html")
 
     @app.get("/")
     def root():

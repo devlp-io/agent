@@ -67,6 +67,15 @@ DIRECTIVE_TAGS = (
     "SUBAGENT:", "MALWARE:", "PHASE:", "ASK:", "ASK_PASS:"
 )
 
+# Read-only / passive asks. These must never trigger the toolkit preflight:
+# checking headers or a tech stack is not an assessment and should start now.
+PASSIVE_RE = re.compile(
+    r"\b(?:tech\s*stack|technology\s*stack|fingerprint(?:ing)?|headers?|banner|"
+    r"whatweb|wappalyzer|version\s*detect|whois|dns\s*lookup|"
+    r"tls\s*certificate|certificate\s*transparency)\b",
+    re.I,
+)
+
 
 
 def strip_directives(text: str) -> str:
@@ -1684,7 +1693,15 @@ class AgentRouter:
         try:
             valid_runs = find_valid_scan_runs(target)
             if not valid_runs:
-                return f"\n[ACTIVE SESSION CONTEXT: Most recent target referenced is '{target}']\n"
+                return (
+                    "\n[ACTIVE SESSION ASSESSMENT MEMORY — RECALL ALL FINDINGS AND CONTEXT FIRST-HAND]:\n"
+                    f"- Active Target: {target}\n"
+                    "- Assessment Run Directory: none saved on this box yet\n"
+                    "- Verified Findings (0):\n  None logged yet.\n"
+                    "- Operational Instruction: The operator has referenced this target before. "
+                    "Treat it as the active target for this session and do not claim you have no "
+                    "memory of it.\n"
+                )
 
             run_dir = valid_runs[-1]
             state = _state.load(run_dir)
@@ -1713,7 +1730,12 @@ class AgentRouter:
                 f"speak with complete, detailed authority on the findings. Never say you 'only said hi'.\n"
             )
         except Exception:
-            return f"\n[ACTIVE SESSION CONTEXT: Target '{target}']\n"
+            return (
+                "\n[ACTIVE SESSION ASSESSMENT MEMORY — RECALL ALL FINDINGS AND CONTEXT FIRST-HAND]:\n"
+                f"- Active Target: {target}\n"
+                "- Assessment Run Directory: unavailable\n"
+                "- Operational Instruction: Treat this target as active for the session.\n"
+            )
 
     # ────────────────────────────────────────────────────────────────
     # Autonomous Security Assessment (Red Team / Pentest)
@@ -1903,7 +1925,6 @@ class AgentRouter:
         turn = 0
         refusal_streak = 0
         current_phase = 1
-        last_critic_turn = 0
 
         while turn < max_scan_turns:
             if self._is_cancelled:

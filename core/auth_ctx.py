@@ -23,7 +23,7 @@ import re
 import json
 import pathlib
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from urllib.parse import urlparse
 
 SCAN_ROOT = pathlib.Path(os.environ.get("AG_SCAN_ROOT",
@@ -66,7 +66,7 @@ def set_cookie(t, cookie_string):
     ctx["mode"] = "cookie"
     ctx["headers"] = {"Cookie": cookie_string}
     ctx["ok"] = True
-    ctx["set_at"] = datetime.utcnow().isoformat() + "Z"
+    ctx["set_at"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
     save(t, ctx)
     return ctx
 
@@ -76,7 +76,7 @@ def set_bearer(t, token):
     ctx["mode"] = "bearer"
     ctx["headers"] = {"Authorization": "Bearer " + token}
     ctx["ok"] = True
-    ctx["set_at"] = datetime.utcnow().isoformat() + "Z"
+    ctx["set_at"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
     save(t, ctx)
     return ctx
 
@@ -88,7 +88,7 @@ def set_basic(t, userpass):
     ctx["mode"] = "basic"
     ctx["headers"] = {"Authorization": "Basic " + b}
     ctx["ok"] = True
-    ctx["set_at"] = datetime.utcnow().isoformat() + "Z"
+    ctx["set_at"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
     save(t, ctx)
     return ctx
 
@@ -134,7 +134,7 @@ def set_login(t, login_url, email, password, method="POST", json_body=True,
         ctx = {
             "target": t, "mode": "none", "ok": False,
             "login_url": login_url,
-            "set_at": datetime.utcnow().isoformat() + "Z",
+            "set_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
             "sample": body_text,
             "error": "no Set-Cookie header — try the login manually and use "
                      "AUTH: cookie|<name>=<value>",
@@ -174,7 +174,7 @@ def set_login(t, login_url, email, password, method="POST", json_body=True,
         "headers": {"Cookie": cookie_header},
         "login_url": login_url,
         "ok": True,
-        "set_at": datetime.utcnow().isoformat() + "Z",
+        "set_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
         "sample": (r.get("body") or "")[:300],
     }
     save(t, ctx)

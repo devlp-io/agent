@@ -158,10 +158,19 @@ class ModelManager:
                 "ollama", "dolphin3", "http://localhost:11434/v1", "OLLAMA_KEY"
             )
 
+    def add_custom_model(self, name: str, base_url: Optional[str] = None) -> ModelConfig:
+        """Register an arbitrary model id as a usable profile and activate it."""
+        base = base_url or os.environ.get("AG_BASE") or "https://api.deepseek.com/v1"
+        # A custom DeepSeek model must read DEEPSEEK_KEY, not only AG_KEY.
+        key_var = "DEEPSEEK_KEY" if "deepseek" in base.lower() else "AG_KEY"
+        cfg = ModelConfig(name=name, model=name, base_url=base, key_var=key_var)
+        self.profiles[name] = cfg
+        self.active_profile_name = name
+        return cfg
+
     def _sync_from_env(self):
         env_model = os.environ.get("AG_MODEL")
         env_base = os.environ.get("AG_BASE")
-        env_key = os.environ.get("AG_KEY") or os.environ.get("DEEPSEEK_KEY")
 
         if env_model:
             # Check if matches any existing profile
@@ -174,14 +183,7 @@ class ModelManager:
                     found = True
                     break
             if not found:
-                custom_cfg = ModelConfig(
-                    name=env_model,
-                    model=env_model,
-                    base_url=env_base or "https://api.deepseek.com/v1",
-                    key_var="AG_KEY"
-                )
-                self.profiles[env_model] = custom_cfg
-                self.active_profile_name = env_model
+                self.add_custom_model(env_model, env_base)
 
     def set_effort(self, effort: str) -> None:
         """Reasoning effort for models that support it (low | high | max)."""

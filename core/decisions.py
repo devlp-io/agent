@@ -12,7 +12,7 @@ import os
 import json
 import pathlib
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 
 _LOCK = threading.Lock()
 
@@ -28,7 +28,7 @@ def log(run_dir, turn, model_text, directives, results,
         return
     try:
         entry = {
-            "ts": datetime.utcnow().isoformat() + "Z",
+            "ts": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
             "turn": turn,
             "reasoning": (reasoning or "")[:2000],
             "model_text": (model_text or "")[:4000],

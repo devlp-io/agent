@@ -195,9 +195,20 @@ class TestSomScan(unittest.TestCase):
     def test_13_model_switching(self):
         """Test switching models via model manager."""
         mm = ModelManager()
-        ok, msg = mm.set_model("deepseek-reasoner")
+        ok, msg = mm.set_model("deepseek-v4-pro")
         self.assertTrue(ok)
-        self.assertEqual(mm.display_name, "deepseek-reasoner")
+        self.assertEqual(mm.display_name, "deepseek-v4-pro")
+
+    def test_13b_custom_model_registration(self):
+        """An arbitrary model id can be registered and activated at runtime."""
+        mm = ModelManager()
+        ok, _ = mm.set_model("unknown-model-xyz")
+        self.assertFalse(ok)
+        cfg = mm.add_custom_model("unknown-model-xyz")
+        self.assertEqual(mm.display_name, "unknown-model-xyz")
+        self.assertEqual(cfg.model, "unknown-model-xyz")
+        self.assertIn("deepseek", cfg.base_url)
+        self.assertTrue(cfg.is_configured)
 
     def test_14_duplicate_submit_prevention(self):
         """Test that router rejects submissions while busy."""
@@ -336,8 +347,10 @@ class TestSomScan(unittest.TestCase):
         router = AgentRouter(event_callback=lambda ev: events.append(ev))
 
         # /resume with mocked security scan so unit test completes instantaneously
+        router._last_scan_target = "example.com"
         with patch.object(router, "_execute_security_scan") as mock_scan:
-            router._handle_slash_command("/resume")
+            with patch("core.agent_router.find_valid_scan_runs", return_value=[]):
+                router._handle_slash_command("/resume")
             mock_scan.assert_called_once()
 
 
@@ -1232,29 +1245,56 @@ class TestSomScan(unittest.TestCase):
         self.assertTrue(any("Reverse Engineering Specialist (REA)" in getattr(e, "text", "") for e in events))
 
     def test_56_redteam_attack_engine_with_and_without_findings(self):
-        """Verify RedTeamAttackEngine operates successfully with findings and without prior findings."""
+        """Verify RedTeamAttackEngine operates successfully with findings and without prior findings.
+
+        Runs fully offline: the engine gets a fake task runner, so the unit test
+        never fires live requests at a real target.
+        """
         from attack.redteam import RedTeamAttackEngine
-        from core.task_runner import TaskRunner
-        from core.events import ExploitCardEvent, PhaseTransitionEvent
+        from core.task_runner import CommandResult
+        from core.events import ExploitCardEvent, PhaseTransitionEvent, AssistantMessageEvent
 
-        runner = TaskRunner()
+        class OfflineRunner:
+            """Answers every command with a plausible HTTP/JSON response."""
 
-        # 1. Test WITH specific findings (e.g. Swagger and directory exposure as in user session)
+            def __init__(self):
+                self.calls = []
+
+            def run_command(self, command, **kwargs):
+                self.calls.append(command)
+                body = (
+                    "HTTP/1.1 200 OK\r\n"
+                    "Content-Type: application/json\r\n"
+                    "Server: nginx\r\n\r\n"
+                    '{"openapi":"3.0.0","info":{"title":"api"},'
+                    '"paths":{"/api/Users":{},"/api/Organization":{},"/swagger/v1/swagger.json":{}},'
+                    '"items":[{"id":1,"name":"alpha"},{"id":2,"name":"beta"}],'
+                    '"token":"eyJhbGciOiJIUzI1NiJ9.demo.signature"}'
+                )
+                return CommandResult(
+                    command=command, returncode=0, output=body, duration=0.0,
+                    cancelled=False, stalled=False, timed_out=False,
+                    supervisor_notes=[],
+                )
+
+        runner = OfflineRunner()
+
+        # 1. WITH specific findings (Swagger + directory exposure)
         events_with = []
         findings_sample = [
             {
                 "severity": "medium",
                 "title": "Unauthenticated Swagger/OpenAPI spec disclosure (281 endpoints)",
-                "evidence": "https://aimsapis.mop.gov.so/swagger/v1/swagger.json returns 200"
+                "evidence": "https://aimsapis.example.test/swagger/v1/swagger.json returns 200"
             },
             {
                 "severity": "medium",
                 "title": "Unauthenticated organization directory exposure (714 records)",
-                "evidence": "GET https://aimsapis.mop.gov.so/api/Organization returns 200"
+                "evidence": "GET https://aimsapis.example.test/api/Organization returns 200"
             }
         ]
         engine_with = RedTeamAttackEngine(
-            target="mop.gov.so",
+            target="example.test",
             task_runner=runner,
             emit_fn=lambda e: events_with.append(e),
             findings=findings_sample
@@ -1263,11 +1303,15 @@ class TestSomScan(unittest.TestCase):
         self.assertIn("Red team assault completed", res_with["summary"])
         self.assertTrue(any(isinstance(e, ExploitCardEvent) for e in events_with))
         self.assertTrue(any(isinstance(e, PhaseTransitionEvent) for e in events_with))
+        self.assertFalse(any(
+            isinstance(e, AssistantMessageEvent) and "i can't" in (e.text or "").lower()
+            for e in events_with
+        ))
 
-        # 2. Test WITHOUT any findings (zero-findings autonomous assault)
+        # 2. WITHOUT any findings (zero-findings autonomous assault)
         events_without = []
         engine_without = RedTeamAttackEngine(
-            target="example.com",
+            target="example.test",
             task_runner=runner,
             emit_fn=lambda e: events_without.append(e),
             findings=[]
@@ -1275,12 +1319,7 @@ class TestSomScan(unittest.TestCase):
         res_without = engine_without.run()
         self.assertIn("Red team assault completed", res_without["summary"])
         self.assertTrue(any(isinstance(e, ExploitCardEvent) for e in events_without))
-
-        # 3. Test router /attack command execution without crashing or refusing
-        router_events = []
-        r = AgentRouter(lambda e: router_events.append(e))
-        r._execute_attack_phase("mop.gov.so")
-        self.assertFalse(any("No attackable findings recorded yet" in getattr(e, "text", "") for e in router_events))
+        self.assertGreater(len(runner.calls), 0, "engine should drive the runner")
 
 
 if __name__ == "__main__":

@@ -20,7 +20,7 @@ import json
 import time
 import pathlib
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 
 SCAN_ROOT = pathlib.Path(__import__("os").environ.get(
     "AG_SCAN_ROOT", __import__("os").path.expanduser("~/scans")))
@@ -38,7 +38,7 @@ def _path(t):
 def _empty(t):
     return {
         "target": t,
-        "updated_at": datetime.utcnow().isoformat() + "Z",
+        "updated_at": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
         "facts": [],
         "hypotheses": [],
         "dead_ends": [],
@@ -57,7 +57,7 @@ def read(t):
 
 
 def save(t, b):
-    b["updated_at"] = datetime.utcnow().isoformat() + "Z"
+    b["updated_at"] = datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z"
     p = _path(t)
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(b, indent=2, default=str))
@@ -83,7 +83,7 @@ def _add_fact(b, kind, path, evidence):
     b["facts"].append({
         "kind": kind, "path": path,
         "evidence": evidence[:300],
-        "ts": datetime.utcnow().isoformat() + "Z",
+        "ts": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
     })
 
 
@@ -112,7 +112,7 @@ def _add_dead_end(b, probe, variants, outcome):
     b["dead_ends"].append({
         "probe": probe, "variants": list(variants),
         "outcome": outcome[:200],
-        "ts": datetime.utcnow().isoformat() + "Z",
+        "ts": datetime.now(timezone.utc).replace(tzinfo=None).isoformat() + "Z",
     })
 
 
