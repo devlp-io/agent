@@ -131,6 +131,9 @@ function ToolCard({ part, defaultOpen }: { part: ToolPart; defaultOpen: boolean 
   const { title, detail, icon: Icon } = toolLabel(part)
   const [busy, setBusy] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [startedAt] = useState(() => Date.now() / 1000)
+  useTick(part.status === 'running')
+  const elapsed = Math.max(0, Math.round(Date.now() / 1000 - startedAt))
 
   useEffect(() => { setOpen(defaultOpen) }, [defaultOpen])
 
@@ -168,6 +171,9 @@ function ToolCard({ part, defaultOpen }: { part: ToolPart; defaultOpen: boolean 
         </span>
         {detail && (
           <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-faint">{detail}</span>
+        )}
+        {part.status === 'running' && elapsed > 2 && (
+          <span className="shrink-0 text-[10.5px] tabular-nums text-faint">{elapsed}s</span>
         )}
         <ChevronRight size={13} className={`shrink-0 text-faint transition-transform ${open ? 'rotate-90' : ''}`} />
       </button>
@@ -333,9 +339,12 @@ function Footer({ m, actions }: { m: Message; actions: number }) {
     const status = String(m.meta?.status ?? '')
     const working = /RUNNING|WORKING/i.test(status)
     const waiting = /WAITING|STALL/i.test(status)
+    const toolRunning = m.parts.some(p => p.type === 'tool' && p.status === 'running')
     return (
       <div className="relative z-10 mt-3 flex items-center gap-1.5 text-[11.5px] text-faint">
-        <span className="text-muted">{waiting ? 'Waiting for model' : working ? 'Working' : 'Thinking'}</span>
+        <span className="text-muted">
+          {toolRunning ? 'Running' : waiting ? 'Waiting for model' : working ? 'Working' : 'Thinking'}
+        </span>
         <Dots />
         <span className="ml-1 tabular-nums">{elapsed > 1 ? `${elapsed.toFixed(0)}s` : ''}</span>
       </div>

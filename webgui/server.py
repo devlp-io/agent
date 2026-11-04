@@ -1766,6 +1766,9 @@ def _mark_orphan_runs() -> None:
             ).fetchall()
             now = _now()
             for r in rows:
+                live = _jobs.get(r["thread_id"])
+                if live and not live.get("done"):
+                    continue  # a run this process owns is not orphaned
                 c.execute(
                     "UPDATE runs SET status='interrupted', updated=? WHERE thread_id=?",
                     (now, r["thread_id"]),
@@ -1867,7 +1870,7 @@ def _resume_context(thread_id: str, text: str) -> Optional[Dict[str, Any]]:
     }
 
 
-_mark_orphan_runs()
+# _mark_orphan_runs() runs only from main(); see the note there.
 
 GUI_STYLE = (
     "\n\n[GUI OUTPUT STYLE — strict] You are rendered in a web chat UI. "
@@ -2364,6 +2367,9 @@ def _line_is_code(s: str) -> bool:
         return False
     if body.startswith(("http://", "https://")):
         return False
+    # bare call statement, including nested calls: log("x", json.dumps(r))
+    if re.match(r"^[A-Za-z_][\w.]*\(", body):
+        return True
     # stray heredoc sentinels and markup that leak out of FILE/COMMAND blocks
     if HEREDOC_SENTINEL_RE.match(body):
         return True
@@ -2380,13 +2386,14 @@ def _line_is_code(s: str) -> bool:
     return False
 
 
-def _visible_answer(text: str) -> str:
+def _visible_answer(text: str, limit: int = 0) -> str:
     """What the operator is allowed to see above the action cards.
 
     Strictly prose about the work: no fenced code, no indented code, no
     un-fenced code lines, no file bodies, no reasoning narration, no raw output
     dumps. If this returns empty the turn had nothing to report but actions —
-    the UI shows those.
+    the UI shows those. `limit` trims a mid-run status; the final report is
+    generated separately and is not trimmed.
     """
     t = THINK_BLOCK_RE.sub("", text or "")
     t = _strip_code_blocks(t)
@@ -2410,6 +2417,12 @@ def _visible_answer(text: str) -> str:
             continue
         kept.append(line)
     text_out = re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
+    if limit and len(text_out) > limit:
+        cut = text_out[:limit]
+        para = cut.rfind("\n\n")
+        if para > limit * 0.5:
+            cut = cut[:para]
+        text_out = cut.rstrip() + " …"
     return text_out
 
 
@@ -2925,9 +2938,9 @@ async def _agent_stream(body: ChatBody, request: Request):
             reasoning_since = None
             turn_text.clear()
             turn_start = now
-            clean = _visible_answer(reply_text or "")
+            clean = _visible_answer(reply_text or "", limit=700 if len(tools) >= 2 else 0)
             if not clean:
-                clean = _visible_answer(raw_stream)
+                clean = _visible_answer(raw_stream, limit=700 if len(tools) >= 2 else 0)
             if clean and not FILE_NOTE_RE.search(reply_text or "") and not _is_event_note(reply_text or ""):
                 last_reply = clean
                 return clean
@@ -4298,6 +4311,9 @@ def main():
     ap.add_argument("--port", type=int, default=int(os.environ.get("AG_GUI_PORT", 8788)))
     ap.add_argument("--reload", action="store_true")
     args = ap.parse_args()
+    # Only a real server start may mark stale runs; importing this module
+    # (tests, maintenance scripts) must never touch live run state.
+    _mark_orphan_runs()
     print(f"[webgui] http://{args.host}:{args.port}/gui")
     print(f"[webgui] data: {DATA_DIR}")
     uvicorn.run(

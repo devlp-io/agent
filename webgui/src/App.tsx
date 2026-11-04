@@ -158,7 +158,9 @@ export default function App() {
     try {
       const r = await api.messages(id)
       if (seq !== openSeq.current || activeRef.current !== id) return
-      setMessages(r.messages)
+      // A running job's partial row is shown live by the stream instead.
+      setMessages(r.messages.filter(m =>
+        !(m.role === 'assistant' && (m.meta?.partial || m.meta?.run_status === 'running'))))
       setRunInfo(r.run ?? null)
       attachJobIfRunning(id)
       api.todos(id)
@@ -472,6 +474,7 @@ export default function App() {
       if (streamsRef.current[id]) return  // live stream already attached
       const st = await api.jobStatus(id)
       if (!st.running || activeRef.current !== id) return
+      setRunInfo(prev => prev ? { ...prev, status: 'running' } : prev)
       jobAbortRef.current[id]?.abort()
       const ctrl = new AbortController()
       jobAbortRef.current[id] = ctrl
@@ -612,6 +615,8 @@ export default function App() {
 
   const activeThread = threads.find(t => t.id === activeId) ?? null
   const currentModel = models.find(m => m.name === activeModel)
+  const effectiveVariant = currentModel?.variants?.find(v => v.key === effort)
+  const modelLabel = effectiveVariant?.label ?? currentModel?.label ?? currentModel?.model ?? 'model'
   const isBusy = !!streaming
 
   return (
@@ -672,7 +677,7 @@ export default function App() {
               {online ? <Wifi size={10} className="text-mint" /> : <WifiOff size={10} className="text-rose" />}
               <span>{online ? 'connected' : 'offline'}</span>
               <span className="text-line2">·</span>
-              <span className="truncate">{currentModel?.label ?? currentModel?.model ?? 'no model'}</span>
+              <span className="truncate">{modelLabel}</span>
               <span className="hidden items-center gap-1 sm:flex">
                 <span className="text-line2">·</span>
                 <CircleDot size={9} className={mode === 'agent' ? 'text-accent' : 'text-muted'} />
@@ -686,7 +691,7 @@ export default function App() {
             onClick={() => setSettingsOpen(true)}
           >
             <span className={`h-1.5 w-1.5 rounded-full ${currentModel?.configured ? 'bg-mint' : 'bg-amber'}`} />
-            <span className="hidden max-w-[150px] truncate sm:inline">{currentModel?.label ?? currentModel?.model ?? 'model'}</span>
+            <span className="hidden max-w-[150px] truncate sm:inline">{modelLabel}</span>
             <ChevronDown size={11} className="text-faint" />
           </button>
           <button
@@ -697,7 +702,7 @@ export default function App() {
           </button>
         </header>
 
-        {runInfo?.status === 'interrupted' && (
+        {runInfo?.status === 'interrupted' && !streaming && (
           <div className="mx-auto w-full max-w-3xl px-3 pt-2 sm:px-5 xl:max-w-4xl">
             <div className="flex items-center gap-2 rounded-xl border border-amber/40 bg-amber/10 px-3 py-2 text-[11.5px] text-amber">
               <CircleDot size={12} />

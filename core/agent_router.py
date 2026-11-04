@@ -111,6 +111,25 @@ def mission_scope(text: str, previous: str = "") -> str:
 
 
 
+MODEL_TAG_RE = re.compile(
+    r"</?\s*(?:parameter|parameters|function_calls|function_call|invoke|tool_call|"
+    r"dsml|antml:[\w-]+)[^>]*>",
+    re.I,
+)
+MODEL_TOKEN_RE = re.compile(r"<\|[^|>\n]{0,80}\|>")
+
+
+def strip_model_tags(text: str) -> str:
+    """Remove native tool-call / DSML tags that leak into directive payloads.
+
+    Models sometimes wrap FILE content or commands in <parameter name="...">
+    tags; those must never be written to disk or executed.
+    """
+    t = MODEL_TOKEN_RE.sub("", text or "")
+    t = MODEL_TAG_RE.sub("", t)
+    return t
+
+
 def strip_directives(text: str) -> str:
     """
     Remove machine directives (COMMAND:, FILE:, INSTALL:, PROBE:, etc.)
@@ -319,6 +338,8 @@ Agentic Workflow Rules:
     Prefer the most capable installed tool over a hand-rolled classic approach: nuclei over manual curl loops, sqlmap/ghauri over manual injection, ffuf/feroxbuster over manual path guessing, subfinder/amass over manual DNS, naabu/nmap over manual probes, katana over manual crawling. If the best tool is missing, install it (INSTALL:, apt, pipx, go install, cargo) and verify it with `command -v` before use.
 26. Sudo / Root Access:
     The operator may hand you a sudo password with `ASK_PASS: <what you need>`. Once provided, plain `sudo <cmd>` works: the harness injects the credential. Never print the password, never write it to a file, never echo it.
+27. Probe Hygiene (no silent hangs):
+    Network scripts must print progress and set a per-request timeout. Wrap long runs: `timeout 180 python3 probe.py`. Never write an unbounded loop over dozens of hosts that prints nothing until the end — a silent script blocks the whole session until the supervisor kills it. Prefer several small batches with visible output.
 """
 
 
@@ -1475,6 +1496,8 @@ class AgentRouter:
         return f"[{kind} result — hidden from operator]\n{text[:6000]}"
 
     def _exec_directive_command(self, cmd: str):
+        # Strip native tool-call / DSML tags before any shell sees the line.
+        cmd = strip_model_tags(cmd)
         # Sanitize trailing hallucinated XML/DSML parameter tags and background &
         cmd = re.sub(r"</?[a-zA-Z0-9_\-:\s|]+>\s*$", "", cmd).strip()
         cmd = re.sub(r"<\s*/\s*[^>]*parameter\s*>\s*$", "", cmd, flags=re.IGNORECASE).strip()
@@ -1762,7 +1785,7 @@ class AgentRouter:
     def _exec_directive_file(self, payload: str) -> str:
         parts = payload.split("|", maxsplit=1)
         rel_path = parts[0].strip()
-        content = parts[1] if len(parts) > 1 else ""
+        content = strip_model_tags(parts[1] if len(parts) > 1 else "")
 
         # Support absolute paths (e.g. C:\Users\libaa\scans\..., /c/Users/...) or workspace-relative
         clean_path = rel_path

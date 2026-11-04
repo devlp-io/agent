@@ -228,6 +228,22 @@ def main():
     check("visible answer keeps done next after code",
           "Done: listed 12 routes" in vis3 and "Next: probe" in vis3)
 
+    # bare call statements with nested parentheses are code too
+    vis5 = server._visible_answer(
+        "External fetch ladder now.\n"
+        'log("shodan.json", json.dumps(r, indent=2))\n'
+        'print("subdomains")\n'
+        "Next: normalize the hits."
+    )
+    check("visible answer drops nested calls", "json.dumps" not in vis5 and "print(" not in vis5)
+    check("visible answer keeps status after calls", "Next: normalize" in vis5)
+
+    long_status = "A line of status. " * 80
+    check("visible answer limits long status",
+          len(server._visible_answer(long_status, limit=200)) <= 260)
+    check("visible answer does not limit by default",
+          len(server._visible_answer(long_status)) > 500)
+
     # stray heredoc / markup artifacts (seen live: "PYEOF</div>")
     vis4 = server._visible_answer(
         "The FILE directive keeps corrupting with a trailing `</div>`.\n"
@@ -256,7 +272,9 @@ def main():
     client.delete(f"/api/v2/threads/{tt}")
 
     # ── scope + sudo + subagent worker ──────────────────────────────────
-    from core.agent_router import AgentRouter, mission_scope
+    from core.agent_router import AgentRouter, mission_scope, strip_model_tags
+    check("model tags stripped",
+          strip_model_tags('a</parameter>\n<parameter name="x">b') == "a\nb")
     check("scope narrow", mission_scope("what is the tech stack of example.com") == "scoped")
     check("scope deep", mission_scope("attack example.com and get all vulnerabilities") == "deep")
     check("scope continue inherits", mission_scope("continue", "deep") == "deep")

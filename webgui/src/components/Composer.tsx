@@ -140,6 +140,8 @@ export function Composer({
         { key: 'balanced', label: 'Balanced' },
         { key: 'deep', label: 'Deep' },
       ]
+  const effectiveLabel = variants.find(v => v.key === effort)?.label
+    ?? activeProfile?.label ?? activeProfile?.model ?? 'model'
   const variantIcon = { quick: Zap, balanced: Scale, deep: Brain } as const
   const canSend = (text.trim().length > 0 || files.length > 0) && !streaming
 
@@ -250,7 +252,7 @@ export function Composer({
               onClick={() => setMenu(m => m === 'model' ? null : 'model')}
               className="chip h-7 max-w-[170px] border-transparent bg-transparent px-2 text-[11.5px] hover:bg-panel3"
             >
-              <span className="truncate">{activeProfile?.label ?? activeProfile?.model ?? 'model'}</span>
+              <span className="truncate">{effectiveLabel}</span>
               <ChevronDown size={11} className="shrink-0 text-faint" />
             </button>
 
@@ -301,7 +303,7 @@ export function Composer({
         <div className="pop absolute bottom-[64px] right-2 z-40 w-[min(20rem,calc(100vw-1rem))] overflow-hidden rounded-xl border border-line bg-panel shadow-2xl sm:right-3">
           <div className="flex items-center justify-between gap-2 border-b border-line px-3 py-2">
             <span className="text-[10px] font-semibold uppercase tracking-wider text-faint">Model</span>
-            <span className="max-w-[60%] truncate text-[10px] text-faint">{activeProfile?.label ?? activeProfile?.model ?? ''}</span>
+            <span className="max-w-[60%] truncate text-[10px] text-faint">{effectiveLabel}</span>
           </div>
           <div className="max-h-[min(56vh,320px)] overflow-y-auto py-1">
             {models.map(p => (
