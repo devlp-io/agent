@@ -2255,6 +2255,7 @@ THINK_LINE_RE = re.compile(r"^\s*(?:thinking|reasoning|thought|scratchpad)\s*:",
 # blocks as code, so indentation alone is not enough either.
 CODE_ASSIGN_RE = re.compile(r"^[\w.,\[\]'\" ]+=[^=]")
 CODE_CALL_TAIL_RE = re.compile(r"\)\s*[;,]?$")
+HEREDOC_SENTINEL_RE = re.compile(r"^[A-Z][A-Z0-9_]{1,24}$")
 
 
 def _line_is_code(s: str) -> bool:
@@ -2265,6 +2266,13 @@ def _line_is_code(s: str) -> bool:
         return False
     if body.startswith(("http://", "https://")):
         return False
+    # stray heredoc sentinels and markup that leak out of FILE/COMMAND blocks
+    if HEREDOC_SENTINEL_RE.match(body):
+        return True
+    if ("<" in body and ">" in body) and " " not in body:
+        return True
+    if body.startswith("<") and body.endswith(">"):
+        return True
     if CODE_ASSIGN_RE.match(body):
         return True
     if " " not in body and CODE_CALL_TAIL_RE.search(body) and "(" in body:
@@ -2438,8 +2446,11 @@ GUI_TRANSPORT = (
     "Only use tools when the task genuinely requires them. "
     "For current information (time, docs, CVEs, repos, news, versions) you may use SEARCH: <query> or "
     "FETCH: <url>; they run silently and are hidden inside your reasoning. "
-    "When a task finishes, write a professional summary: what was done, what was found or verified, "
-    "what is next, and anything you need from the operator — with markdown headings and bullets. "
+    "Report in the reply surface as a status line, never a document: at most three short lines — "
+    "what was done, what it proved, what is next. Never paste code, file bodies, diffs, command "
+    "text, or raw output there; the action cards carry them. "
+    "Write files with the FILE directive or the file tool, never with shell heredocs or "
+    "here-strings — they get mangled by quoting. "
     "You are driven by a web console that executes your directives. "
     "To run a shell command, emit it at column 0 as `COMMAND: <cmd>`. "
     "To create or modify a file, emit `FILE: <relative-path>|<full file content>` — this is the ONLY way "
@@ -2452,7 +2463,7 @@ GUI_TRANSPORT = (
     "in the action feed. Do not hide work in background jobs, nohup, '&', silent subagents, or internal scans. "
     "Emit one action, wait for its real result, then continue. For builds, create files one at a time and show "
     "each step; do not claim a kit/scaffold is 'already done' unless this run created the files and the output "
-    "confirms them. Report each created file path as you go.\n\n"
+    "confirms them. The action cards show each file path and command — do not narrate them in the reply.\n\n"
     "[NETWORK FAILURE LADDER — DO NOT GIVE UP AT THE FIRST TIMEOUT]\n"
     "If a host times out or refuses connections, diagnose and try alternatives before reporting failure:\n"
     "1) DNS: `dig +short HOST A`, `dig +short HOST AAAA`, and DoH (`https://dns.google/resolve?name=HOST&type=A`).\n"

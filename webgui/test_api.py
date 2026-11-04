@@ -228,6 +228,19 @@ def main():
     check("visible answer keeps done next after code",
           "Done: listed 12 routes" in vis3 and "Next: probe" in vis3)
 
+    # stray heredoc / markup artifacts (seen live: "PYEOF</div>")
+    vis4 = server._visible_answer(
+        "The FILE directive keeps corrupting with a trailing `</div>`.\n"
+        "PYEOF</div>\n"
+        "EOF\n"
+        "</div>\n"
+        "Next: write the script via base64."
+    )
+    check("visible answer drops heredoc artifact", "PYEOF" not in vis4 and "EOF" not in vis4)
+    check("visible answer drops stray markup line", "</div>" not in vis4.replace("`</div>`", ""))
+    check("visible answer keeps inline tag in prose", "trailing `</div>`" in vis4)
+    check("visible answer keeps next line", "Next: write the script" in vis4)
+
     # token gate (separate app import not needed: prove middleware wiring)
     check("token gate optional", server.GUI_TOKEN == "" or isinstance(server.GUI_TOKEN, str))
 
