@@ -33,7 +33,7 @@ export default function App() {
   const [threads, setThreads] = useState<Thread[]>([])
   const [activeId, setActiveId] = useState<string | null>(null)
   const [messages, setMessages] = useState<Message[]>([])
-  const [streaming, setStreaming] = useState<Message | null>(null)
+  const [streams, setStreams] = useState<Record<string, Message>>({})
   const [loadingMessages, setLoadingMessages] = useState(false)
   const [todos, setTodos] = useState<TodoItem[]>([])
   const [models, setModels] = useState<ModelProfile[]>([])
@@ -57,16 +57,31 @@ export default function App() {
 
   const [toasts, setToasts] = useState<ToastItem[]>([])
   const [draftRestore, setDraftRestore] = useState<{ text: string; seq: number } | null>(null)
-  const abortRef = useRef<AbortController | null>(null)
-  const jobAbortRef = useRef<AbortController | null>(null)
+  const abortRef = useRef<Record<string, AbortController>>({})
+  const jobAbortRef = useRef<Record<string, AbortController>>({})
+  const doneRef = useRef<Record<string, boolean>>({})
+  const streamsRef = useRef<Record<string, Message>>({})
   const activeRef = useRef<string | null>(null)
   const openSeq = useRef(0)
-  const textBuf = useRef('')
-  const replaceNextText = useRef(false)
-  const toolBuf = useRef<Record<string, string>>({})
-  const flushTimer = useRef<number | null>(null)
+  const bufs = useRef<Record<string, {
+    text: string
+    replaceNext: boolean
+    tools: Record<string, string>
+    timer: number | null
+  }>>({})
   const toastId = useRef(0)
   const restoreSeq = useRef(0)
+
+  const bufFor = (tid: string) => {
+    if (!bufs.current[tid]) {
+      bufs.current[tid] = { text: '', replaceNext: false, tools: {}, timer: null }
+    }
+    return bufs.current[tid]
+  }
+
+  useEffect(() => { streamsRef.current = streams }, [streams])
+
+  const streaming = activeId ? streams[activeId] ?? null : null
 
   const pushToast = useCallback((msg: string, kind: 'ok' | 'err' = 'ok') => {
     const id = ++toastId.current
@@ -128,7 +143,7 @@ export default function App() {
     const t = setInterval(() => { api.health().then(() => setOnline(true)).catch(() => setOnline(false)) }, 20000)
     return () => {
       clearInterval(t)
-      jobAbortRef.current?.abort()
+      Object.values(jobAbortRef.current).forEach(c => c.abort())
     }
   }, [loadModels, loadThreads])
 
@@ -138,11 +153,8 @@ export default function App() {
     setActiveId(id)
     setSidebarOpen(false)
     setLoadingMessages(true)
-    setStreaming(null)
     setMessages([])
     setTodos([])
-    abortRef.current?.abort()
-    jobAbortRef.current?.abort()
     try {
       const r = await api.messages(id)
       if (seq !== openSeq.current || activeRef.current !== id) return
@@ -178,7 +190,6 @@ export default function App() {
       activeRef.current = t.id
       setActiveId(t.id)
       setMessages([])
-      setStreaming(null)
       setRunInfo(null)
       setTodos([])
       setSidebarOpen(false)
@@ -196,17 +207,18 @@ export default function App() {
   }, [activeId, createThread])
 
   const deleteThread = async (id: string) => {
-    if (activeRef.current === id) {
-      abortRef.current?.abort()
-      jobAbortRef.current?.abort()
-      api.cancelJob(id).catch(() => {})
-    }
+    abortRef.current[id]?.abort()
+    jobAbortRef.current[id]?.abort()
+    delete abortRef.current[id]
+    delete jobAbortRef.current[id]
+    dropStream(id)
+    api.cancelJob(id).catch(() => {})
     try {
       await api.deleteThread(id)
       setThreads(prev => prev.filter(t => t.id !== id))
       if (activeRef.current === id) {
         activeRef.current = null
-        setActiveId(null); setMessages([]); setStreaming(null); setRunInfo(null); setLoadingMessages(false); setTodos([])
+        setActiveId(null); setMessages([]); setRunInfo(null); setLoadingMessages(false); setTodos([])
       }
     } catch (e) {
       pushToast(e instanceof Error ? e.message : 'delete failed', 'err')
@@ -233,22 +245,34 @@ export default function App() {
     } catch (e) { pushToast(e instanceof Error ? e.message : 'model switch failed', 'err') }
   }
 
-  // ── streaming ────────────────────────────────────────────────────────
-  const patchStreaming = (fn: (m: Message) => Message) => setStreaming(prev => prev ? fn(prev) : prev)
+  // ── streaming (per thread; several sessions may run at once) ─────────
+  const patchStream = (tid: string, fn: (m: Message) => Message) => {
+    setStreams(prev => (prev[tid] ? { ...prev, [tid]: fn(prev[tid]) } : prev))
+  }
 
-  const flushStreaming = () => {
-    if (flushTimer.current !== null) {
-      window.clearTimeout(flushTimer.current)
-      flushTimer.current = null
+  const dropStream = (tid: string) => {
+    setStreams(prev => {
+      if (!prev[tid]) return prev
+      const next = { ...prev }
+      delete next[tid]
+      return next
+    })
+  }
+
+  const flushStreaming = (tid: string) => {
+    const b = bufFor(tid)
+    if (b.timer !== null) {
+      window.clearTimeout(b.timer)
+      b.timer = null
     }
-    const text = textBuf.current
-    textBuf.current = ''
-    if (text) appendText(text)
-    const toolOut = toolBuf.current
-    toolBuf.current = {}
+    const text = b.text
+    b.text = ''
+    if (text) appendText(tid, text)
+    const toolOut = b.tools
+    b.tools = {}
     const ids = Object.keys(toolOut)
     if (ids.length) {
-      patchStreaming(m => ({
+      patchStream(tid, m => ({
         ...m,
         parts: m.parts.map(p => p.type === 'tool' && toolOut[p.call_id]
           ? { ...p, output: (p.output || '') + toolOut[p.call_id] }
@@ -257,77 +281,85 @@ export default function App() {
     }
   }
 
-  const scheduleFlush = () => {
-    if (flushTimer.current !== null) return
-    flushTimer.current = window.setTimeout(flushStreaming, 70)
+  const scheduleFlush = (tid: string) => {
+    const b = bufFor(tid)
+    if (b.timer !== null) return
+    b.timer = window.setTimeout(() => flushStreaming(tid), 70)
   }
 
-  const appendText = (text: string) => patchStreaming(m => {
-    const parts = [...m.parts]
-    const last = parts[parts.length - 1]
-    if (replaceNextText.current) {
-      replaceNextText.current = false
-      if (last && last.type === 'text') parts[parts.length - 1] = { type: 'text', text }
-      else parts.push({ type: 'text', text })
+  const appendText = (tid: string, text: string) => {
+    const b = bufFor(tid)
+    patchStream(tid, m => {
+      const parts = [...m.parts]
+      const last = parts[parts.length - 1]
+      if (b.replaceNext) {
+        b.replaceNext = false
+        if (last && last.type === 'text') parts[parts.length - 1] = { type: 'text', text }
+        else parts.push({ type: 'text', text })
+        return { ...m, parts }
+      }
+      if (last && last.type === 'text') {
+        parts[parts.length - 1] = { type: 'text', text: last.text + text }
+      } else {
+        parts.push({ type: 'text', text })
+      }
       return { ...m, parts }
-    }
-    if (last && last.type === 'text') {
-      parts[parts.length - 1] = { type: 'text', text: last.text + text }
-    } else {
-      parts.push({ type: 'text', text })
-    }
-    return { ...m, parts }
-  })
+    })
+  }
 
-  const handleEvent = (ev: SseEvent) => {
+  const handleEvent = (ev: SseEvent, sourceTid?: string) => {
     const evTid =
       ev.type === 'start' ? ev.user_message.thread_id
       : ev.type === 'done' ? ev.message.thread_id
-      : null
-    if (evTid && activeRef.current && evTid !== activeRef.current) {
-      if (ev.type === 'done') loadThreads()
-      return
-    }
-    if (!['delta', 'tool_delta', 'thinking'].includes(ev.type)) flushStreaming()
+      : (sourceTid || activeRef.current || '')
+    if (!evTid) return
+    const isActive = evTid === activeRef.current
+    if (!['delta', 'tool_delta', 'thinking'].includes(ev.type)) flushStreaming(evTid)
+
     switch (ev.type) {
       case 'start': {
-        setMessages(prev => [
-          ...prev.filter(m => !m.id.startsWith('local-')),
-          ...(prev.some(m => m.id === ev.user_message.id) ? [] : [ev.user_message]),
-        ])
-        replaceNextText.current = false
-        setStreaming({
-          id: `stream-${Date.now()}`,
-          thread_id: ev.user_message.thread_id,
-          role: 'assistant',
-          content: '',
-          parts: [],
-          attachments: [],
-          meta: { status: 'THINKING' },
-          created: Date.now() / 1000,
-          created_iso: new Date().toISOString(),
-          streaming: true,
-        })
+        if (isActive) {
+          setMessages(prev => [
+            ...prev.filter(m => !m.id.startsWith('local-')),
+            ...(prev.some(m => m.id === ev.user_message.id) ? [] : [ev.user_message]),
+          ])
+        }
+        bufFor(evTid).replaceNext = false
+        setStreams(prev => ({
+          ...prev,
+          [evTid]: {
+            id: `stream-${Date.now()}`,
+            thread_id: evTid,
+            role: 'assistant',
+            content: '',
+            parts: [],
+            attachments: [],
+            meta: { status: 'THINKING' },
+            created: Date.now() / 1000,
+            created_iso: new Date().toISOString(),
+            streaming: true,
+          },
+        }))
         if (ev.title) {
-          setThreads(prev => prev.map(t => t.id === ev.user_message.thread_id ? { ...t, title: ev.title } : t))
+          setThreads(prev => prev.map(t => t.id === evTid ? { ...t, title: ev.title } : t))
         }
         break
       }
       case 'delta':
-        textBuf.current += ev.text
-        scheduleFlush()
+        bufFor(evTid).text += ev.text
+        scheduleFlush(evTid)
         break
       case 'note':
-        patchStreaming(m => ({ ...m, parts: [...m.parts, { type: 'note', text: ev.text }] }))
+        patchStream(evTid, m => ({ ...m, parts: [...m.parts, { type: 'note', text: ev.text }] }))
         break
       case 'todos':
-        setTodos(ev.items)
+        if (isActive) setTodos(ev.items)
         break
       case 'retry':
-        patchStreaming(m => ({ ...m, parts: [], meta: { ...m.meta, status: 'THINKING' } }))
+        patchStream(evTid, m => ({ ...m, parts: [], meta: { ...m.meta, status: 'THINKING' } }))
         break
       case 'thinking':
-        patchStreaming(m => {
+        patchStream(evTid, m => {
           const parts = [...m.parts]
           const idx = parts.findIndex(p => p.type === 'thought')
           if (idx >= 0) {
@@ -340,18 +372,18 @@ export default function App() {
         })
         break
       case 'status':
-        patchStreaming(m => ({ ...m, meta: { ...m.meta, status: ev.status } }))
+        patchStream(evTid, m => ({ ...m, meta: { ...m.meta, status: ev.status } }))
         break
       case 'ask': {
         const ask: AskPart = {
           type: 'ask', question_id: ev.id, prompt: ev.prompt,
           choices: ev.choices || [], secret: ev.secret, status: 'waiting',
         }
-        patchStreaming(m => ({ ...m, parts: [...m.parts, ask] }))
+        patchStream(evTid, m => ({ ...m, parts: [...m.parts, ask] }))
         break
       }
       case 'file_edit':
-        patchStreaming(m => {
+        patchStream(evTid, m => {
           if (m.parts.some(p => p.type === 'tool' && p.call_id === ev.id)) return m
           const tool: ToolPart = {
             type: 'tool', tool: 'edit',
@@ -362,12 +394,14 @@ export default function App() {
           return { ...m, parts: [...m.parts, tool] }
         })
         break
-      case 'tool_delta':
-        toolBuf.current[ev.id] = (toolBuf.current[ev.id] || '') + ev.output
-        scheduleFlush()
+      case 'tool_delta': {
+        const b = bufFor(evTid)
+        b.tools[ev.id] = (b.tools[ev.id] || '') + ev.output
+        scheduleFlush(evTid)
         break
+      }
       case 'text_final':
-        patchStreaming(m => {
+        patchStream(evTid, m => {
           // One rolling status block: each turn replaces the previous summary
           // instead of stacking another paragraph above the action cards.
           const actions = m.parts.filter(p => p.type !== 'text')
@@ -376,11 +410,11 @@ export default function App() {
             parts: ev.text.trim() ? [{ type: 'text' as const, text: ev.text }, ...actions] : actions,
           }
         })
-        replaceNextText.current = true
+        bufFor(evTid).replaceNext = true
         break
       case 'tool_start':
       case 'tool_approval':
-        patchStreaming(m => {
+        patchStream(evTid, m => {
           if (m.parts.some(p => p.type === 'tool' && p.call_id === ev.id)) return m
           const tool: ToolPart = {
             type: 'tool',
@@ -395,7 +429,7 @@ export default function App() {
         })
         break
       case 'tool_end':
-        patchStreaming(m => ({
+        patchStream(evTid, m => ({
           ...m,
           parts: m.parts.map(p => p.type === 'tool' && p.call_id === ev.id
             ? { ...p, ok: ev.ok, output: ev.output, status: ev.status }
@@ -403,24 +437,29 @@ export default function App() {
         }))
         break
       case 'done':
-        replaceNextText.current = false
-        setRunInfo(null)
-        setMessages(prev => {
-          const idx = prev.findIndex(m => m.id === ev.message.id)
-          if (idx === -1) return [...prev, ev.message]
-          const next = prev.slice()
-          next[idx] = ev.message
-          return next
-        })
-        if (ev.title) {
-          setThreads(prev => prev.map(t => t.id === ev.message.thread_id ? { ...t, title: String(ev.title) } : t))
+        bufFor(evTid).replaceNext = false
+        doneRef.current[evTid] = true
+        dropStream(evTid)
+        if (isActive) {
+          setRunInfo(null)
+          setMessages(prev => {
+            const idx = prev.findIndex(m => m.id === ev.message.id)
+            if (idx === -1) return [...prev, ev.message]
+            const next = prev.slice()
+            next[idx] = ev.message
+            return next
+          })
+          if (ev.title) {
+            setThreads(prev => prev.map(t => t.id === evTid ? { ...t, title: String(ev.title) } : t))
+          }
+        } else {
+          pushToast('a session finished in the background', 'ok')
         }
-        setStreaming(null)
         loadThreads()
         break
       case 'error':
-        pushToast(ev.message, 'err')
-        patchStreaming(m => ({
+        if (isActive) pushToast(ev.message, 'err')
+        patchStream(evTid, m => ({
           ...m,
           parts: [...m.parts, { type: 'text', text: `\n\n> **error** · ${ev.message}` }],
         }))
@@ -430,25 +469,29 @@ export default function App() {
 
   const attachJobIfRunning = async (id: string) => {
     try {
+      if (streamsRef.current[id]) return  // live stream already attached
       const st = await api.jobStatus(id)
       if (!st.running || activeRef.current !== id) return
-      jobAbortRef.current?.abort()
+      jobAbortRef.current[id]?.abort()
       const ctrl = new AbortController()
-      jobAbortRef.current = ctrl
-      setStreaming({
-        id: `stream-job-${Date.now()}`,
-        thread_id: id,
-        role: 'assistant',
-        content: '',
-        parts: [],
-        attachments: [],
-        meta: { status: 'THINKING' },
-        created: Date.now() / 1000,
-        created_iso: new Date().toISOString(),
-        streaming: true,
-      })
+      jobAbortRef.current[id] = ctrl
+      setStreams(prev => ({
+        ...prev,
+        [id]: {
+          id: `stream-job-${Date.now()}`,
+          thread_id: id,
+          role: 'assistant',
+          content: '',
+          parts: [],
+          attachments: [],
+          meta: { status: 'THINKING' },
+          created: Date.now() / 1000,
+          created_iso: new Date().toISOString(),
+          streaming: true,
+        },
+      }))
       if (activeRef.current !== id) return
-      await subscribeJob(id, handleEvent, ctrl.signal)
+      await subscribeJob(id, ev => handleEvent(ev, id), ctrl.signal)
     } catch { /* job may have finished */ }
   }
 
@@ -460,10 +503,12 @@ export default function App() {
       tid = t.id
       await new Promise(r => setTimeout(r, 60))
     }
-    if (abortRef.current) abortRef.current.abort()
+    // Only replace a stream in this same session; other sessions keep running.
+    abortRef.current[tid]?.abort()
     setRunInfo(null)
     const ctrl = new AbortController()
-    abortRef.current = ctrl
+    abortRef.current[tid] = ctrl
+    delete doneRef.current[tid]
     setMessages(prev => [...prev, {
       id: `local-${Date.now()}`,
       thread_id: tid!,
@@ -484,7 +529,7 @@ export default function App() {
         mode: opts.mode,
         auto_approve: opts.autoApprove,
         effort: opts.effort,
-      }, handleEvent, ctrl.signal)
+      }, ev => handleEvent(ev, tid as string), ctrl.signal)
     } catch (e) {
       if (!ctrl.signal.aborted) {
         pushToast(e instanceof Error ? e.message : 'stream failed — state is saved locally', 'err')
@@ -496,7 +541,8 @@ export default function App() {
         }).catch(() => {})
       }
     } finally {
-      if (activeRef.current === tid) setStreaming(null)
+      delete abortRef.current[tid]
+      if (!doneRef.current[tid]) dropStream(tid as string)
       loadThreads()
     }
   }
@@ -510,7 +556,7 @@ export default function App() {
     pushToast('stopping…', 'ok')
     // never abort the background job; wait for the done event, then reconcile
     setTimeout(() => {
-      if (tid && !jobAbortRef.current?.signal.aborted) openThread(tid)
+      if (tid && !jobAbortRef.current[tid]?.signal.aborted) openThread(tid)
     }, 7000)
   }
 
@@ -588,6 +634,7 @@ export default function App() {
           mobileOpen={sidebarOpen}
           onCloseMobile={() => setSidebarOpen(false)}
           onCollapse={() => setCollapsed(true)}
+          runningIds={Object.keys(streams)}
         />
       )}
 

@@ -21,7 +21,7 @@ export function Sidebar({
   threads, activeId, query, setQuery,
   onSelect, onNew, onDelete, onRename, onPin,
   onOpenSettings, onOpenScans, onToggleTheme, theme,
-  mobileOpen, onCloseMobile, onCollapse,
+  mobileOpen, onCloseMobile, onCollapse, runningIds,
 }: {
   threads: Thread[]
   activeId: string | null
@@ -39,6 +39,7 @@ export function Sidebar({
   mobileOpen: boolean
   onCloseMobile: () => void
   onCollapse: () => void
+  runningIds?: string[]
 }) {
   const [editing, setEditing] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
@@ -209,6 +210,9 @@ export function Sidebar({
                   ) : (
                     <>
                       <span className="min-w-0 flex-1 truncate text-[12.5px] leading-5">{t.title}</span>
+                      {runningIds?.includes(t.id) && (
+                        <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-accent" title="running" />
+                      )}
                       {t.pinned && <Pin size={11} className="shrink-0 text-accent/80" />}
                       <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition group-hover:opacity-100 focus-within:opacity-100">
                         <button
