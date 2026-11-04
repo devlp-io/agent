@@ -2250,13 +2250,37 @@ THINK_BLOCK_RE = re.compile(
 )
 THINK_LINE_RE = re.compile(r"^\s*(?:thinking|reasoning|thought|scratchpad)\s*:", re.I)
 
+# Assignment / call shapes that survive _is_code_line: `s,ct,b=req(...)`,
+# `t=open('/tmp/x').read()`, `obj.attr=fn(arg)`. Markdown renders indented
+# blocks as code, so indentation alone is not enough either.
+CODE_ASSIGN_RE = re.compile(r"^[\w.,\[\]'\" ]+=[^=]")
+CODE_CALL_TAIL_RE = re.compile(r"\)\s*[;,]?$")
+
+
+def _line_is_code(s: str) -> bool:
+    if _is_code_line(s):
+        return True
+    body = s.strip()
+    if not body:
+        return False
+    if body.startswith(("http://", "https://")):
+        return False
+    if CODE_ASSIGN_RE.match(body):
+        return True
+    if " " not in body and CODE_CALL_TAIL_RE.search(body) and "(" in body:
+        return True
+    if CODE_CALL_TAIL_RE.search(body) and "(" in body and "," in body.split("(", 1)[0]:
+        return True
+    return False
+
 
 def _visible_answer(text: str) -> str:
     """What the operator is allowed to see above the action cards.
 
-    Strictly prose about the work: no fenced code, no un-fenced code lines, no
-    file bodies, no reasoning narration, no raw output dumps. If this returns
-    empty the turn had nothing to report but actions — the UI shows those.
+    Strictly prose about the work: no fenced code, no indented code, no
+    un-fenced code lines, no file bodies, no reasoning narration, no raw output
+    dumps. If this returns empty the turn had nothing to report but actions —
+    the UI shows those.
     """
     t = THINK_BLOCK_RE.sub("", text or "")
     t = _strip_code_blocks(t)
@@ -2267,7 +2291,10 @@ def _visible_answer(text: str) -> str:
         if not s:
             kept.append("")
             continue
-        if _is_code_line(line) or THINK_LINE_RE.match(s):
+        # markdown turns 4-space / tab indentation into a code block
+        if line.startswith("\t") or line.startswith("    "):
+            continue
+        if _line_is_code(s) or THINK_LINE_RE.match(s):
             continue
         # raw output / one huge machine line, not prose
         alnum = sum(ch.isalnum() for ch in s)

@@ -212,6 +212,22 @@ def main():
           "Done: created state_check.py" in vis2 and "Next: resume" in vis2)
     check("visible answer keeps prose 'From the evidence'", "From the evidence" in vis2)
 
+    # indented code (markdown turns 4 spaces into a code block — seen live)
+    vis3 = server._visible_answer(
+        "Last step — the probe was cut off before its result returned.\n\n"
+        "    r.add_header('User-Agent','Mozilla/5.0 (Windows NT 10.0; Win64; x64)')\n\n"
+        "s,ct,b=req(method,B+path,data,hdr)\n\n"
+        "Signature bug on my part — fixing and running.\n\n"
+        "https://api.example.test/v1/items?limit=5\n"
+        "Done: listed 12 routes. Next: probe the billing paths."
+    )
+    check("visible answer drops indented code", "add_header" not in vis3)
+    check("visible answer drops comma assignment", "req(method" not in vis3)
+    check("visible answer keeps urls and prose",
+          "https://api.example.test/v1/items?limit=5" in vis3 and "Signature bug" in vis3)
+    check("visible answer keeps done next after code",
+          "Done: listed 12 routes" in vis3 and "Next: probe" in vis3)
+
     # token gate (separate app import not needed: prove middleware wiring)
     check("token gate optional", server.GUI_TOKEN == "" or isinstance(server.GUI_TOKEN, str))
 
