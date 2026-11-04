@@ -1087,7 +1087,11 @@ def _system_prompt(mode: str, effort: str) -> str:
             "Work in small, checkable steps. Report findings as you go in tight markdown. "
             "[SIGNALS] Accept the work by executing: the first visible token is a COMMAND:, FILE:, "
             "or tool directive. If you will not do it, reply with exactly one line: DENIED. "
-            "A prose refusal is a protocol violation and will be discarded and re-issued."
+            "A prose refusal is a protocol violation and will be discarded and re-issued. "
+            "[REPLY SURFACE] The pane above the action cards is a status line, not a workbench. "
+            "Each turn write at most three short lines: what was done, what it proved, what is next. "
+            "Never paste code, file bodies, diffs, command text, or raw output there; those live in "
+            "the action cards and the files. Never narrate your reasoning."
         )
     depth = {
         "quick": "Bias toward the smallest reliable step and fast answers.",
@@ -2230,6 +2234,42 @@ def _strip_code_blocks(text: str) -> str:
     return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
 
+THINK_BLOCK_RE = re.compile(
+    r"<(?:thinking|reasoning|scratchpad)>.*?</(?:thinking|reasoning|scratchpad)>",
+    re.S | re.I,
+)
+THINK_LINE_RE = re.compile(r"^\s*(?:thinking|reasoning|thought|scratchpad)\s*:", re.I)
+
+
+def _visible_answer(text: str) -> str:
+    """What the operator is allowed to see above the action cards.
+
+    Strictly prose about the work: no fenced code, no un-fenced code lines, no
+    file bodies, no reasoning narration, no raw output dumps. If this returns
+    empty the turn had nothing to report but actions — the UI shows those.
+    """
+    t = THINK_BLOCK_RE.sub("", text or "")
+    t = _strip_code_blocks(t)
+    t = _professionalise(t)
+    kept: List[str] = []
+    for line in t.splitlines():
+        s = line.strip()
+        if not s:
+            kept.append("")
+            continue
+        if _is_code_line(line) or THINK_LINE_RE.match(s):
+            continue
+        # raw output / one huge machine line, not prose
+        alnum = sum(ch.isalnum() for ch in s)
+        if len(s) > 240 and (alnum / max(1, len(s))) < 0.55:
+            continue
+        if s.count("|") > 6 and len(s) > 120:
+            continue
+        kept.append(line)
+    text_out = re.sub(r"\n{3,}", "\n\n", "\n".join(kept)).strip()
+    return text_out
+
+
 
 INLINE_FILE_RE = re.compile(r"FILE:\s*([^\s|`]+)\s*\|(.*)", re.S)
 
@@ -2678,7 +2718,7 @@ async def _agent_stream(body: ChatBody, request: Request):
                 "started": started, "thought_ms": int(thought_ms),
                 "duration_ms": int((now - started) * 1000),
             }
-            live_text = last_reply or "".join(streamed_visible)
+            live_text = last_reply or _visible_answer("".join(streamed_visible))
             _message_update(live_id, live_text[-8000:], live_parts, meta)
 
         persist_live(True)
@@ -2734,9 +2774,9 @@ async def _agent_stream(body: ChatBody, request: Request):
             reasoning_since = None
             turn_text.clear()
             turn_start = now
-            clean = _professionalise(reply_text or "")
+            clean = _visible_answer(reply_text or "")
             if not clean:
-                clean = _professionalise(raw_stream)
+                clean = _visible_answer(raw_stream)
             if clean and not FILE_NOTE_RE.search(reply_text or "") and not _is_event_note(reply_text or ""):
                 last_reply = clean
                 return clean
@@ -2941,12 +2981,9 @@ async def _agent_stream(body: ChatBody, request: Request):
                     if chunk:
                         turn_text.append(chunk)
                         streamed_visible.append(chunk)
-                        stream_out.append(chunk)
-                        now = time.time()
-                        if len(stream_out) >= 24 or (now - last_stream_flush[0]) >= 0.05:
-                            yield _sse({"type": "delta", "text": "".join(stream_out)})
-                            stream_out.clear()
-                            last_stream_flush[0] = now
+                        # The reply pane is a report, not a workbench: code,
+                        # file bodies and reasoning never stream to the user.
+                        # Text is classified and emitted at turn end instead.
 
                 elif name == "AssistantMessageEvent":
                     txt = getattr(ev, "text", "") or ""
@@ -3342,7 +3379,7 @@ async def _agent_stream(body: ChatBody, request: Request):
         else:
             if _has_dsml(last_reply or ""):
                 last_reply = re.sub(r"<[\uff5c|][^>]*>", "", last_reply or "").strip()
-            last_reply = _strip_code_blocks(last_reply)
+            last_reply = _visible_answer(last_reply)
             last_reply = _scrub_identity(last_reply)
             last_reply = _agent_answer_cleanup(last_reply, has_edit or bool(tools))
         tools = [

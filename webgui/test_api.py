@@ -181,6 +181,24 @@ def main():
     check("undo drops attachments", client.get(f"/api/v2/media/{au['id']}").status_code == 404)
     client.delete(f"/api/v2/threads/{ut}")
 
+    # the reply pane shows status only: no code, no file bodies, no reasoning
+    sample = (
+        "Done: pulled the MCP manifest and parsed the route table.\n"
+        "Next: probe /wp-json for auth bypass.\n\n"
+        "```python\nimport json\nprint(1)\n```\n"
+        "t=open('/tmp/mcp.json').read()\n"
+        "d=json.loads(t)\n"
+        "<thinking>private reasoning</thinking>\n"
+        "Next: enumerate admin paths."
+    )
+    vis = server._visible_answer(sample)
+    check("visible answer keeps done/next", "Done: pulled" in vis and "Next: probe" in vis)
+    check("visible answer drops fenced code", "print(1)" not in vis and "```" not in vis)
+    check("visible answer drops code lines",
+          "json.loads" not in vis and "/tmp/mcp.json" not in vis)
+    check("visible answer drops thinking", "private reasoning" not in vis)
+    check("visible answer keeps the follow-up", "enumerate admin paths" in vis)
+
     # token gate (separate app import not needed: prove middleware wiring)
     check("token gate optional", server.GUI_TOKEN == "" or isinstance(server.GUI_TOKEN, str))
 
