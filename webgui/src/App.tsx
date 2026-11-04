@@ -358,13 +358,14 @@ export default function App() {
         break
       case 'text_final':
         patchStreaming(m => {
-          const parts = [...m.parts]
-          const last = parts[parts.length - 1]
-          if (last && last.type === 'text') parts[parts.length - 1] = { type: 'text', text: ev.text }
-          else parts.push({ type: 'text', text: ev.text })
-          return { ...m, parts }
+          // One rolling status block: each turn replaces the previous summary
+          // instead of stacking another paragraph above the action cards.
+          const actions = m.parts.filter(p => p.type !== 'text')
+          return {
+            ...m,
+            parts: ev.text.trim() ? [{ type: 'text' as const, text: ev.text }, ...actions] : actions,
+          }
         })
-        // the next assistant turn replaces this reply instead of stacking
         replaceNextText.current = true
         break
       case 'tool_start':
