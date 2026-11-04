@@ -18,6 +18,12 @@ export type ToolPart = {
   language?: string
 }
 
+export type TodoItem = {
+  id: string
+  text: string
+  status: 'todo' | 'doing' | 'done'
+}
+
 export type TextPart = { type: 'text'; text: string }
 
 export type AskPart = {
@@ -144,6 +150,7 @@ export type SseEvent =
   | { type: 'tool_delta'; id: string; output: string }
   | { type: 'tool_end'; id: string; tool?: string; ok: boolean; output: string; status: ToolPart['status'] }
   | { type: 'note'; text: string }
+  | { type: 'todos'; items: TodoItem[] }
   | { type: 'thinking'; text: string }
   | { type: 'retry'; attempt: number }
   | { type: 'ask'; id: string; prompt: string; choices: string[]; secret: boolean }

@@ -157,6 +157,16 @@ def init_db() -> None:
                 started REAL,
                 updated REAL
             );
+            CREATE TABLE IF NOT EXISTS todos (
+                id TEXT PRIMARY KEY,
+                thread_id TEXT NOT NULL,
+                text TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'todo',
+                ord INTEGER NOT NULL DEFAULT 0,
+                created REAL NOT NULL,
+                updated REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_todos_thread ON todos(thread_id, ord);
             """
         )
         for col, decl in (
@@ -1386,6 +1396,7 @@ def api_thread_delete(thread_id: str):
             raise HTTPException(404, "thread not found")
         c.execute("DELETE FROM agent_sessions WHERE thread_id=?", (thread_id,))
         c.execute("DELETE FROM runs WHERE thread_id=?", (thread_id,))
+        c.execute("DELETE FROM todos WHERE thread_id=?", (thread_id,))
         uploads = c.execute(
             "SELECT path FROM uploads WHERE thread_id=?", (thread_id,)
         ).fetchall()
@@ -1462,6 +1473,15 @@ def api_thread_export(thread_id: str, fmt: str = "md"):
         media_type="text/markdown",
         headers={"Content-Disposition": f'attachment; filename="{thread_id}.md"'},
     )
+
+
+@app.get("/api/v2/threads/{thread_id}/todos")
+def api_thread_todos(thread_id: str):
+    with _db() as c:
+        t = c.execute("SELECT id FROM threads WHERE id=?", (thread_id,)).fetchone()
+    if not t:
+        raise HTTPException(404, "thread not found")
+    return {"todos": _todo_list(thread_id)}
 
 
 @app.get("/api/v2/messages/{message_id}")
@@ -1785,7 +1805,10 @@ CONTINUE_RE = re.compile(
 
 
 IMPERATIVE_RE = re.compile(
-    r"^\s*(?:please\s+)?(?:build|make|create|write|fix|run|scan|attack|exploit|install|"
+    r"^\s*(?:please\s+)?(?:"
+    r"do\s+(?:this|that|it|these|those|the\s+following|all|exactly|the\s+task)|"
+    r"dispatch|spawn|delegate|execute|use|apply|mark|verify|test|audit|review|hunt|probe|enumerate|"
+    r"build|make|create|write|fix|run|scan|attack|exploit|install|"
     r"set\s*up|configure|finish|continue|go|do\s+it|proceed|start|generate|deploy|"
     r"patch|update|edit|refactor|add|remove|delete|move|copy|download|upload)\b",
     re.I,
@@ -1872,12 +1895,67 @@ def _router_for(thread_id: str):
         else:
             _seed_router_history(router, thread_id)
         _apply_gui_style(router)
+        router.todo_callback = lambda action, a="", b="": _todo_apply(thread_id, action, a, b)
         _routers[thread_id] = router
         return router
 
 
 def _router_session(thread_id: str):
     return _routers.get(thread_id)
+
+
+# ── todos ──────────────────────────────────────────────────────────────────
+def _todo_list(thread_id: str) -> List[Dict[str, str]]:
+    with _db() as c:
+        rows = c.execute(
+            "SELECT id, text, status FROM todos WHERE thread_id=? ORDER BY ord ASC, created ASC",
+            (thread_id,),
+        ).fetchall()
+    return [{"id": r["id"], "text": r["text"], "status": r["status"]} for r in rows]
+
+
+def _todo_apply(thread_id: str, action: str, a: str = "", b: str = "") -> List[Dict[str, str]]:
+    """Agent-driven todo store. Returns the whole list after the change."""
+    act = (action or "list").strip().lower()
+    now = _now()
+    try:
+        with _db() as c:
+            if act in ("add", "new", "create"):
+                text = (a or b or "").strip()
+                if text:
+                    row = c.execute(
+                        "SELECT id FROM todos WHERE thread_id=? ORDER BY ord DESC LIMIT 1",
+                        (thread_id,),
+                    ).fetchone()
+                    nxt = 1
+                    if row:
+                        m = re.search(r"(\d+)$", row["id"] or "")
+                        nxt = int(m.group(1)) + 1 if m else 1
+                    c.execute(
+                        "INSERT INTO todos(id,thread_id,text,status,ord,created,updated) "
+                        "VALUES(?,?,?,?,?,?,?)",
+                        (f"t{nxt}", thread_id, text[:500], "todo", nxt, now, now),
+                    )
+            elif act in ("done", "doing", "todo", "start", "progress", "open"):
+                status = {"start": "doing", "progress": "doing", "open": "todo"}.get(act, act)
+                c.execute(
+                    "UPDATE todos SET status=?, updated=? WHERE thread_id=? AND id=?",
+                    (status, now, thread_id, (a or b).strip()),
+                )
+            elif act in ("edit", "rename"):
+                c.execute(
+                    "UPDATE todos SET text=?, updated=? WHERE thread_id=? AND id=?",
+                    ((b or "").strip()[:500], now, thread_id, (a or "").strip()),
+                )
+            elif act in ("remove", "rm", "delete"):
+                c.execute("DELETE FROM todos WHERE thread_id=? AND id=?",
+                          (thread_id, (a or b).strip()))
+            elif act in ("clear", "reset"):
+                c.execute("DELETE FROM todos WHERE thread_id=?", (thread_id,))
+            # "list" and anything else: no mutation
+        return _todo_list(thread_id)
+    except Exception:
+        return _todo_list(thread_id)
 
 
 def _attachments_context(atts: List[Dict[str, Any]]) -> str:
@@ -3132,6 +3210,10 @@ async def _agent_stream(body: ChatBody, request: Request):
                     line = f"**{kind}** {verb}" + (f" — {detail[:180]}" if detail else "")
                     hidden_activity.append(line)
                     add_note(line)
+
+                elif name == "TodoEvent":
+                    items = getattr(ev, "items", []) or []
+                    yield _sse({"type": "todos", "items": items})
 
                 elif name == "PhaseTransitionEvent":
                     pass

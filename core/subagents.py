@@ -11,6 +11,7 @@ Provides dedicated subagent personas and tool pipelines:
 import os
 import re
 import sys
+import json
 import time
 import uuid
 import pathlib
@@ -98,6 +99,12 @@ SUBAGENT_TYPES = {
         "icon": "🧰",
         "description": "Pre-flight environment inspection, automatic requirement resolution, category pre-install, interactive sudo auth, and binary verification",
         "tools": ["installer", "tools_db", "git", "go", "pip", "cargo", "apt"]
+    },
+    "operator": {
+        "title": "Task Operator",
+        "icon": "🤖",
+        "description": "General-purpose LLM worker: plans, runs real tools, verifies, reports findings",
+        "tools": ["shell", "read", "write", "list", "fetch", "web_search"]
     }
 }
 
@@ -1368,6 +1375,197 @@ class ToolSubagent(BaseSubagent):
         )
 
 
+class OperatorSubagent(BaseSubagent):
+    """General-purpose LLM worker: plans, runs real tools, reports findings.
+
+    Unlike the canned specialists above, this one receives an arbitrary task
+    and drives its own short tool loop with a dedicated model and shell. The
+    main agent fans several of these out when a mission splits into
+    independent jobs.
+    """
+
+    MAX_TURNS = int(os.environ.get("AG_SUBAGENT_TURNS", "8") or 8)
+
+    SYSTEM = (
+        "You are a SOM-SCAN worker subagent. You receive one concrete task and complete it.\n"
+        "You have real tools. Call exactly ONE per message inside a ```tool fenced block:\n"
+        "```tool\n"
+        '{"tool":"shell","args":{"cmd":"id","timeout":60}}\n'
+        "```\n"
+        "Tools: shell {cmd,timeout?} | read {path,start?,limit?} | write {path,content} | "
+        "list {path} | fetch {url} | web_search {query} | finish {summary}\n"
+        "Rules:\n"
+        "- Work in small verified steps. Never invent output; wait for the real result.\n"
+        "- Install a missing tool instead of faking its output.\n"
+        "- If a vector fails, adapt once or twice, then report what blocked it.\n"
+        "- When done, call finish with a concrete summary, or reply in plain prose.\n"
+        "- Report a real vulnerability as a line: FINDING: <critical|high|medium|low>|<title>|<evidence>\n"
+        "- Never paste code or file bodies into the final summary. State what was done and what was proven."
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if not self.task.strip():
+            self.task = "Investigate the workspace and report what is there."
+
+    def _complete(self, messages: List[Dict[str, str]]) -> str:
+        """One model turn; retries once when a reasoning model returns no content."""
+        for attempt in range(2):
+            try:
+                text = "".join(self.model_manager.stream_chat(messages, temperature=0.2)).strip()
+            except Exception as exc:
+                text = ""
+                if attempt == 1:
+                    return f"[worker model error: {exc}]"
+            if text:
+                return text
+            messages = list(messages) + [{
+                "role": "user",
+                "content": "Proceed now. Emit exactly one tool call to advance the task."
+            }]
+        return ""
+
+    def _exec_tool(self, call: Dict[str, Any]) -> str:
+        tool = str(call.get("tool") or "").lower()
+        args = call.get("args") or {}
+        if not isinstance(args, dict):
+            args = {}
+
+        if tool == "shell":
+            cmd = str(args.get("cmd") or "").strip()
+            if not cmd:
+                return "[shell: empty command]"
+            self.emit(CommandStartEvent(command=cmd))
+            try:
+                res = self.task_runner.run_command(
+                    cmd, cwd=str(self.work_dir), timeout=args.get("timeout") or None
+                )
+                out = res.output or ""
+                self.emit(CommandFinishEvent(command=cmd, returncode=res.returncode, output=out))
+                return out[:12000] or "(no output)"
+            except Exception as exc:
+                self.emit(CommandFinishEvent(command=cmd, returncode=-1, output=str(exc)))
+                return f"[shell error: {exc}]"
+
+        if tool == "read":
+            path = pathlib.Path(str(args.get("path") or "")).expanduser()
+            start = int(args.get("start") or 0)
+            limit = int(args.get("limit") or 400)
+            try:
+                lines = path.read_text(errors="replace").splitlines()
+                chunk = lines[start:start + max(1, min(limit, 2000))]
+                return "\n".join(chunk)[:16000] or "(empty file)"
+            except Exception as exc:
+                return f"[read error: {exc}]"
+
+        if tool == "write":
+            path = pathlib.Path(str(args.get("path") or "")).expanduser()
+            content = str(args.get("content") or "")
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(content, encoding="utf-8")
+                return f"[wrote {len(content)} bytes to {path}]"
+            except Exception as exc:
+                return f"[write error: {exc}]"
+
+        if tool == "list":
+            path = pathlib.Path(str(args.get("path") or ".")).expanduser()
+            try:
+                return "\n".join(sorted(p.name + ("/" if p.is_dir() else "") for p in path.iterdir()))[:8000]
+            except Exception as exc:
+                return f"[list error: {exc}]"
+
+        if tool in ("fetch", "web_search"):
+            try:
+                import agent_v8  # lazy: avoid an import cycle at module load
+                if tool == "fetch":
+                    return str(agent_v8.do_fetch(str(args.get("url") or "")))[:12000]
+                return str(agent_v8.do_search(str(args.get("query") or "")))[:12000]
+            except Exception as exc:
+                return f"[{tool} error: {exc}]"
+
+        if tool == "finish":
+            return f"[finish] {args.get('summary') or 'done'}"
+
+        return f"[unknown tool: {tool}]"
+
+    def run(self) -> SubagentResult:
+        t0 = time.time()
+        self.emit(SubagentStartEvent(subagent_type="operator", task=self.task,
+                                     subagent_id=self.subagent_id))
+        history: List[Dict[str, str]] = [
+            {"role": "system", "content": self.SYSTEM},
+            {"role": "user", "content": self.task},
+        ]
+        findings: List[Dict[str, str]] = []
+        log: List[str] = []
+        summary = ""
+        success = True
+
+        for _turn in range(max(1, self.MAX_TURNS)):
+            reply = self._complete(history)
+            if not reply:
+                success = False
+                summary = summary or "worker returned no output"
+                break
+
+            for sev, title, evidence in re.findall(
+                r"FINDING:\s*(critical|high|medium|low|info)\s*\|\s*([^|\n]+)\|\s*([^\n]+)",
+                reply, re.I,
+            ):
+                findings.append({"severity": sev.lower(), "title": title.strip(),
+                                 "evidence": evidence.strip()})
+                self.emit(FindingEvent(severity=sev.lower(), title=title.strip(),
+                                       evidence=evidence.strip()))
+
+            call = _tool_call(reply)
+            if call and str(call.get("tool") or "").lower() != "finish":
+                out = self._exec_tool(call)
+                log.append(f"$ {json.dumps(call.get('args'))[:200]}\n{out[:600]}")
+                history.append({"role": "assistant", "content": reply})
+                history.append({"role": "user", "content": f"[tool result]\n{out}"})
+                continue
+
+            summary = _worker_summary(reply)
+            break
+
+        if not summary:
+            summary = "worker finished without a summary"
+        details = "\n\n".join(log)[-8000:]
+        self.emit(SubagentFinishEvent(subagent_type="operator", summary=summary[:400],
+                                      success=success))
+        return SubagentResult(
+            subagent_type="operator",
+            task=self.task,
+            success=success,
+            summary=summary[:800],
+            details=details,
+            findings=findings,
+            duration=time.time() - t0,
+        )
+
+
+_TOOL_BLOCK_RE = re.compile(r"```tool\s*(\{.*?\})\s*```", re.S)
+
+
+def _tool_call(text: str) -> Optional[Dict[str, Any]]:
+    m = _TOOL_BLOCK_RE.search(text or "")
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(1))
+    except Exception:
+        return None
+    return data if isinstance(data, dict) and data.get("tool") else None
+
+
+def _worker_summary(text: str) -> str:
+    body = _TOOL_BLOCK_RE.sub("", text or "")
+    body = re.sub(r"^\s*FINDING:.*$", "", body, flags=re.M)
+    body = re.sub(r"\n{3,}", "\n\n", body).strip()
+    return body[:1200]
+
+
 class SubagentDispatcher:
     """Orchestrates dispatching of specialized subagents."""
 
@@ -1393,6 +1591,10 @@ class SubagentDispatcher:
         "dependency": ToolSubagent,
         "dependencies": ToolSubagent,
         "installer": ToolSubagent,
+        "operator": OperatorSubagent,
+        "worker": OperatorSubagent,
+        "task": OperatorSubagent,
+        "general": OperatorSubagent,
     }
 
     @classmethod

@@ -15,6 +15,14 @@ try:
 except Exception:
     _HAVE_HTTPX = False
 
+try:
+    import h2 as _h2  # noqa: F401
+    _HAVE_H2 = True
+except Exception:
+    # httpx raises at client construction when http2=True and h2 is missing.
+    # Degrade to HTTP/1.1 instead of failing every request in the agent.
+    _HAVE_H2 = False
+
 BROWSER_PROFILES = [
     {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
@@ -87,7 +95,7 @@ class AsyncClient:
                     "headers": self._headers,
                     "cookies": self._cookies,
                     "follow_redirects": True,
-                    "http2": True,
+                    "http2": _HAVE_H2,
                 }
                 if self._proxy:
                     kwargs["proxy"] = self._proxy
@@ -173,7 +181,7 @@ def request_sync(method, url, params=None, json=None, data=None,
     h = get_random_browser_headers()
     if headers: h.update(headers)
     kw = {"timeout": timeout or DEFAULT_TIMEOUT, "headers": h,
-          "follow_redirects": True, "http2": True}
+          "follow_redirects": True, "http2": _HAVE_H2}
     if proxy: kw["proxy"] = proxy
     t0 = time.time()
     for attempt in range(max_retries + 1):

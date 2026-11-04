@@ -1,5 +1,5 @@
 import type {
-  Attachment, Message, ModelProfile, RunningJob, RunInfo, Scan, Settings, SseEvent, Thread, Usage,
+  Attachment, Message, ModelProfile, RunningJob, RunInfo, Scan, Settings, SseEvent, Thread, TodoItem, Usage,
 } from './types'
 
 const API = '/api/v2'
@@ -82,6 +82,8 @@ export const api = {
   ),
 
   usage: (id: string) => j<Usage>(`/threads/${id}/usage`),
+
+  todos: (id: string) => j<{ todos: TodoItem[] }>(`/threads/${id}/todos`),
 
   exportUrl: (id: string) => `${API}/threads/${id}/export?fmt=md`,
 

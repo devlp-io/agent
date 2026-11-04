@@ -11,8 +11,9 @@ import { SettingsModal } from './components/SettingsModal'
 import { ScansModal } from './components/ScansModal'
 import { CommandPalette } from './components/CommandPalette'
 import { Toasts, type ToastItem } from './components/Toasts'
+import { TodoPanel } from './components/TodoPanel'
 import { api, streamChat, subscribeJob } from './lib/api'
-import type { AskPart, Attachment, Message, ModelProfile, RunInfo, SseEvent, Thread, ToolPart } from './lib/types'
+import type { AskPart, Attachment, Message, ModelProfile, RunInfo, SseEvent, Thread, TodoItem, ToolPart } from './lib/types'
 
 const LS = {
   theme: 'agui:theme',
@@ -34,6 +35,7 @@ export default function App() {
   const [messages, setMessages] = useState<Message[]>([])
   const [streaming, setStreaming] = useState<Message | null>(null)
   const [loadingMessages, setLoadingMessages] = useState(false)
+  const [todos, setTodos] = useState<TodoItem[]>([])
   const [models, setModels] = useState<ModelProfile[]>([])
   const [activeModel, setActiveModel] = useState<string | null>(null)
   const [runInfo, setRunInfo] = useState<RunInfo | null>(null)
@@ -138,6 +140,7 @@ export default function App() {
     setLoadingMessages(true)
     setStreaming(null)
     setMessages([])
+    setTodos([])
     abortRef.current?.abort()
     jobAbortRef.current?.abort()
     try {
@@ -146,6 +149,9 @@ export default function App() {
       setMessages(r.messages)
       setRunInfo(r.run ?? null)
       attachJobIfRunning(id)
+      api.todos(id)
+        .then(t => { if (activeRef.current === id) setTodos(t.todos) })
+        .catch(() => { if (activeRef.current === id) setTodos([]) })
     } catch (e) {
       if (seq !== openSeq.current) return
       pushToast(e instanceof Error ? e.message : 'failed to load chat', 'err')
@@ -174,6 +180,7 @@ export default function App() {
       setMessages([])
       setStreaming(null)
       setRunInfo(null)
+      setTodos([])
       setSidebarOpen(false)
       return thread
     } catch (e) {
@@ -199,7 +206,7 @@ export default function App() {
       setThreads(prev => prev.filter(t => t.id !== id))
       if (activeRef.current === id) {
         activeRef.current = null
-        setActiveId(null); setMessages([]); setStreaming(null); setRunInfo(null); setLoadingMessages(false)
+        setActiveId(null); setMessages([]); setStreaming(null); setRunInfo(null); setLoadingMessages(false); setTodos([])
       }
     } catch (e) {
       pushToast(e instanceof Error ? e.message : 'delete failed', 'err')
@@ -312,6 +319,9 @@ export default function App() {
         break
       case 'note':
         patchStreaming(m => ({ ...m, parts: [...m.parts, { type: 'note', text: ev.text }] }))
+        break
+      case 'todos':
+        setTodos(ev.items)
         break
       case 'retry':
         patchStreaming(m => ({ ...m, parts: [], meta: { ...m.meta, status: 'THINKING' } }))
@@ -667,6 +677,8 @@ export default function App() {
           onUndo={undoMessage}
           onSuggestion={text => send(text, [], { mode, effort, autoApprove, model: activeModel })}
         />
+
+        <TodoPanel items={todos} />
 
         <Composer
           threadId={activeId}

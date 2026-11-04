@@ -284,6 +284,14 @@ class ReversingCardEvent(AgentEvent):
         self.summary = summary
 
 
+class TodoEvent(AgentEvent):
+    """The operator-visible task list for the current session."""
+    def __init__(self, items: Optional[List[Dict[str, str]]] = None,
+                 timestamp: Optional[float] = None):
+        super().__init__(timestamp)
+        self.items = items or []
+
+
 class QuestionPromptEvent(AgentEvent):
     """Event emitted when the agent requests input or credentials from the operator."""
     def __init__(

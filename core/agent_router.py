@@ -26,7 +26,9 @@ import shutil
 import shlex
 import pathlib
 import platform
+import tempfile
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from typing import Callable, Optional, Dict, Any, List, Tuple
 
@@ -49,7 +51,7 @@ from core.events import (
     CommandFinishEvent, FindingEvent, StatusChangeEvent, TaskCompleteEvent,
     TaskCancelledEvent, ErrorEvent, PhaseTransitionEvent, SubagentStartEvent,
     SubagentFinishEvent, PayloadCardEvent, ExploitCardEvent,
-    QuestionPromptEvent, QuestionAnswerEvent
+    QuestionPromptEvent, QuestionAnswerEvent, TodoEvent
 )
 from core.subagents import SubagentDispatcher, SUBAGENT_TYPES
 from core.model_manager import ModelManager
@@ -64,7 +66,7 @@ DIRECTIVE_TAGS = (
     "FINDING:", "NOTE:", "PROBE:", "WALK:", "WAF:", "STACK:",
     "PARAMFIND:", "CVE:", "METHOD:", "EXPLOIT:", "PAYLOAD:",
     "SECRET:", "CRED:", "REPORT:", "SEAL:", "GRAPH:", "DONE:",
-    "SUBAGENT:", "MALWARE:", "PHASE:", "ASK:", "ASK_PASS:"
+    "SUBAGENT:", "MALWARE:", "PHASE:", "ASK:", "ASK_PASS:", "TODO:", "SEARCH:", "FETCH:"
 )
 
 # Read-only / passive asks. These must never trigger the toolkit preflight:
@@ -75,6 +77,37 @@ PASSIVE_RE = re.compile(
     r"tls\s*certificate|certificate\s*transparency)\b",
     re.I,
 )
+
+# Mission depth. A narrow question stays narrow; an offensive/assessment task
+# runs deep until something critical is proven. Follow-ups inherit the scope.
+DEEP_MISSION_RE = re.compile(
+    r"\b(?:attack|exploit|pentest|penetration|red[\s-]*team|vulnerab\w*|vuln\w*|pwn|"
+    r"compromise|breach|hack\w*|foothold|privesc|privilege\s+escalation|exfiltrat\w*|"
+    r"takeover|rce|sqli|xss|ssrf|lfi|rfi|idor|zero[\s-]*day|0day|full\s+(?:scan|assessment|audit)|"
+    r"deep\s+(?:scan|audit|assessment)|security\s+(?:audit|assessment|review)|"
+    r"audit\s+(?:this|the)\s+(?:repo|code|app|site|target)|find\s+(?:bugs|vulns|vulnerabilities))\b",
+    re.I,
+)
+SCOPED_MISSION_RE = re.compile(
+    r"\b(?:tech\s*stack|technology\s*stack|what\s+(?:cms|framework|server|cdn|hosting)|"
+    r"headers?|fingerprint\w*|whois|dns\s+(?:record|lookup)|certificate|ssl|tls|"
+    r"robots\.txt|sitemap|page\s+title|ip\s+address)\b",
+    re.I,
+)
+
+
+def mission_scope(text: str, previous: str = "") -> str:
+    """Classify the request as a deep mission or a scoped question."""
+    t = (text or "").strip()
+    if not t:
+        return previous or "scoped"
+    if DEEP_MISSION_RE.search(t):
+        return "deep"
+    if SCOPED_MISSION_RE.search(t) and not re.search(
+        r"\b(?:and|then|also|full|deep|complete|entire|all|vulnerab\w*|exploit|attack)\b", t, re.I
+    ):
+        return "scoped"
+    return previous or "scoped"
 
 
 
@@ -265,6 +298,27 @@ Agentic Workflow Rules:
     - When testing JSONP/callbacks: Test executable punctuation (e.g. `?_jsonp=alert(1)//` or `callback(1)`). If the server rejects the callback (e.g. WordPress `rest_callback_invalid`) or serves `X-Content-Type-Options: nosniff`, it is NOT reflected XSS.
     - When testing pingbacks/SSRF: A `faultCode 0` or accepted response without out-of-band interaction or internal content retrieval does NOT confirm SSRF.
     - When reporting finding severity, match the empirical evidence; never upgrade an unverified endpoint disclosure to High/Critical without confirmed compromise.
+21. Scoped Requests Stay Scoped (CRITICAL):
+    If the operator asks for one fact — tech stack, headers, version, IP, certificate, a single file, a single command — deliver exactly that and stop. Do not pivot into a full assessment, do not enumerate subdomains, do not run exploit chains. A scoped answer is a scoped answer. Depth is for missions, not questions.
+22. Live Task List (TODOS):
+    Maintain your own checklist for multi-step work, like OpenCode:
+      TODO: add|<task>          create an item
+      TODO: edit|<id>|<task>    reword an item
+      TODO: done|<id>           mark complete
+      TODO: doing|<id>          mark in progress
+      TODO: list                show the list
+      TODO: clear               wipe it
+    Create the list at the start of a multi-step mission, update it as you go, and mark items done the moment they are verified. Never leave a stale list.
+23. Live Intelligence (hidden):
+    Use `SEARCH: <query>` and `FETCH: <url>` for anything that changes: current versions, CVEs, advisories, docs, changelogs, recent exploits. They run hidden and never appear in the reply.
+    For every identified service, CMS, framework, or language version (PHP, WordPress, Laravel, nginx, Spring, Node, etc.), search its latest CVEs and public exploits BEFORE concluding. Use `SEARCH: <product> <version> CVE` for live lookup, or `CVE: <product>|<version>` for a local database check. Prefer current CVEs and nuclei templates over memory, and verify version applicability against the fingerprint.
+24. Subagent Orchestration:
+    Delegate depth instead of doing everything serially. `SUBAGENT: <type>|<task>` runs a worker with its own model and shell. `SUBAGENT: operator|<task>` is a general worker that plans, runs tools, and reports back.
+    Split a mission into independent jobs and emit several SUBAGENT lines in one turn — they run in parallel. Each job must be concrete, scoped, and verifiable.
+25. Tooling Doctrine:
+    Prefer the most capable installed tool over a hand-rolled classic approach: nuclei over manual curl loops, sqlmap/ghauri over manual injection, ffuf/feroxbuster over manual path guessing, subfinder/amass over manual DNS, naabu/nmap over manual probes, katana over manual crawling. If the best tool is missing, install it (INSTALL:, apt, pipx, go install, cargo) and verify it with `command -v` before use.
+26. Sudo / Root Access:
+    The operator may hand you a sudo password with `ASK_PASS: <what you need>`. Once provided, plain `sudo <cmd>` works: the harness injects the credential. Never print the password, never write it to a file, never echo it.
 """
 
 
@@ -340,6 +394,15 @@ class AgentRouter:
         self._current_phase_label = "Phase 1: Fingerprinting"
         self._pending_questions: Dict[str, Dict[str, Any]] = {}
         self.session_id = SessionDB.create_session(title="Interactive Agent Session")
+        self._subagent_runners: List[TaskRunner] = []
+        self._subagent_lock = threading.Lock()
+        # Operator-provided sudo credential (memory only, never printed/logged).
+        self._sudo_pass = ""
+        # Server-provided todo store: (action, arg1, arg2) -> list[dict]
+        self.todo_callback: Optional[Callable[..., List[Dict[str, str]]]] = None
+        # Mission depth for this dispatch: "deep" or "scoped".
+        self._mission_scope = ""
+        self._done_gate_retries = 0
 
     @property
     def is_busy(self) -> bool:
@@ -394,6 +457,7 @@ class AgentRouter:
         if is_secret and any(k in prompt_str.lower() for k in ("sudo", "password")):
             cached_pw = os.environ.get("AG_SUDO_PASS", "").strip()
             if cached_pw:
+                self._sudo_pass = cached_pw
                 return cached_pw
 
         qid = str(uuid.uuid4())[:8]
@@ -433,6 +497,9 @@ class AgentRouter:
             entry = self._pending_questions.pop(qid, {})
             answer = entry.get("answer") if signaled else (default or "")
 
+        if answer and is_secret and any(k in prompt_str.lower() for k in ("sudo", "password", "passwd")):
+            self._sudo_pass = str(answer).strip()
+            os.environ["AG_SUDO_PASS"] = self._sudo_pass
         return answer or ""
 
     def answer_question(self, question_id: str, answer: str) -> bool:
@@ -485,6 +552,14 @@ class AgentRouter:
         except Exception:
             pass
         self.task_runner.cancel()
+        # stop any subagents still working, each owns its own runner
+        with self._subagent_lock:
+            runners = list(self._subagent_runners)
+        for runner in runners:
+            try:
+                runner.cancel()
+            except Exception:
+                pass
 
         # Preserve context in history so the agent maintains situational awareness
         intervention_note = (
@@ -498,6 +573,76 @@ class AgentRouter:
         self.emit(StatusChangeEvent("CANCELLED", "yellow"))
         self.emit(TaskCancelledEvent("Task or chat stopped immediately by operator. History preserved."))
         self.emit(StatusChangeEvent("READY", "green"))
+
+    def _run_subagents(self, payloads: List[str]) -> List[Tuple[str, Any]]:
+        """Run SUBAGENT directives concurrently with isolated runners and models.
+
+        Subagents are synchronous work loops. Sharing the router's TaskRunner
+        makes them fight over one _active_proc (and breaks cancel), and sharing
+        the ModelManager makes concurrent streams abort each other. Each job
+        gets its own pair; the event callback stays shared so the GUI sees them.
+        """
+        jobs: List[Tuple[str, str]] = []
+        for raw in payloads:
+            parts = (raw or "").split("|", 1)
+            stype = (parts[0].strip() or "recon").lower()
+            stask = parts[1].strip() if len(parts) > 1 else ""
+            jobs.append((stype, stask))
+        if not jobs:
+            return []
+
+        try:
+            limit = int(os.environ.get("AG_SUBAGENT_WORKERS", "4") or 4)
+        except Exception:
+            limit = 4
+        limit = max(1, min(limit, len(jobs)))
+
+        def _one(job: Tuple[str, str]):
+            stype, stask = job
+            runner = TaskRunner()
+            manager = ModelManager()
+            try:
+                manager.set_effort("low")
+            except Exception:
+                pass
+            with self._subagent_lock:
+                self._subagent_runners.append(runner)
+            try:
+                res = SubagentDispatcher.dispatch(
+                    stype, stask, self.emit,
+                    model_manager=manager,
+                    task_runner=runner,
+                    work_dir=self.get_active_work_dir(),
+                    prompt_callback=self.prompt_operator,
+                )
+                return stype, res
+            except Exception as exc:
+                try:
+                    self.emit(SubagentFinishEvent(
+                        subagent_type=stype,
+                        summary=f"{stype} subagent failed: {exc}",
+                        success=False,
+                    ))
+                except Exception:
+                    pass
+                return stype, None
+            finally:
+                with self._subagent_lock:
+                    if runner in self._subagent_runners:
+                        self._subagent_runners.remove(runner)
+
+        if len(jobs) == 1:
+            return [_one(jobs[0])]
+
+        results: List[Any] = [None] * len(jobs)
+        with ThreadPoolExecutor(max_workers=limit, thread_name_prefix="subagent") as pool:
+            futures = {pool.submit(_one, job): i for i, job in enumerate(jobs)}
+            for fut in as_completed(futures):
+                try:
+                    results[futures[fut]] = fut.result()
+                except Exception:
+                    results[futures[fut]] = None
+        return [r for r in results if r is not None]
 
     def reset_session(self) -> str:
         """Archive previous scan, reset conversation history, active target, and state."""
@@ -594,10 +739,30 @@ class AgentRouter:
                     self._active_scan_target = candidate_tgt
                 self._last_scan_target = candidate_tgt
 
+        # Scope for this mission: narrow question vs deep offensive task.
+        scope = mission_scope(initial_user_text, getattr(self, "_mission_scope", ""))
+        self._mission_scope = scope
+        self._done_gate_retries = 0
+
         # Dynamically refresh root system prompt with current persona.md and active session assessment memory
         session_mem = self.get_session_memory_prompt()
+        scope_block = (
+            "[SCOPE LOCK — NARROW REQUEST]\n"
+            "The operator asked for one specific fact or a single small task. Deliver exactly that, "
+            "then stop. Do not enumerate subdomains, do not run assessment chains, do not pivot into "
+            "a full scan. Answer, verify with one or two commands, finish."
+            if scope == "scoped" else
+            "[MISSION DEPTH — DEEP]\n"
+            "This is an offensive or assessment mission. Do not conclude while untested surface remains. "
+            "When one vector fails, adapt and pivot: alternate encodings, spoofed headers, origin IP, "
+            "different endpoints, a different tool. Keep going until a critical/high finding is verified, "
+            "the surface is exhausted, or the operator stops you. Log progress with TODO: and FINDING:."
+        )
         if self.history and self.history[0].get("role") == "system":
-            self.history[0]["content"] = get_system_prompt() + (f"\n{session_mem}" if session_mem else "")
+            self.history[0]["content"] = (
+                get_system_prompt() + "\n\n" + scope_block
+                + (f"\n{session_mem}" if session_mem else "")
+            )
 
         # Pre-flight Tooling & Dependency Verification (Dedicated Tool Agent)
         active_target = self._active_scan_target or (candidate_tgt if tgt_m else "")
@@ -759,6 +924,12 @@ class AgentRouter:
                 # Actions HAVE been executed previously:
                 # Check if model signaled completion with explicit DONE directive
                 if is_done:
+                    hold = self._critical_gate_hold()
+                    if hold:
+                        self.history.append({"role": "user", "content": hold})
+                        self.emit(StatusChangeEvent("ATTACKING…", "red"))
+                        turn += 1
+                        continue
                     self.emit(TaskCompleteEvent(status="Task completed successfully", success=True))
                     self.emit(StatusChangeEvent("READY", "green"))
                     self._empty_directive_count = 0
@@ -812,6 +983,19 @@ class AgentRouter:
             to_execute = directives[:max_batch]
             has_more = len(directives) > max_batch
 
+            # Fan out independent subagent jobs first; they run in parallel and
+            # each owns its runner/model. Their summaries join the observations.
+            subagent_payloads = [p for k, p in to_execute if k == "SUBAGENT"]
+            if subagent_payloads:
+                to_execute = [(k, p) for k, p in to_execute if k != "SUBAGENT"]
+                for stype, sub_res in self._run_subagents(subagent_payloads):
+                    if sub_res is None:
+                        obs_lines.append(f"[Subagent {stype}]: failed to complete")
+                    else:
+                        obs_lines.append(
+                            f"[Subagent {stype}]: {sub_res.summary}\n{(sub_res.details or '')[:1500]}"
+                        )
+
             for kind, payload in to_execute:
                 if self._is_cancelled:
                     break
@@ -849,6 +1033,12 @@ class AgentRouter:
 
                 elif kind == "NOTE":
                     obs_lines.append(f"[Note recorded: {payload}]")
+
+                elif kind == "TODO":
+                    obs_lines.append(self._exec_directive_todo(payload))
+
+                elif kind in ("SEARCH", "FETCH"):
+                    obs_lines.append(self._exec_directive_intel(kind, payload))
 
                 elif kind == "SUBAGENT":
                     parts = payload.split("|", 1)
@@ -970,6 +1160,12 @@ class AgentRouter:
             # If the model emitted directives AND signaled DONE in the same step,
             # now that directives have finished executing, complete the task cleanly!
             if is_done:
+                hold = self._critical_gate_hold()
+                if hold:
+                    self.history.append({"role": "user", "content": hold})
+                    self.emit(StatusChangeEvent("ATTACKING…", "red"))
+                    turn += 1
+                    continue
                 has_target = bool(self._active_scan_target or self._last_scan_target or (agent_v8.STATE and agent_v8.STATE.get("target")))
                 done_pushes = getattr(self, "_done_push_count", 0)
                 if has_target and turn < 4 and done_pushes < 1:
@@ -1078,7 +1274,7 @@ class AgentRouter:
             "SECRET", "CRED", "ENDPOINT", "NOTE", "SUBAGENT", "MALWARE", "REVERSE", "REA",
             "ATTACK", "REDTEAM", "PHASE",
             "LOOT", "PROOF", "CHAIN", "PIVOT", "BROWSER", "GRAPHQL", "SHELL",
-            "CRACK", "SEARCH", "FETCH", "PARAMFIND", "APIMAP", "HARVEST", "STATUS", "PLAN"
+            "CRACK", "SEARCH", "FETCH", "PARAMFIND", "APIMAP", "HARVEST", "STATUS", "PLAN", "TODO"
         }
 
         for m in re.finditer(pattern, text, re.DOTALL):
@@ -1140,6 +1336,39 @@ class AgentRouter:
 
         return results
 
+    def _has_high_finding(self) -> bool:
+        """True when a critical/high finding has been verified this session."""
+        try:
+            for f in SessionDB.get_findings(self.session_id) or []:
+                sev = str(f.get("severity") or f.get("sev") or "").lower()
+                if sev in ("critical", "high"):
+                    return True
+        except Exception:
+            pass
+        try:
+            for f in (agent_v8.STATE or {}).get("findings", []) or []:
+                sev = str(f.get("sev") or f.get("severity") or "").lower()
+                if sev in ("critical", "high"):
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _critical_gate_hold(self) -> Optional[str]:
+        """Block a premature DONE on a deep mission with nothing serious proven."""
+        if self._mission_scope != "deep" or self._has_high_finding():
+            return None
+        if self._done_gate_retries >= 3:
+            return None
+        self._done_gate_retries += 1
+        return (
+            f"[CRITICAL GATE {self._done_gate_retries}/3] The mission is not finished: no critical "
+            "or high finding is verified yet. Do not stop. Resume with a new vector: map the untested "
+            "endpoints, attempt an auth bypass or IDOR, fuzz hidden parameters, look up the identified "
+            "stack's latest CVEs with SEARCH:, or pivot to another host or service. Track the plan with "
+            "TODO: and state DONE only after a verified critical/high finding or full surface exhaustion."
+        )
+
     def _check_is_done(self, text: str) -> bool:
         """
         Check if assistant explicitly emitted the uppercase DONE or DONE: directive.
@@ -1150,6 +1379,62 @@ class AgentRouter:
         """
         return bool(re.search(r"(?:^\s*DONE(?::\s*.*|\s*$)|(?:^|\s)DONE\s*$)", text, re.MULTILINE))
 
+    def _sudo_ready(self) -> str:
+        return (self._sudo_pass or os.environ.get("AG_SUDO_PASS", "")).strip()
+
+    def _sudoize(self, cmd: str) -> str:
+        """Make plain `sudo` use the operator-provided password via askpass."""
+        if not self._sudo_ready():
+            return cmd
+        return re.sub(r"(?<![\w./-])sudo(?=\s)", "sudo -A", cmd)
+
+    def _sudo_env(self) -> Dict[str, str]:
+        pw = self._sudo_ready()
+        if not pw:
+            return {}
+        env = {"AG_SUDO_PASS": pw}
+        try:
+            uid = os.getuid() if hasattr(os, "getuid") else 0
+            helper = pathlib.Path(tempfile.gettempdir()) / f".somscan-askpass-{uid}.sh"
+            if not helper.exists():
+                helper.write_text("#!/bin/sh\nprintf '%s\\n' \"$AG_SUDO_PASS\"\n", encoding="utf-8")
+                helper.chmod(0o700)
+            env["SUDO_ASKPASS"] = str(helper)
+        except Exception:
+            pass
+        return env
+
+    def _exec_directive_todo(self, payload: str) -> str:
+        """Apply a TODO directive through the server-provided store."""
+        parts = [p.strip() for p in (payload or "").split("|")]
+        action = (parts[0] or "list").lower()
+        a = parts[1] if len(parts) > 1 else ""
+        b = "|".join(parts[2:]).strip() if len(parts) > 2 else ""
+        items: List[Dict[str, str]] = []
+        if self.todo_callback:
+            try:
+                items = self.todo_callback(action, a, b) or []
+            except Exception as e:
+                return f"[TODO store error: {e}]"
+        self.emit(TodoEvent(items=items))
+        rendered = "\n".join(
+            f"  [{str(i.get('status', 'todo'))[:5]}] {i.get('id')}: {i.get('text', '')}"
+            for i in items
+        )
+        return f"[Todo updated]\n{rendered or '(empty)'}"
+
+    def _exec_directive_intel(self, kind: str, payload: str) -> str:
+        """Run a hidden SEARCH/FETCH. Results feed the model, never the reply."""
+        try:
+            if kind == "SEARCH":
+                res = agent_v8.do_search(payload)
+            else:
+                res = agent_v8.do_fetch(payload)
+        except Exception as e:
+            return f"[{kind} failed: {e}]"
+        text = str(res or "").strip()
+        return f"[{kind} result — hidden from operator]\n{text[:6000]}"
+
     def _exec_directive_command(self, cmd: str):
         # Sanitize trailing hallucinated XML/DSML parameter tags and background &
         cmd = re.sub(r"</?[a-zA-Z0-9_\-:\s|]+>\s*$", "", cmd).strip()
@@ -1159,6 +1444,9 @@ class AgentRouter:
         cmd = re.sub(r"</?$", "", cmd).strip()
         if cmd.endswith("&") and not cmd.endswith(r"\&") and not cmd.endswith("&&"):
             cmd = cmd[:-1].rstrip()
+
+        cmd = self._sudoize(cmd)
+        sudo_env = self._sudo_env()
 
         self.emit(StatusChangeEvent("RUNNING…", "cyan"))
         self.emit(CommandStartEvent(command=cmd))
@@ -1172,7 +1460,9 @@ class AgentRouter:
 
         work_dir = self.get_active_work_dir()
         try:
-            res = self.task_runner.run_command(cmd, cwd=str(work_dir), on_supervisor_event=_on_sup_event)
+            res = self.task_runner.run_command(cmd, cwd=str(work_dir),
+                                               on_supervisor_event=_on_sup_event,
+                                               env=sudo_env or None)
         except Exception as e:
             res = CommandResult(
                 command=cmd,

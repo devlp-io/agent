@@ -241,6 +241,93 @@ def main():
     check("visible answer keeps inline tag in prose", "trailing `</div>`" in vis4)
     check("visible answer keeps next line", "Next: write the script" in vis4)
 
+    # ── todos ───────────────────────────────────────────────────────────
+    tt = client.post("/api/v2/threads", json={"title": "todo"}).json()["id"]
+    items = server._todo_apply(tt, "add", "map exposed endpoints")
+    check("todo add", bool(items) and items[0]["text"] == "map exposed endpoints")
+    server._todo_apply(tt, "add", "test auth bypass")
+    items = server._todo_apply(tt, "done", "t1")
+    check("todo done", items[0]["status"] == "done")
+    server._todo_apply(tt, "edit", "t2", "test IDOR on /api/users")
+    items = server._todo_apply(tt, "list")
+    check("todo edit", any(i["text"] == "test IDOR on /api/users" for i in items))
+    check("todo clears", server._todo_apply(tt, "clear") == [])
+    check("todos endpoint", client.get(f"/api/v2/threads/{tt}/todos").status_code == 200)
+    client.delete(f"/api/v2/threads/{tt}")
+
+    # ── scope + sudo + subagent worker ──────────────────────────────────
+    from core.agent_router import AgentRouter, mission_scope
+    check("scope narrow", mission_scope("what is the tech stack of example.com") == "scoped")
+    check("scope deep", mission_scope("attack example.com and get all vulnerabilities") == "deep")
+    check("scope continue inherits", mission_scope("continue", "deep") == "deep")
+
+    check("imperative 'do this' not a question",
+          server._is_question_only("Do this exactly, in order: create a todo list.") is False)
+    check("imperative dispatch not a question",
+          server._is_question_only("dispatch a worker to run id") is False)
+    check("tech stack is a question",
+          server._is_question_only("what is the tech stack of example.com") is True)
+    check("capability question stays a question",
+          server._is_question_only("can you build a port scanner?") is True)
+
+    old_pw = os.environ.pop("AG_SUDO_PASS", None)
+    try:
+        rr = AgentRouter(lambda e: None)
+        check("sudo untouched without credential", rr._sudoize("sudo id") == "sudo id")
+        os.environ["AG_SUDO_PASS"] = "test-pass"
+        check("sudo rewritten", rr._sudoize("sudo apt-get update") == "sudo -A apt-get update")
+        check("sudo env carries secret", rr._sudo_env().get("AG_SUDO_PASS") == "test-pass")
+        check("sudo askpass set", "SUDO_ASKPASS" in rr._sudo_env())
+    finally:
+        os.environ.pop("AG_SUDO_PASS", None)
+        if old_pw is not None:
+            os.environ["AG_SUDO_PASS"] = old_pw
+
+    from core.subagents import OperatorSubagent, SubagentDispatcher
+    from core.task_runner import CommandResult
+
+    class _FakeModel:
+        def __init__(self):
+            self.calls = 0
+
+        def stream_chat(self, messages, temperature=0.2):
+            self.calls += 1
+            if self.calls == 1:
+                yield '```tool\n{"tool":"shell","args":{"cmd":"id"}}\n```'
+            else:
+                yield "FINDING: high|Worker proof|uid=0 confirmed\nDone: verified as root."
+
+    class _FakeRunner:
+        def run_command(self, cmd, **kwargs):
+            return CommandResult(command=cmd, returncode=0, output="uid=0(root) gid=0(root)",
+                                 duration=0.0)
+
+    worker = OperatorSubagent(
+        subagent_type="operator", task="prove root", event_callback=lambda e: None,
+        model_manager=_FakeModel(), task_runner=_FakeRunner(),
+    )
+    res = worker.run()
+    check("worker ran tools", "uid=0" in (res.details or ""))
+    check("worker captured finding",
+          res.findings and res.findings[0]["severity"] == "high")
+    check("worker summary", "verified as root" in res.summary)
+    check("operator type mapped",
+          SubagentDispatcher.SUBAGENT_MAP["operator"] is OperatorSubagent)
+
+    gate = AgentRouter(lambda e: None)
+    gate._mission_scope = "deep"
+    gate._has_high_finding = lambda: False
+    check("critical gate holds early done",
+          "CRITICAL GATE" in (gate._critical_gate_hold() or ""))
+    gate._done_gate_retries = 3
+    check("critical gate is bounded", gate._critical_gate_hold() is None)
+    gate._done_gate_retries = 0
+    gate._has_high_finding = lambda: True
+    check("critical gate releases on a real finding", gate._critical_gate_hold() is None)
+    gate._mission_scope = "scoped"
+    gate._has_high_finding = lambda: False
+    check("critical gate ignores scoped work", gate._critical_gate_hold() is None)
+
     # token gate (separate app import not needed: prove middleware wiring)
     check("token gate optional", server.GUI_TOKEN == "" or isinstance(server.GUI_TOKEN, str))
 
