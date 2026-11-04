@@ -199,6 +199,19 @@ def main():
     check("visible answer drops thinking", "private reasoning" not in vis)
     check("visible answer keeps the follow-up", "enumerate admin paths" in vis)
 
+    # a bare control-flow fragment (seen in a real run) must not survive
+    vis2 = server._visible_answer(
+        "Done: created state_check.py and ran it.\n"
+        "if os.path.isdi(p):\n"
+        "    return state\n"
+        "Next: resume from the saved state.\n"
+        "From the evidence: two routes leaked."
+    )
+    check("visible answer drops control-flow fragment", "os.path.isdi" not in vis2 and "return state" not in vis2)
+    check("visible answer keeps both status lines",
+          "Done: created state_check.py" in vis2 and "Next: resume" in vis2)
+    check("visible answer keeps prose 'From the evidence'", "From the evidence" in vis2)
+
     # token gate (separate app import not needed: prove middleware wiring)
     check("token gate optional", server.GUI_TOKEN == "" or isinstance(server.GUI_TOKEN, str))
 

@@ -1910,6 +1910,13 @@ FILENAME_HINT_RE = re.compile(
 
 
 
+_CODE_KEYWORD_RE = re.compile(
+    r"^(?:if|elif|else|for|while|try|except|finally|with|return|def|class|"
+    r"switch|case|break|continue|pass|raise|lambda|async|await|yield|"
+    r"const|let|var|function|public|private|static|package|using|namespace|"
+    r"struct|enum|impl|fn|func)\b"
+)
+
 CODE_LINE_RE = re.compile(
     r"^\s*(?:"
     r"def\s+\w+|class\s+\w+|import\s+[\w.]|from\s+[\w.]+\s+import|"
@@ -1930,6 +1937,9 @@ def _is_code_line(line: str) -> bool:
     if not t:
         return False
     if t[:3] in (chr(34) * 3, chr(39) * 3):
+        return True
+    # control-flow / declaration lines: `if os.path.isdir(p):`, `for k, v in d:`
+    if _CODE_KEYWORD_RE.match(t) and re.search(r"[()[\]{}:=]", t):
         return True
     if t.startswith(("with ", "for ", "try:", "except ", "return ")) and (":" in t or "(" in t):
         return True
