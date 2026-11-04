@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import {
   Terminal, Globe, Search, FolderOpen, FileText, PenLine, Radar,
   ChevronRight, Check, X, Loader2, ShieldAlert, CheckCheck, Paperclip,
-  Download, FilePlus2, FilePen, Wrench, Copy,
+  Download, FilePlus2, FilePen, Wrench, Copy, Undo2,
 } from 'lucide-react'
 import { Markdown } from './Markdown'
 import type { AskPart, Attachment, Message, Part, ToolPart } from '../lib/types'
@@ -361,23 +361,58 @@ function ThinkingBlock({ text }: { text: string }) {
 
 /* ── message ────────────────────────────────────────────────────────── */
 
-export function MessageItem({ m, showThinking }: { m: Message; showThinking: boolean }) {
+export function MessageItem({ m, showThinking, onUndo }: {
+  m: Message
+  showThinking: boolean
+  onUndo?: (m: Message) => void
+}) {
   const [showAllSteps, setShowAllSteps] = useState(false)
+  const [copied, setCopied] = useState(false)
   const isUser = m.role === 'user'
   const parts: Part[] = m.parts?.length
     ? m.parts
     : (m.content ? [{ type: 'text', text: m.content } as const] : [])
 
+  const copyMessage = async () => {
+    try {
+      await navigator.clipboard.writeText(m.content || '')
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1300)
+    } catch { /* clipboard blocked */ }
+  }
+
   if (isUser) {
     return (
       <div className="rise flex justify-end px-0.5">
-        <div className="max-w-[86%] sm:max-w-[75%]">
+        <div className="group flex max-w-[86%] flex-col items-end sm:max-w-[75%]">
           <AttachmentGrid items={m.attachments} />
           {m.content && (
             <div className="whitespace-pre-wrap break-words rounded-2xl rounded-br-md border border-accent/25 bg-accent/12 px-3.5 py-2.5 text-[14.5px] leading-relaxed">
               {m.content}
             </div>
           )}
+          <div className="mt-1 flex items-center gap-0.5 opacity-0 transition focus-within:opacity-100 group-hover:opacity-100">
+            <button
+              type="button"
+              onClick={copyMessage}
+              title={copied ? 'Copied' : 'Copy message'}
+              aria-label="Copy message"
+              className="flex h-6 w-6 items-center justify-center rounded-md text-faint transition hover:bg-panel3 hover:text-ink"
+            >
+              {copied ? <Check size={12} className="text-mint" /> : <Copy size={12} />}
+            </button>
+            {onUndo && (
+              <button
+                type="button"
+                onClick={() => onUndo(m)}
+                title="Undo — put this message back in the composer"
+                aria-label="Undo message"
+                className="flex h-6 w-6 items-center justify-center rounded-md text-faint transition hover:bg-panel3 hover:text-ink"
+              >
+                <Undo2 size={12} />
+              </button>
+            )}
+          </div>
         </div>
       </div>
     )

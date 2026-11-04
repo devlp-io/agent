@@ -54,6 +54,7 @@ export default function App() {
   const [showThinking, setShowThinking] = useState(() => localStorage.getItem('agui:thinking') === '1')
 
   const [toasts, setToasts] = useState<ToastItem[]>([])
+  const [draftRestore, setDraftRestore] = useState<{ text: string; seq: number } | null>(null)
   const abortRef = useRef<AbortController | null>(null)
   const jobAbortRef = useRef<AbortController | null>(null)
   const activeRef = useRef<string | null>(null)
@@ -63,6 +64,7 @@ export default function App() {
   const toolBuf = useRef<Record<string, string>>({})
   const flushTimer = useRef<number | null>(null)
   const toastId = useRef(0)
+  const restoreSeq = useRef(0)
 
   const pushToast = useCallback((msg: string, kind: 'ok' | 'err' = 'ok') => {
     const id = ++toastId.current
@@ -501,6 +503,34 @@ export default function App() {
     }, 7000)
   }
 
+  const undoMessage = useCallback(async (m: Message) => {
+    if (m.role !== 'user') return
+    if (streaming) {
+      pushToast('stop the current run before undoing', 'err')
+      return
+    }
+    const lastUser = [...messages].reverse().find(x => x.role === 'user')
+    const latest = lastUser?.id === m.id
+
+    if (latest && !m.id.startsWith('local-') && activeId) {
+      try {
+        await api.undoMessage(m.id)
+      } catch (e) {
+        pushToast(e instanceof Error ? e.message : 'undo failed', 'err')
+        return
+      }
+      try {
+        const r = await api.messages(activeId)
+        if (activeRef.current === activeId) setMessages(r.messages)
+      } catch { /* keep the local view */ }
+    } else if (latest) {
+      setMessages(prev => prev.filter(x => x.id !== m.id))
+    }
+
+    setDraftRestore({ text: m.content || '', seq: ++restoreSeq.current })
+    pushToast(latest ? 'undone — back in the composer' : 'loaded into the composer')
+  }, [messages, streaming, activeId, pushToast])
+
   // ── keyboard ─────────────────────────────────────────────────────────
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -633,6 +663,7 @@ export default function App() {
           threadId={activeId}
           loading={loadingMessages}
           showThinking={showThinking}
+          onUndo={undoMessage}
           onSuggestion={text => send(text, [], { mode, effort, autoApprove, model: activeModel })}
         />
 
@@ -653,6 +684,7 @@ export default function App() {
           onStop={stop}
           pushToast={pushToast}
           onToggleThinking={(next) => setShowThinking(v => typeof next === 'boolean' ? next : !v)}
+          restore={draftRestore}
         />
       </main>
 

@@ -103,6 +103,12 @@ export const api = {
       body: JSON.stringify({ thread_id: threadId, question_id: questionId, answer }),
     }),
 
+  undoMessage: (messageId: string) =>
+    j<{ ok: boolean; deleted: number }>(
+      `/messages/${encodeURIComponent(messageId)}/undo`,
+      { method: 'POST' },
+    ),
+
   jobStatus: (threadId: string) =>
     j<{ running: boolean; done: boolean; cancelled?: boolean; events: number }>(
       `/jobs/${encodeURIComponent(threadId)}`,

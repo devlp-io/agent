@@ -13,7 +13,7 @@ const SUGGESTIONS = [
 ]
 
 export function Chat({
-  messages, streaming, threadId, loading, onSuggestion, showThinking,
+  messages, streaming, threadId, loading, onSuggestion, showThinking, onUndo,
 }: {
   messages: Message[]
   streaming: Message | null
@@ -21,6 +21,7 @@ export function Chat({
   loading: boolean
   onSuggestion: (text: string) => void
   showThinking: boolean
+  onUndo?: (m: Message) => void
 }) {
   const endRef = useRef<HTMLDivElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -110,7 +111,7 @@ export function Chat({
         )}
 
         <div className="flex flex-col gap-5">
-          {messages.map(m => <MessageItem key={m.id} m={m} showThinking={showThinking} />)}
+          {messages.map(m => <MessageItem key={m.id} m={m} showThinking={showThinking} onUndo={onUndo} />)}
           {streaming && <MessageItem key={streaming.id} m={streaming} showThinking={showThinking} />}
         </div>
         <div ref={endRef} className="h-2" />

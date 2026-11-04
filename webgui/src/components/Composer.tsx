@@ -16,7 +16,7 @@ export type ComposerOptions = {
 export function Composer({
   threadId, ensureThread, streaming, models, activeModel, onModelChange,
   mode, setMode, effort, setEffort,
-  onSend, onStop, pushToast, onToggleThinking,
+  onSend, onStop, pushToast, onToggleThinking, restore,
 }: {
   threadId: string | null
   ensureThread: () => Promise<string | null>
@@ -34,6 +34,7 @@ export function Composer({
   onStop: () => void
   pushToast: (msg: string, kind?: 'ok' | 'err') => void
   onToggleThinking: (next?: boolean) => void
+  restore?: { text: string; seq: number } | null
 }) {
   const [text, setText] = useState('')
   const [files, setFiles] = useState<Attachment[]>([])
@@ -61,6 +62,21 @@ export function Composer({
   useEffect(() => {
     sessionStorage.setItem(draftKey, text)
   }, [text, draftKey])
+
+  // Undo from a user bubble: restore the text and put the caret at the end.
+  useEffect(() => {
+    if (!restore) return
+    setText(restore.text)
+    setFiles([])
+    requestAnimationFrame(() => {
+      const el = taRef.current
+      if (!el) return
+      el.focus()
+      const end = restore.text.length
+      el.setSelectionRange(end, end)
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [restore?.seq])
 
   useEffect(() => {
     const el = taRef.current
