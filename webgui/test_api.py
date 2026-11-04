@@ -265,8 +265,10 @@ def main():
           server._is_question_only("Do this exactly, in order: create a todo list.") is False)
     check("imperative dispatch not a question",
           server._is_question_only("dispatch a worker to run id") is False)
-    check("tech stack is a question",
-          server._is_question_only("what is the tech stack of example.com") is True)
+    check("tech stack with a target is an action",
+          server._is_question_only("what is the tech stack of example.com") is False)
+    check("tech stack without a target is a question",
+          server._is_question_only("what is a tech stack?") is True)
     check("capability question stays a question",
           server._is_question_only("can you build a port scanner?") is True)
 

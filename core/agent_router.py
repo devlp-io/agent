@@ -402,6 +402,7 @@ class AgentRouter:
         self.todo_callback: Optional[Callable[..., List[Dict[str, str]]]] = None
         # Mission depth for this dispatch: "deep" or "scoped".
         self._mission_scope = ""
+        self._scope_hint: Optional[str] = None
         self._done_gate_retries = 0
 
     @property
@@ -740,9 +741,16 @@ class AgentRouter:
                 self._last_scan_target = candidate_tgt
 
         # Scope for this mission: narrow question vs deep offensive task.
-        scope = mission_scope(initial_user_text, getattr(self, "_mission_scope", ""))
+        # The host may pass the operator's real text as a hint, because the
+        # prompt it dispatches also carries transport text that name-drops
+        # "attack"/"exploit" and would misclassify every request as deep.
+        scope = self._scope_hint or mission_scope(
+            initial_user_text, getattr(self, "_mission_scope", "")
+        )
         self._mission_scope = scope
         self._done_gate_retries = 0
+        self._scoped_actions = 0
+        self._scoped_budget_hit = False
 
         # Dynamically refresh root system prompt with current persona.md and active session assessment memory
         session_mem = self.get_session_memory_prompt()
@@ -750,13 +758,18 @@ class AgentRouter:
             "[SCOPE LOCK — NARROW REQUEST]\n"
             "The operator asked for one specific fact or a single small task. Deliver exactly that, "
             "then stop. Do not enumerate subdomains, do not run assessment chains, do not pivot into "
-            "a full scan. Answer, verify with one or two commands, finish."
+            "a full scan. Do not create a todo list, do not dispatch subagents, do not read source or "
+            "process internals unless the single fact requires it. Answer, verify with one or two "
+            "commands, finish with DONE."
             if scope == "scoped" else
             "[MISSION DEPTH — DEEP]\n"
             "This is an offensive or assessment mission. Do not conclude while untested surface remains. "
             "When one vector fails, adapt and pivot: alternate encodings, spoofed headers, origin IP, "
             "different endpoints, a different tool. Keep going until a critical/high finding is verified, "
-            "the surface is exhausted, or the operator stops you. Log progress with TODO: and FINDING:."
+            "the surface is exhausted, or the operator stops you. "
+            "Open your plan first with TODO: add|<step> (one per step), then update it as you go. "
+            "Before DONE, close or clear every TODO item so the plan matches reality. "
+            "Log progress with FINDING: as soon as something is verified."
         )
         if self.history and self.history[0].get("role") == "system":
             self.history[0]["content"] = (
@@ -913,6 +926,32 @@ class AgentRouter:
             # Parse directives from model output
             directives = self._parse_directives(full_reply)
             is_done = self._check_is_done(full_reply)
+
+            # A scoped question gets an action budget: enough to look, not
+            # enough to turn into a full assessment.
+            if self._mission_scope == "scoped" and directives:
+                self._scoped_actions = getattr(self, "_scoped_actions", 0) + len(directives)
+                if self._scoped_actions > 6:
+                    if getattr(self, "_scoped_budget_hit", False):
+                        # The model ignored the budget directive: close cleanly
+                        # instead of looping forever without executing anything.
+                        self.emit(AssistantMessageEvent(
+                            "Scoped request: evidence budget reached — reporting what was observed."))
+                        self.emit(TaskCompleteEvent(status="Scoped request done", success=True))
+                        self.emit(StatusChangeEvent("READY", "green"))
+                        return
+                    self._scoped_budget_hit = True
+                    self.history.append({
+                        "role": "user",
+                        "content": (
+                            "[SCOPE LOCK — ACTION BUDGET] This is a narrow request and the evidence "
+                            "budget is spent. Do NOT run more commands. Answer the operator's question "
+                            "in prose now, using what you already observed, then DONE: <answer>."
+                        ),
+                    })
+                    self.emit(StatusChangeEvent("THINKING", "cyan"))
+                    turn += 1
+                    continue
 
             # 1. If NO directives were emitted:
             if not directives:
