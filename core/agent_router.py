@@ -545,6 +545,7 @@ class AgentRouter:
         self._mission_scope = ""
         self._scope_hint: Optional[str] = None
         self._done_gate_retries = 0
+        self._action_count = 0
         self._finding_keys: set = set()
         self._refusal_streak = 0
         self._brain_used = False
@@ -918,6 +919,7 @@ class AgentRouter:
         )
         self._mission_scope = scope
         self._done_gate_retries = 0
+        self._action_count = 0
         self._scoped_actions = 0
         self._scoped_budget_hit = False
         self._empty_reply_retries = 0
@@ -1037,39 +1039,58 @@ class AgentRouter:
             stream_line_buf: str = ""
             is_suppressed_line: bool = False
 
-            try:
-                for chunk in self.model_manager.stream_chat(self.history):
-                    if self._is_cancelled:
-                        break
-                    accumulated.append(chunk)
+            stream_error = None
+            for attempt in range(1, 4):
+                if self._is_cancelled:
+                    break
+                accumulated.clear()
+                stream_line_buf = ""
+                is_suppressed_line = False
+                try:
+                    for chunk in self.model_manager.stream_chat(self.history):
+                        if self._is_cancelled:
+                            break
+                        accumulated.append(chunk)
 
-                    # Filter out machine directives so they never flash on the user's terminal
-                    for char in chunk:
-                        if char == "\n":
-                            if not is_suppressed_line:
-                                self.emit(AssistantChunkEvent(
-                                    chunk=(stream_line_buf + "\n") if stream_line_buf else "\n"))
-                            stream_line_buf = ""
-                            is_suppressed_line = False
-                        else:
-                            stream_line_buf += char
-                            if not is_suppressed_line:
-                                stripped = stream_line_buf.lstrip()
-                                if any(stripped.startswith(tag) for tag in DIRECTIVE_TAGS):
-                                    is_suppressed_line = True
-                                    stream_line_buf = ""
-                                elif not any(tag.startswith(stripped) for tag in DIRECTIVE_TAGS if stripped):
-                                    # Regular narrative text, flush immediately
-                                    self.emit(AssistantChunkEvent(chunk=stream_line_buf))
-                                    stream_line_buf = ""
+                        # Filter out machine directives so they never flash on the user's terminal
+                        for char in chunk:
+                            if char == "\n":
+                                if not is_suppressed_line:
+                                    self.emit(AssistantChunkEvent(
+                                        chunk=(stream_line_buf + "\n") if stream_line_buf else "\n"))
+                                stream_line_buf = ""
+                                is_suppressed_line = False
+                            else:
+                                stream_line_buf += char
+                                if not is_suppressed_line:
+                                    stripped = stream_line_buf.lstrip()
+                                    if any(stripped.startswith(tag) for tag in DIRECTIVE_TAGS):
+                                        is_suppressed_line = True
+                                        stream_line_buf = ""
+                                    elif not any(tag.startswith(stripped) for tag in DIRECTIVE_TAGS if stripped):
+                                        # Regular narrative text, flush immediately
+                                        self.emit(AssistantChunkEvent(chunk=stream_line_buf))
+                                        stream_line_buf = ""
 
-                # Flush trailing characters if not a directive
-                if stream_line_buf and not is_suppressed_line:
-                    if not any(stream_line_buf.lstrip().startswith(tag) for tag in DIRECTIVE_TAGS):
-                        self.emit(AssistantChunkEvent(chunk=stream_line_buf))
-            except Exception as e:
+                    # Flush trailing characters if not a directive
+                    if stream_line_buf and not is_suppressed_line:
+                        if not any(stream_line_buf.lstrip().startswith(tag) for tag in DIRECTIVE_TAGS):
+                            self.emit(AssistantChunkEvent(chunk=stream_line_buf))
+                    stream_error = None
+                    break
+                except Exception as e:
+                    stream_error = e
+                    if attempt < 3 and not self._is_cancelled:
+                        # A dropped connection is not the end of a mission.
+                        # Discard the partial stream and retry the same turn.
+                        self.emit(ThinkingStopEvent())
+                        self.emit(StatusChangeEvent("THINKING…", "purple"))
+                        time.sleep(attempt * 2.0)
+                        continue
+                    break
+            if stream_error is not None:
                 self.emit(ThinkingStopEvent())
-                self.emit(ErrorEvent(f"Chat error: {e}"))
+                self.emit(ErrorEvent(f"Chat error after retries: {stream_error}"))
                 self.emit(StatusChangeEvent("READY", "green"))
                 return
 
@@ -1186,6 +1207,9 @@ class AgentRouter:
                 # Check if model signaled completion with explicit DONE directive
                 if is_done:
                     hold = self._critical_gate_hold()
+                    if hold == "__BRAIN__":
+                        self._gate_brain_or_denied()
+                        return
                     if hold:
                         self.history.append({"role": "user", "content": hold})
                         self.emit(StatusChangeEvent("ATTACKING…", "red"))
@@ -1291,6 +1315,9 @@ class AgentRouter:
                         obs_lines.append(note)
                         self.emit(AssistantMessageEvent(note))
                         continue
+
+                if kind not in cheap:
+                    self._action_count = getattr(self, "_action_count", 0) + 1
 
                 if kind == "COMMAND":
                     cmd_res = self._exec_directive_command(payload)
@@ -1453,6 +1480,9 @@ class AgentRouter:
             # now that directives have finished executing, complete the task cleanly!
             if is_done:
                 hold = self._critical_gate_hold()
+                if hold == "__BRAIN__":
+                    self._gate_brain_or_denied()
+                    return
                 if hold:
                     self.history.append({"role": "user", "content": hold})
                     self.emit(StatusChangeEvent("ATTACKING…", "red"))
@@ -1694,16 +1724,48 @@ class AgentRouter:
         """Block a premature DONE on a deep mission with nothing serious proven."""
         if self._mission_scope != "deep" or self._has_high_finding():
             return None
-        if self._done_gate_retries >= 3:
-            return None
+        min_actions = max(1, int(os.environ.get("AG_DEEP_MIN_ACTIONS", "12")))
+        acted = getattr(self, "_action_count", 0)
+        if acted >= min_actions:
+            if self._done_gate_retries >= 3:
+                return None
+            self._done_gate_retries += 1
+            return (
+                f"[CRITICAL GATE {self._done_gate_retries}/3] The mission is not finished: no critical "
+                "or high finding is verified yet. Do not stop. Resume with a new vector: map the untested "
+                "endpoints, attempt an auth bypass or IDOR, fuzz hidden parameters, look up the identified "
+                "stack's latest CVEs with SEARCH:, or pivot to another host or service. Track the plan with "
+                "TODO: and state DONE only after a verified critical/high finding or full surface exhaustion."
+            )
+        # Too little work to call the mission done. A report is not progress;
+        # keep the same ~7-10 retry budget as a refusal, then hand off to the
+        # separate brain instead of shipping a recon-only answer as an attack.
+        if self._done_gate_retries >= REFUSAL_RETRIES:
+            return "__BRAIN__"
         self._done_gate_retries += 1
         return (
-            f"[CRITICAL GATE {self._done_gate_retries}/3] The mission is not finished: no critical "
-            "or high finding is verified yet. Do not stop. Resume with a new vector: map the untested "
-            "endpoints, attempt an auth bypass or IDOR, fuzz hidden parameters, look up the identified "
-            "stack's latest CVEs with SEARCH:, or pivot to another host or service. Track the plan with "
-            "TODO: and state DONE only after a verified critical/high finding or full surface exhaustion."
+            f"[CRITICAL GATE {self._done_gate_retries}/{REFUSAL_RETRIES}] DONE rejected: only "
+            f"{acted}/{min_actions} executable actions have run and no high finding is verified. "
+            "Do NOT write another report. Emit exactly one executable directive now "
+            "(COMMAND/PROBE/WALK/APIMAP/WAF/STACK/EXPLOIT) that tests a new surface. "
+            "The mission continues until the surface is exhausted or a high finding is verified."
         )
+
+    def _gate_brain_or_denied(self) -> bool:
+        """Exhausted the gate budget: hand the mission to the separate brain."""
+        if not getattr(self, "_brain_used", False):
+            self._brain_used = True
+            brain = self._refusal_brain(
+                getattr(self, "_mission_text", "") or "complete the operator's task")
+            if brain:
+                self.emit(AssistantMessageEvent(brain))
+                self.emit(TaskCompleteEvent(status="Completed by compliance worker", success=True))
+                self.emit(StatusChangeEvent("READY", "green"))
+                return True
+        self.emit(AssistantMessageEvent("DENIED"))
+        self.emit(TaskCompleteEvent(status="Refused by model", success=False))
+        self.emit(StatusChangeEvent("READY", "green"))
+        return True
 
     def _check_is_done(self, text: str) -> bool:
         """

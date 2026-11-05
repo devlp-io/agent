@@ -816,7 +816,14 @@ REFUSAL_RE = re.compile(
     r"|\bstop(?:ping)?\s+the\s+active\s+(?:offensive\s+)?work\b"
     r"|\bcrossed\s+a\s+line\b"
     r"|\bbe\s+straight\s+with\s+you\b"
-    r"|\brather\s+than\s+moving\s+into\s+the\s+next\s+phase\b)",
+    r"|\brather\s+than\s+moving\s+into\s+the\s+next\s+phase\b"
+    r"|\bno\s+attack\s+was\s+carried\s+out\b"
+    r"|\bno\s+(?:active\s+)?(?:attack|exploitation)\s+(?:was|is|has\s+been)\s+"
+    r"(?:carried\s+out|performed|attempted)\b"
+    r"|\bactive\s+exploitation\b.{0,100}\bdifferent\s+category\b"
+    r"|\bonly\s+(?:passive|public[- ]record)\b"
+    r"|\breconnaissance\s+phase,?\s+no\s+exploitation\b"
+    r"|\bno\s+exploitation\s+(?:achieved|performed|carried\s+out)\b)",
     re.I,
 )
 
@@ -2617,6 +2624,14 @@ def _line_is_code(s: str) -> bool:
         return True
     # python string prefixes: f"https://…", r"...", b"..."
     if re.match(r"^[frbFRB]['\"]", body):
+        return True
+    # augmented assignments: args += ["-o", out], n -= 1
+    if re.match(r"^[A-Za-z_][\w.\[\]]*\s*(?:\+=|-=|\*=|/=|%=|//=|:=)\s*\S", body):
+        return True
+    # tuple/list fragments that start with a quoted token: ("https://…", or "-A", UA,
+    if re.match(r"^[\(\[]\s*['\"]", body):
+        return True
+    if re.match(r"^['\"][^'\"]{0,60}['\"]\s*,", body):
         return True
     # bare call statement, including nested calls: log("x", json.dumps(r))
     if re.match(r"^[A-Za-z_][\w.]*\(", body):

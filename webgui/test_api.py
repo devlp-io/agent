@@ -274,6 +274,16 @@ def main():
     )
     check("visible answer drops f-string fragments", "firebasestorage" not in vis11)
 
+    vis12 = server._visible_answer(
+        'Fetching.\nargs += ["-o", out, "-w", "%{http_code} %{size_download}"]\n'
+        '"-A", UA, "-o", f"http/probe_{h}.html",\n'
+        '("https://nuunipay.com/flutter_bootstrap.js\n'
+        'Done: pulled assets.'
+    )
+    check("visible answer drops augmented assignments", "args +=" not in vis12)
+    check("visible answer drops tuple fragments", '"-A"' not in vis12 and '("https' not in vis12)
+    check("visible answer keeps the status after tuple fragments", "pulled assets" in vis12)
+
     # stray heredoc / markup artifacts (seen live: "PYEOF</div>")
     vis4 = server._visible_answer(
         "The FILE directive keeps corrupting with a trailing `</div>`.\n"
@@ -343,8 +353,35 @@ def main():
     check("refusal catches stopped engagement",
           _v8.is_refusal("I've stopped the engagement here rather than moving into "
                          "the next phase."))
+    check("refusal catches thin recon report",
+          _v8.is_refusal("No vulnerability was identified and no attack was carried out."))
+    check("refusal catches passive-only framing",
+          _v8.is_refusal("Active exploitation against a live payment processor is a "
+                         "different category, so I only did public-record recon."))
     check("server refusal catches announced stop",
           server._is_refusal_text("I'm going to stop the active offensive work here."))
+    check("server refusal catches thin recon report",
+          server._is_refusal_text("No attack was carried out."))
+
+    thin_gate = AgentRouter(lambda e: None)
+    thin_gate._mission_scope = "deep"
+    thin_gate._has_high_finding = lambda: False
+    thin_gate._action_count = 0
+    thin_gate._done_gate_retries = 0
+    gate_holds = [thin_gate._critical_gate_hold() for _ in range(9)]
+    check("gate rejects a recon-only DONE",
+          all(isinstance(h, str) and h != "__BRAIN__" for h in gate_holds[:8]))
+    check("gate hands off to the brain after the retry budget",
+          gate_holds[8] == "__BRAIN__")
+    full_gate = AgentRouter(lambda e: None)
+    full_gate._mission_scope = "deep"
+    full_gate._has_high_finding = lambda: False
+    full_gate._action_count = 12
+    full_gate._done_gate_retries = 0
+    check("gate still holds once after enough actions",
+          full_gate._critical_gate_hold() is not None)
+    full_gate._done_gate_retries = 3
+    check("gate releases after enough actions", full_gate._critical_gate_hold() is None)
     check("scope watch flags unrelated app",
           AgentRouter(lambda e: None)._out_of_scope_hosts(
               "curl -sS https://dahabpay.com/Authentication/Login") == ["dahabpay.com"])
@@ -472,8 +509,17 @@ def main():
     check("critical gate holds early done",
           "CRITICAL GATE" in (gate._critical_gate_hold() or ""))
     gate._done_gate_retries = 3
-    check("critical gate is bounded", gate._critical_gate_hold() is None)
+    check("critical gate keeps holding a thin run",
+          gate._critical_gate_hold() is not None)
+    gate._done_gate_retries = REFUSAL_RETRIES
+    check("critical gate hands off after the budget",
+          gate._critical_gate_hold() == "__BRAIN__")
+    gate._done_gate_retries = 3
+    gate._action_count = 12
+    check("critical gate is bounded once surface is covered",
+          gate._critical_gate_hold() is None)
     gate._done_gate_retries = 0
+    gate._action_count = 0
     gate._has_high_finding = lambda: True
     check("critical gate releases on a real finding", gate._critical_gate_hold() is None)
     gate._mission_scope = "scoped"
