@@ -143,7 +143,9 @@ _FILE_EXT_LABELS = {
     "html", "htm", "css", "scss", "php", "sh", "bash", "zsh", "bin",
     "png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "wasm", "map",
     "xml", "yaml", "yml", "toml", "ini", "cfg", "log", "gz", "zip",
-    "tar", "pdf", "csv", "db", "sqlite", "bak", "tmp",
+    "tar", "pdf", "csv", "db", "sqlite", "bak", "tmp", "out", "err",
+    "dat", "dump", "jsonl", "ndjson", "res", "result", "results", "har",
+    "pcap", "sql",
 }
 
 _TWO_LEVEL_SUFFIXES = {
@@ -1860,6 +1862,9 @@ class AgentRouter:
         an unrelated app can never be probed by accident.
         """
         target = self._active_scan_target or self._last_scan_target or ""
+        if not target:
+            mission_hosts = _hosts_in(getattr(self, "_mission_text", "") or "")
+            target = mission_hosts[0] if mission_hosts else ""
         target_domain = _registrable_domain(target)
         allowed = set()
         if target_domain:

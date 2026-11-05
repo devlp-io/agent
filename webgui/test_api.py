@@ -284,6 +284,15 @@ def main():
     check("visible answer drops tuple fragments", '"-A"' not in vis12 and '("https' not in vis12)
     check("visible answer keeps the status after tuple fragments", "pulled assets" in vis12)
 
+    vis13 = server._visible_answer(
+        'Testing.\n"firebase_keys": re.compile(rb"AIza[0-9A-\n'
+        '{"email": email, "password": pw, "returnSecureToken": True})\n'
+        'Done: auth probed.'
+    )
+    check("visible answer drops dict/json fragments",
+          "firebase_keys" not in vis13 and '"email"' not in vis13)
+    check("visible answer keeps the auth status", "auth probed" in vis13)
+
     # stray heredoc / markup artifacts (seen live: "PYEOF</div>")
     vis4 = server._visible_answer(
         "The FILE directive keeps corrupting with a trailing `</div>`.\n"
@@ -401,6 +410,9 @@ def main():
               "curl -sS https://owasp.org/www-project-top-ten/") == [])
     check("scope watch does not treat filenames as hosts",
           scope_guard._out_of_scope_hosts("python main.dart.js --out out.bin") == [])
+    check("scope watch ignores result files",
+          scope_guard._out_of_scope_hosts(
+              "tail -80 probe4.out && cat results.json && grep x scan.err") == [])
     check("scope watch allows mixed target command",
           scope_guard._out_of_scope_hosts(
               "curl https://nuunipay.com/a && curl https://dahabpay.com/b") == [])

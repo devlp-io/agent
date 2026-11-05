@@ -2633,6 +2633,11 @@ def _line_is_code(s: str) -> bool:
         return True
     if re.match(r"^['\"][^'\"]{0,60}['\"]\s*,", body):
         return True
+    # dict / JSON fragments: {"email": email, ...} or "firebase_keys": re.compile(...
+    if body[:1] in ("{", "[") and re.search(r"['\"][^'\"]+['\"]\s*:", body):
+        return True
+    if re.match(r"^['\"][^'\"]{1,80}['\"]\s*:", body):
+        return True
     # bare call statement, including nested calls: log("x", json.dumps(r))
     if re.match(r"^[A-Za-z_][\w.]*\(", body):
         return True
