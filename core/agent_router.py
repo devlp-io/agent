@@ -425,6 +425,7 @@ class AgentRouter:
         self._mission_scope = ""
         self._scope_hint: Optional[str] = None
         self._done_gate_retries = 0
+        self._finding_keys: set = set()
 
     @property
     def is_busy(self) -> bool:
@@ -773,6 +774,9 @@ class AgentRouter:
         self._scoped_actions = 0
         self._scoped_budget_hit = False
         self._empty_reply_retries = 0
+        self._todo_used = False
+        self._plan_nudged = False
+        self._finding_keys = set()
 
         # Dynamically refresh root system prompt with current persona.md and active session assessment memory
         session_mem = self.get_session_memory_prompt()
@@ -1049,8 +1053,20 @@ class AgentRouter:
 
             # Limit max directives per turn to 5 to prevent runaway execution loops
             max_batch = 5
-            to_execute = directives[:max_batch]
-            has_more = len(directives) > max_batch
+            # Cheap bookkeeping directives never consume the action budget.
+            cheap = {"TODO", "NOTE", "PHASE", "FINDING"}
+            to_execute = []
+            has_more = False
+            actions = 0
+            for kind, payload in directives:
+                if kind in cheap:
+                    to_execute.append((kind, payload))
+                    continue
+                if actions >= max_batch:
+                    has_more = True
+                    continue
+                to_execute.append((kind, payload))
+                actions += 1
 
             # Fan out independent subagent jobs first; they run in parallel and
             # each owns its runner/model. Their summaries join the observations.
@@ -1335,7 +1351,7 @@ class AgentRouter:
         return results
 
     def _extract_directive_matches(self, text: str) -> List[Tuple[str, str]]:
-        pattern = r"(?:^|\n)\s*([A-Z][A-Z0-9_\-]{2,15}):\s*(.+?)(?=\n[A-Z][A-Z0-9_\-]{2,15}:\s|\Z)"
+        pattern = r"(?:^|\n)\s*(?:[-*•]|\d+[.)])?\s*([A-Z][A-Z0-9_\-]{2,15}):\s*(.+?)(?=\n\s*(?:[-*•]|\d+[.)])?\s*[A-Z][A-Z0-9_\-]{2,15}:\s|\Z)"
         results = []
         valid_single_line = {
             "COMMAND", "INSTALL", "TOOLS", "LIST", "PROBE", "PARALLEL",
@@ -1479,6 +1495,8 @@ class AgentRouter:
         action = (parts[0] or "list").lower()
         a = parts[1] if len(parts) > 1 else ""
         b = "|".join(parts[2:]).strip() if len(parts) > 2 else ""
+        if action in ("add", "new", "create", "edit", "rename"):
+            self._todo_used = True
         items: List[Dict[str, str]] = []
         if self.todo_callback:
             try:
@@ -1917,6 +1935,13 @@ class AgentRouter:
         sev = parts[0] if len(parts) > 0 else "info"
         title = parts[1] if len(parts) > 1 else "Finding"
         ev = parts[2] if len(parts) > 2 else ""
+
+        # One note per finding; the model often restates the same issue.
+        key = re.sub(r"[^a-z0-9]+", "", (title or "").lower())[:60]
+        if key and key in getattr(self, "_finding_keys", set()):
+            return
+        if key:
+            self._finding_keys.add(key)
 
         # False-positive calibration: an exposed admin login portal is medium unless auth bypass or takeover is verified
         low_t = title.lower()

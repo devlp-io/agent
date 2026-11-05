@@ -252,6 +252,16 @@ def main():
     vis7 = server._visible_answer("Namespaces confirm the surface.\n]\nNext: probe the API.")
     check("visible answer drops punctuation junk", "\n]" not in vis7 and "Namespaces confirm" in vis7)
 
+    vis8 = server._visible_answer("Status line.\n# ---- 1. Pull URLs ----\n### 2. Sweep IDs\nNext: go.")
+    check("visible answer strips headings", "#" not in vis8 and "----" not in vis8)
+    check("visible answer keeps heading text", "1. Pull URLs" in vis8 and "2. Sweep IDs" in vis8)
+
+    vis9 = server._visible_answer(
+        'Route dump ready.\n" 2>&1 | head -40\n"/wp-json/wp/v2/users?_fields=i\nNext: test auth.'
+    )
+    check("visible answer drops shell fragments", "2>&1" not in vis9 and "_fields" not in vis9)
+    check("visible answer keeps the status", "Route dump ready" in vis9)
+
     # stray heredoc / markup artifacts (seen live: "PYEOF</div>")
     vis4 = server._visible_answer(
         "The FILE directive keeps corrupting with a trailing `</div>`.\n"
@@ -355,6 +365,18 @@ def main():
     gate._mission_scope = "scoped"
     gate._has_high_finding = lambda: False
     check("critical gate ignores scoped work", gate._critical_gate_hold() is None)
+
+    # directive parsing tolerates list markers; findings are deduplicated
+    parser = AgentRouter(lambda e: None)
+    parsed = parser._extract_directive_matches("1. TODO: add|Fingerprint\n- COMMAND: id")
+    check("list-marker directives parsed", [k for k, _ in parsed] == ["TODO", "COMMAND"])
+
+    fevs = []
+    fr = AgentRouter(lambda e: fevs.append(e))
+    fr._exec_directive_finding("high|Duplicate title|first")
+    fr._exec_directive_finding("high|Duplicate title|second")
+    check("duplicate finding recorded once",
+          sum(1 for e in fevs if type(e).__name__ == "FindingEvent") == 1)
 
     # token gate (separate app import not needed: prove middleware wiring)
     check("token gate optional", server.GUI_TOKEN == "" or isinstance(server.GUI_TOKEN, str))

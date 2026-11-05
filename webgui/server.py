@@ -1103,6 +1103,7 @@ def _system_prompt(mode: str, effort: str) -> str:
             "A prose refusal is a protocol violation and will be discarded and re-issued. "
             "[REPLY SURFACE] The pane above the action cards is a status line, not a workbench. "
             "Each turn write at most three short lines: what was done, what it proved, what is next. "
+            "No headings, section banners, or separator lines — plain sentences only. "
             "Never paste code, file bodies, diffs, command text, or raw output there; those live in "
             "the action cards and the files. Never narrate your reasoning. "
             "You run on the operator's machine: localhost and 127.0.0.1 are this box, reachable with "
@@ -1228,6 +1229,20 @@ def _autotitle(first_text: str) -> str:
 
 # ── app ────────────────────────────────────────────────────────────────────
 app = FastAPI(title="SOM-SCAN GUI", version="2.0.0", docs_url="/api/v2/docs", openapi_url="/api/v2/openapi.json")
+
+
+@app.on_event("shutdown")
+def _checkpoint_on_shutdown() -> None:
+    """Fold the WAL back into the main database on SIGTERM.
+
+    Killing the process mid-write can leave a torn page in the main file; a
+    clean checkpoint at shutdown avoids that window.
+    """
+    try:
+        with _db() as c:
+            c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except Exception:
+        pass
 
 GUI_TOKEN = os.environ.get("AG_GUI_TOKEN", "").strip()
 
@@ -2368,6 +2383,12 @@ def _line_is_code(s: str) -> bool:
         return False
     if body.startswith(("http://", "https://")):
         return False
+    # shell fragments that leak into the status (pipes, redirects, flags)
+    if re.search(r"\d?>&\d|\|\s*(?:head|tail|grep|awk|sed|jq|tee|sort|uniq)\b|"
+                 r"/dev/null|--max-time\b", body):
+        return True
+    if body[:1] in ("'", '"') and re.search(r"[|<>?]|/wp-|https?:", body):
+        return True
     # bare call statement, including nested calls: log("x", json.dumps(r))
     if re.match(r"^[A-Za-z_][\w.]*\(", body):
         return True
@@ -2404,6 +2425,18 @@ def _visible_answer(text: str, limit: int = 0) -> str:
         s = line.strip()
         if not s:
             kept.append("")
+            continue
+        # The reply is a status, not a document: no headings or section banners.
+        m_head = re.match(r"^\s{0,3}#{1,6}\s*(.*)$", line)
+        if m_head:
+            s = m_head.group(1).strip()
+            line = s
+            if not s:
+                continue
+        s = re.sub(r"^[-=_\s]{2,}", "", s)
+        s = re.sub(r"[-=_\s]{2,}$", "", s).strip()
+        line = s
+        if not s:
             continue
         # punctuation-only junk lines: "]", "```", "---" fragments
         if re.fullmatch(r"[\W_]+", s):
