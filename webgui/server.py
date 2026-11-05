@@ -2503,6 +2503,9 @@ def _line_is_code(s: str) -> bool:
     # quoted list fragments: "a.js", "b.js" ]
     if body[:1] in ("'", '"') and ('", "' in body or "', '" in body or body.endswith("]")):
         return True
+    # python string prefixes: f"https://…", r"...", b"..."
+    if re.match(r"^[frbFRB]['\"]", body):
+        return True
     # bare call statement, including nested calls: log("x", json.dumps(r))
     if re.match(r"^[A-Za-z_][\w.]*\(", body):
         return True
@@ -3833,10 +3836,13 @@ async def _agent_stream(body: ChatBody, request: Request):
                     answer_part["text"] = content
         # Keep the report as a workspace artifact so the proof survives cleanup.
         try:
-            if content and len(content.strip()) > 200:
-                report_path = pathlib.Path(work_dir) / "report.md"
-                if not report_path.exists():
-                    report_path.write_text(content.strip() + "\n", encoding="utf-8")
+            existing_reports = [
+                pathlib.Path(work_dir) / name
+                for name in ("REPORT.md", "report.md", "FINDINGS.md", "findings.md")
+            ]
+            if content and len(content.strip()) > 200 and not any(p.exists() for p in existing_reports):
+                (pathlib.Path(work_dir) / "report.md").write_text(
+                    content.strip() + "\n", encoding="utf-8")
         except Exception:
             pass
         _todo_close_open(body.thread_id)

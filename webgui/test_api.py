@@ -269,6 +269,11 @@ def main():
     check("visible answer drops quoted list fragments", "main.dart.js" not in vis10)
     check("visible answer keeps the status line", "mapped the bundles" in vis10)
 
+    vis11 = server._visible_answer(
+        'Ready.\nf"https://firebasestorage.googleapis.com/v0/b/x"\nDone: storage closed.'
+    )
+    check("visible answer drops f-string fragments", "firebasestorage" not in vis11)
+
     # stray heredoc / markup artifacts (seen live: "PYEOF</div>")
     vis4 = server._visible_answer(
         "The FILE directive keeps corrupting with a trailing `</div>`.\n"

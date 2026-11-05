@@ -841,6 +841,8 @@ class AgentRouter:
         self._empty_reply_retries = 0
         self._todo_used = False
         self._plan_nudged = False
+        self._plan_progress_nudged = False
+        self._todo_items = []
         self._finding_keys = set()
         self._refusal_streak = 0
         self._brain_used = False
@@ -1426,8 +1428,12 @@ class AgentRouter:
             # Compact individual large observations to maintain optimal token context
             compact_obs = []
             for obs in obs_lines:
-                if len(obs) > 1500:
-                    compact_obs.append(obs[:800] + f"\n... [truncated {len(obs) - 1200} bytes for context efficiency] ...\n" + obs[-400:])
+                if len(obs) > 6000:
+                    compact_obs.append(
+                        obs[:3000]
+                        + f"\n... [truncated {len(obs) - 4500} bytes for context] ...\n"
+                        + obs[-1500:]
+                    )
                 else:
                     compact_obs.append(obs)
 
@@ -1441,6 +1447,23 @@ class AgentRouter:
                 "(COMMAND, FILE, INSTALL, TOOLS, PROBE, etc.) to advance and verify the task, "
                 "or if everything requested is fully accomplished and tested, summarize the results and state DONE: <summary>."
             )
+            if (self._mission_scope == "deep" and not self._plan_nudged
+                    and not getattr(self, "_todo_used", False) and turn >= 2):
+                self._plan_nudged = True
+                obs_prompt += (
+                    "\n\n[SUPERVISOR] No TODO plan exists for this mission. Create one now with "
+                    "TODO: add|<step> (max 8 items), and record every verified issue with "
+                    "FINDING: <severity>|<title>|<evidence>."
+                )
+            if (self._mission_scope == "deep" and not getattr(self, "_plan_progress_nudged", False)
+                    and getattr(self, "_todo_items", None)
+                    and not any(i.get("status") == "done" for i in self._todo_items)
+                    and turn >= 3):
+                self._plan_progress_nudged = True
+                obs_prompt += (
+                    "\n\n[SUPERVISOR] None of your plan items are marked done. As each step is "
+                    "verified, emit TODO: done|<id> so the plan reflects reality."
+                )
             self.history.append({"role": "user", "content": obs_prompt})
 
             # Sliding window pruning: keep system prompt, initial prompt, and last 20 messages to prevent LLM context overflow
@@ -1653,6 +1676,7 @@ class AgentRouter:
             except Exception as e:
                 return f"[TODO store error: {e}]"
         self.emit(TodoEvent(items=items))
+        self._todo_items = items
         rendered = "\n".join(
             f"  [{str(i.get('status', 'todo'))[:5]}] {i.get('id')}: {i.get('text', '')}"
             for i in items
