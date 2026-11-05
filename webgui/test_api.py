@@ -408,6 +408,10 @@ def main():
     check("scope watch allows research docs",
           scope_guard._out_of_scope_hosts(
               "curl -sS https://owasp.org/www-project-top-ten/") == [])
+    check("scope watch allows target CDN buckets",
+          scope_guard._out_of_scope_hosts(
+              "curl -sS https://pub-f8f32a7de9fa442fbf5f3b4dc91b44f5.r2.dev/x && "
+              "curl https://nuunipay-upload.workers.dev/y") == [])
     check("scope watch does not treat filenames as hosts",
           scope_guard._out_of_scope_hosts("python main.dart.js --out out.bin") == [])
     check("scope watch ignores result files",
