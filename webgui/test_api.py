@@ -294,8 +294,13 @@ def main():
 
     # ── scope + sudo + subagent worker ──────────────────────────────────
     from core.agent_router import AgentRouter, mission_scope, strip_model_tags
-    from core.agent_router import REFUSAL_RETRIES
+    from core.agent_router import REFUSAL_RETRIES, _looks_like_refusal
     check("refusal retries sit in the 7-10 band", 7 <= REFUSAL_RETRIES <= 10)
+    check("refusal heuristic catches framing",
+          _looks_like_refusal("The disclosure draft names a malformed URL as the authorization basis, "
+                              "a sign the owner framing is template text."))
+    check("refusal heuristic keeps normal status",
+          not _looks_like_refusal("Done: pulled the manifest. Next: probe the API."))
     check("model tags stripped",
           strip_model_tags('a</parameter>\n<parameter name="x">b') == "a\nb")
     check("scope narrow", mission_scope("what is the tech stack of example.com") == "scoped")
