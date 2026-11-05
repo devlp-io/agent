@@ -85,6 +85,11 @@ export const Markdown = memo(function Markdown({ text, raw = false, plain = fals
         rehypePlugins={[[rehypeHighlight, { detect: true, ignoreMissing: true }]]}
         components={{
           pre: Pre,
+          table: ({ children }) => (
+            <div className="md-table-wrap">
+              <table>{children}</table>
+            </div>
+          ),
           a: ({ href, children }) => (
             <a href={href} target="_blank" rel="noreferrer noopener">{children}</a>
           ),

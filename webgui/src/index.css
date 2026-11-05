@@ -240,9 +240,15 @@ html.light body::before {
 .prose-md strong { font-weight: 650; }
 .prose-md blockquote { margin: 0.8em 0; padding: 0.2em 0 0.2em 0.95em; border-left: 2px solid var(--color-line2); color: var(--color-muted); }
 .prose-md hr { border: 0; border-top: 1px solid var(--color-line); margin: 1.2em 0; }
-.prose-md table { width: 100%; border-collapse: collapse; font-size: 13px; margin: 0.8em 0; display: block; overflow-x: auto; }
-.prose-md th, .prose-md td { border: 1px solid var(--color-line); padding: 6px 10px; text-align: left; }
-.prose-md th { background: var(--color-panel2); font-weight: 600; }
+.md-table-wrap { width: 100%; overflow-x: auto; margin: 0.8em 0; border-radius: 10px; -webkit-overflow-scrolling: touch; }
+.prose-md table { width: 100%; min-width: 540px; border-collapse: collapse; font-size: 13px; }
+.prose-md th, .prose-md td { border: 1px solid var(--color-line); padding: 6px 10px; text-align: left; vertical-align: top; overflow-wrap: normal; }
+.prose-md td code, .prose-md td a { overflow-wrap: anywhere; word-break: break-word; }
+.prose-md th { background: var(--color-panel2); font-weight: 600; white-space: nowrap; }
+@media (max-width: 640px) {
+  .prose-md table { min-width: 460px; font-size: 12px; }
+  .prose-md th, .prose-md td { padding: 5px 8px; }
+}
 .prose-md :not(pre) > code {
   font-family: var(--font-mono);
   font-size: 0.86em;

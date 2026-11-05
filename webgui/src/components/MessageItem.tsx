@@ -468,10 +468,13 @@ export function MessageItem({ m, showThinking, onUndo }: {
     if (p.type === 'ask') return <AskCard key={p.question_id || i} part={p} threadId={m.thread_id} />
     if (p.type === 'thought') return showThinking && p.text?.trim() ? <ThinkingBlock key={i} text={p.text} /> : null
     if (p.type === 'note') {
+      const note = p.text || ''
+      // Progress notes (findings, resume banners) are noise next to the report.
+      if (!/\b(?:error|failed|stopped|cancelled|canceled|warning)\b/i.test(note)) return null
       return (
         <div key={i} className="my-1 flex items-start gap-1.5 text-[11.5px] leading-snug text-faint">
           <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-faint/70" />
-          <span className="min-w-0 break-words">{p.text.length > 220 ? p.text.slice(0, 217) + '…' : p.text}</span>
+          <span className="min-w-0 break-words">{note.length > 220 ? note.slice(0, 217) + '…' : note}</span>
         </div>
       )
     }
