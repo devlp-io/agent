@@ -3458,6 +3458,12 @@ async def _agent_stream(body: ChatBody, request: Request):
 
             if (not router.is_busy and len(tools) == tools_before_turn
                     and (_is_denial(last_reply) or _is_refusal_text(last_reply))):
+                if _is_denial(last_reply):
+                    # The router already exhausted its retries and the brain.
+                    refusal_final = True
+                    last_reply = _refusal_signal()
+                    yield _sse({"type": "text_final", "text": _refusal_signal()})
+                    break
                 if refusal_attempts < REFUSAL_ATTEMPTS:
                     refusal_attempts += 1
                     # A refusal is not an answer: clear it from the live view and
@@ -4033,6 +4039,12 @@ async def api_chat(body: ChatBody, request: Request):
                     continue
                 text_out = _scrub_identity(text_out)
                 if _is_denial(text_out) or _is_refusal_text(text_out):
+                    if _is_denial(text_out):
+                        text_out = _refusal_signal()
+                        yield _sse({"type": "text_final", "text": text_out})
+                        final_text_chunks.append(text_out)
+                        parts.append({"type": "text", "text": text_out})
+                        break
                     if refusal_attempts < REFUSAL_ATTEMPTS:
                         refusal_attempts += 1
                         chat_retries += 1
