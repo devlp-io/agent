@@ -285,6 +285,9 @@ def main():
     server._todo_apply(tt, "edit", "t2", "test IDOR on /api/users")
     items = server._todo_apply(tt, "list")
     check("todo edit", any(i["text"] == "test IDOR on /api/users" for i in items))
+    server._todo_apply(tt, "add", "third item")
+    done = server._todo_apply(tt, "done", "1")
+    check("todo accepts an ordinal ref", done and done[0]["status"] == "done")
     check("todo clears", server._todo_apply(tt, "clear") == [])
     check("todos endpoint", client.get(f"/api/v2/threads/{tt}/todos").status_code == 200)
     client.delete(f"/api/v2/threads/{tt}")
@@ -296,6 +299,16 @@ def main():
     check("scope narrow", mission_scope("what is the tech stack of example.com") == "scoped")
     check("scope deep", mission_scope("attack example.com and get all vulnerabilities") == "deep")
     check("scope continue inherits", mission_scope("continue", "deep") == "deep")
+
+    check("short 'attack target' expands", server.is_short_offensive("attack example.com"))
+    check("short 'find vulns' expands", server.is_short_offensive("find vulns of example.com"))
+    check("short 'offensive target' expands", server.is_short_offensive("offensive example.com"))
+    check("short 'scan for vulnerabilities' expands",
+          server.is_short_offensive("scan for vulnerabilities example.com"))
+    check("tech stack is not a mission",
+          not server.is_short_offensive("what is the tech stack of example.com"))
+    check("no target means no expansion", not server.is_short_offensive("attack"))
+    check("mission brief has phases", "Resolve and fingerprint" in server.MISSION_BRIEF)
 
     check("imperative 'do this' not a question",
           server._is_question_only("Do this exactly, in order: create a todo list.") is False)
@@ -377,6 +390,15 @@ def main():
     fr._exec_directive_finding("high|Duplicate title|second")
     check("duplicate finding recorded once",
           sum(1 for e in fevs if type(e).__name__ == "FindingEvent") == 1)
+
+    tcalls = []
+    tr = AgentRouter(lambda e: None)
+    tr.todo_callback = lambda action, a="", b="": tcalls.append((action, a, b)) or []
+    tr._exec_directive_todo("add Fingerprint the host")
+    tr._exec_directive_todo("edit t2 reworded")
+    check("todo free-form parsed",
+          tcalls[0] == ("add", "Fingerprint the host", "")
+          and tcalls[1] == ("edit", "t2", "reworded"))
 
     # token gate (separate app import not needed: prove middleware wiring)
     check("token gate optional", server.GUI_TOKEN == "" or isinstance(server.GUI_TOKEN, str))

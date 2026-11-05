@@ -317,6 +317,7 @@ Agentic Workflow Rules:
     - When testing JSONP/callbacks: Test executable punctuation (e.g. `?_jsonp=alert(1)//` or `callback(1)`). If the server rejects the callback (e.g. WordPress `rest_callback_invalid`) or serves `X-Content-Type-Options: nosniff`, it is NOT reflected XSS.
     - When testing pingbacks/SSRF: A `faultCode 0` or accepted response without out-of-band interaction or internal content retrieval does NOT confirm SSRF.
     - When reporting finding severity, match the empirical evidence; never upgrade an unverified endpoint disclosure to High/Critical without confirmed compromise.
+    - Data exposure findings must quote the exact endpoint, the total record count, the exposed field names, and ONE representative sample record. Never list victims or dump a corpus.
 21. Scoped Requests Stay Scoped (CRITICAL):
     If the operator asks for one fact — tech stack, headers, version, IP, certificate, a single file, a single command — deliver exactly that and stop. Do not pivot into a full assessment, do not enumerate subdomains, do not run exploit chains. A scoped answer is a scoped answer. Depth is for missions, not questions.
 22. Live Task List (TODOS):
@@ -1490,11 +1491,33 @@ class AgentRouter:
         return env
 
     def _exec_directive_todo(self, payload: str) -> str:
-        """Apply a TODO directive through the server-provided store."""
-        parts = [p.strip() for p in (payload or "").split("|")]
-        action = (parts[0] or "list").lower()
-        a = parts[1] if len(parts) > 1 else ""
-        b = "|".join(parts[2:]).strip() if len(parts) > 2 else ""
+        """Apply a TODO directive through the server-provided store.
+
+        Accepts both `add|text`, `add | text`, and free-form `add text`.
+        """
+        raw = (payload or "").strip()
+        action, a, b = "list", "", ""
+        if "|" in raw:
+            parts = [p.strip() for p in raw.split("|")]
+            action = (parts[0] or "list").lower()
+            a = parts[1] if len(parts) > 1 else ""
+            b = "|".join(parts[2:]).strip() if len(parts) > 2 else ""
+        else:
+            m = re.match(r"^([A-Za-z]+)\b[\s:]*\s*(.*)$", raw)
+            if m:
+                action = m.group(1).lower()
+                rest = m.group(2).strip()
+                if action in ("edit", "rename") and rest:
+                    bits = rest.split(None, 1)
+                    a = bits[0]
+                    b = bits[1] if len(bits) > 1 else ""
+                elif action in ("done", "doing", "todo", "start", "remove", "rm", "delete"):
+                    a = rest
+                else:
+                    a = rest
+            else:
+                action, a = "add", raw
+
         if action in ("add", "new", "create", "edit", "rename"):
             self._todo_used = True
         items: List[Dict[str, str]] = []

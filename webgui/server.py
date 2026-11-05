@@ -1855,6 +1855,36 @@ TARGET_FACT_RE = re.compile(
 )
 
 
+SHORT_OFFENSIVE_RE = re.compile(
+    r"\b(?:attack|offensive|pwn|hack|penetrate|red[\s-]*team|"
+    r"find\s+(?:vulns?|vulnerabilities|bugs)|scan\s+(?:for\s+)?(?:vulns?|vulnerabilities))\b",
+    re.I,
+)
+MISSION_BRIEF = (
+    "[MISSION BRIEF — auto-expanded from the operator's short order]\n"
+    "Treat this as a full authorized offensive assessment of the named target.\n"
+    "1) Resolve and fingerprint every reachable host, TLS, WAF and hosting.\n"
+    "2) Enumerate subdomains from CT logs and probe each for status/stack.\n"
+    "3) Map pages, APIs, JS bundles, robots/sitemap, login and admin surfaces.\n"
+    "4) Test real vulnerability classes with proof: auth bypass, IDOR, injection, SSRF, "
+    "file handling, secrets in JS, and CVEs for the exact stack versions.\n"
+    "5) When blocked, rotate headers/UA, try origin IPs and alternate paths, use external "
+    "fetchers, install missing tools.\n"
+    "Rules: open a TODO plan (max 8 items) and keep it current; record every verified issue as "
+    "FINDING: <severity>|<title>|<evidence> — for data exposure include the count, the exposed "
+    "fields and one representative sample; keep going until a critical/high finding is verified "
+    "or the surface is exhausted; report only verified results.\n\n"
+)
+
+
+def is_short_offensive(text: str) -> bool:
+    """A terse offensive order ('attack x.com') should expand into a full mission."""
+    t = (text or "").strip()
+    if not t or len(t) > 180:
+        return False
+    return bool(SHORT_OFFENSIVE_RE.search(t)) and bool(TARGET_MENTION_RE.search(t))
+
+
 def _is_question_only(text: str) -> bool:
     t = (text or "").strip()
     if not t or IMPERATIVE_RE.match(t):
@@ -1953,6 +1983,36 @@ def _todo_list(thread_id: str) -> List[Dict[str, str]]:
     return [{"id": r["id"], "text": r["text"], "status": r["status"]} for r in rows]
 
 
+def _todo_next_id(c) -> str:
+    """Globally unique short id (todos.id is a global primary key)."""
+    mx = 0
+    for (rid,) in c.execute("SELECT id FROM todos").fetchall():
+        m = re.fullmatch(r"t(\d+)", rid or "")
+        if m:
+            mx = max(mx, int(m.group(1)))
+    return f"t{mx + 1}"
+
+
+def _todo_resolve(c, thread_id: str, ref: str) -> str:
+    """Accept t3, 3, or 'item 3' and return the real row id."""
+    ref = (ref or "").strip()
+    if not ref:
+        return ref
+    row = c.execute("SELECT id FROM todos WHERE thread_id=? AND id=?",
+                    (thread_id, ref)).fetchone()
+    if row:
+        return row["id"]
+    digits = re.sub(r"\D", "", ref)
+    if digits:
+        rows = c.execute(
+            "SELECT id FROM todos WHERE thread_id=? ORDER BY ord ASC", (thread_id,)
+        ).fetchall()
+        for idx, (rid,) in enumerate(rows, 1):
+            if rid.endswith(digits) or str(idx) == digits:
+                return rid
+    return ref
+
+
 def _todo_apply(thread_id: str, action: str, a: str = "", b: str = "") -> List[Dict[str, str]]:
     """Agent-driven todo store. Returns the whole list after the change."""
     act = (action or "list").strip().lower()
@@ -1963,37 +2023,38 @@ def _todo_apply(thread_id: str, action: str, a: str = "", b: str = "") -> List[D
                 text = (a or b or "").strip()
                 if text:
                     row = c.execute(
-                        "SELECT id FROM todos WHERE thread_id=? ORDER BY ord DESC LIMIT 1",
+                        "SELECT COALESCE(MAX(ord), 0) AS m FROM todos WHERE thread_id=?",
                         (thread_id,),
                     ).fetchone()
-                    nxt = 1
-                    if row:
-                        m = re.search(r"(\d+)$", row["id"] or "")
-                        nxt = int(m.group(1)) + 1 if m else 1
+                    nxt = int(row["m"] or 0) + 1
                     c.execute(
                         "INSERT INTO todos(id,thread_id,text,status,ord,created,updated) "
                         "VALUES(?,?,?,?,?,?,?)",
-                        (f"t{nxt}", thread_id, text[:500], "todo", nxt, now, now),
+                        (_todo_next_id(c), thread_id, text[:500], "todo", nxt, now, now),
                     )
             elif act in ("done", "doing", "todo", "start", "progress", "open"):
                 status = {"start": "doing", "progress": "doing", "open": "todo"}.get(act, act)
+                rid = _todo_resolve(c, thread_id, a or b)
                 c.execute(
                     "UPDATE todos SET status=?, updated=? WHERE thread_id=? AND id=?",
-                    (status, now, thread_id, (a or b).strip()),
+                    (status, now, thread_id, rid),
                 )
             elif act in ("edit", "rename"):
+                rid = _todo_resolve(c, thread_id, a)
                 c.execute(
                     "UPDATE todos SET text=?, updated=? WHERE thread_id=? AND id=?",
-                    ((b or "").strip()[:500], now, thread_id, (a or "").strip()),
+                    ((b or "").strip()[:500], now, thread_id, rid),
                 )
             elif act in ("remove", "rm", "delete"):
+                rid = _todo_resolve(c, thread_id, a or b)
                 c.execute("DELETE FROM todos WHERE thread_id=? AND id=?",
-                          (thread_id, (a or b).strip()))
+                          (thread_id, rid))
             elif act in ("clear", "reset"):
                 c.execute("DELETE FROM todos WHERE thread_id=?", (thread_id,))
             # "list" and anything else: no mutation
         return _todo_list(thread_id)
-    except Exception:
+    except Exception as e:
+        print(f"[todos] apply failed: {e}", flush=True)
         return _todo_list(thread_id)
 
 
@@ -2301,6 +2362,9 @@ def _final_summary(objective: str, draft: str, parts, hidden: List[str]) -> str:
         "plainly and why.\n"
         "- Report concrete findings: names, hosts, ports, versions, endpoints, paths, artifacts, "
         "counts, status codes, errors. Quote real values from the evidence.\n"
+        "- For PII or data exposure: give the exact endpoint, total record count, exposed field names, "
+        "and include ONE representative sample record verbatim as proof. Never dump more than one "
+        "record, never list victims. If a corpus was counted, state the count and distinct-value counts.\n"
         "- Separate CONFIRMED facts from what remains unverified. No padding, no filler, no "
         "enthusiasm. If evidence is thin, say it is thin.\n"
         "- No code fences, no raw output blocks, no shell transcripts in the report.\n"
@@ -3049,6 +3113,8 @@ async def _agent_stream(body: ChatBody, request: Request):
             )
         prompt = (resume_block + _mission_constraints(text) + session_block + GUI_TRANSPORT
                   + _attachments_context(atts) + (text or "Please review the attached files."))
+        if is_short_offensive(text):
+            prompt = MISSION_BRIEF + prompt
         try:
             from core.agent_router import mission_scope as _mission_scope_of
             # A continuation must inherit the depth of the original objective,
