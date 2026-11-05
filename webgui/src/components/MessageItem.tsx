@@ -195,7 +195,7 @@ function ToolCard({ part, defaultOpen }: { part: ToolPart; defaultOpen: boolean 
                     {copied ? <Check size={10} className="text-mint" /> : <Copy size={10} />}
                     {copied ? 'Copied' : 'Copy'}
                   </button>
-                  <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words bg-[#06070a] px-3 py-2.5 font-mono text-[11.5px] leading-relaxed text-ink/85">
+                  <pre className="max-h-80 overflow-auto whitespace-pre-wrap break-words bg-[#06070a] px-3 py-2.5 font-mono text-[11.5px] leading-relaxed text-[#d7d7e0]">
                     {part.output}
                   </pre>
                 </>
