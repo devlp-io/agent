@@ -805,7 +805,18 @@ REFUSAL_RE = re.compile(
     r"|\bwon'?t\s+be\s+doing\b"
     r"|\bnot\s+(?:appropriate|comfortable)\b"
     r"|\bagainst\s+(?:my|the)\s+(?:policy|guidelines)\b"
-    r"|\bas\s+an?\s+(?:ai|language\s+model|assistant)\b)",
+    r"|\bas\s+an?\s+(?:ai|language\s+model|assistant)\b"
+    # Announced stops and "line crossed" prose are refusals even when the
+    # model never says "I can't". These escaped on the nuunipay run.
+    r"|\bi'?m\s+going\s+to\s+stop\b"
+    r"|\bi\s+am\s+going\s+to\s+stop\b"
+    r"|\bi'?ll\s+stop\s+here\b"
+    r"|\bi'?ve\s+stopped\s+(?:the\s+)?(?:engagement|work|assessment|active)\b"
+    r"|\bhave\s+stopped\s+(?:the\s+)?(?:engagement|work|assessment|active)\b"
+    r"|\bstop(?:ping)?\s+the\s+active\s+(?:offensive\s+)?work\b"
+    r"|\bcrossed\s+a\s+line\b"
+    r"|\bbe\s+straight\s+with\s+you\b"
+    r"|\brather\s+than\s+moving\s+into\s+the\s+next\s+phase\b)",
     re.I,
 )
 
@@ -1192,6 +1203,14 @@ def _store_title(thread_id: str, title: str) -> None:
         return
     try:
         with _db() as c:
+            row = c.execute("SELECT title FROM threads WHERE id=?", (thread_id,)).fetchone()
+            current = row["title"] if row else ""
+            # A late title task for the opening "hi" must not clobber the
+            # real mission title that arrived in the next message.
+            if _title_is_trivial(title) and not _title_is_trivial(current):
+                return
+            if title.strip() == (current or "").strip():
+                return
             c.execute("UPDATE threads SET title=? WHERE id=?", (title[:80], thread_id))
     except Exception:
         pass
@@ -1202,17 +1221,89 @@ def _slug(text: str, limit: int = 24) -> str:
     return (t[:limit].rstrip("-") or "session")
 
 
+TRIVIAL_UTTERANCE_RE = re.compile(
+    r"(?:(?:hi|hello|hey|yo|sup)(?:\s+there)?|test|testing|ping|ok|okay|thanks|thank\s+you|"
+    r"good\s+(?:morning|afternoon|evening)|start|new\s+chat|anyone|there)",
+    re.I,
+)
+TRIVIAL_TITLE_RE = re.compile(
+    r"(?:casual|greeting|hello|hi\b|hey\b|chat\s+session|new\s+chat|test)",
+    re.I,
+)
+MISSION_TITLE_RE = re.compile(
+    r"\b(?:attack|offensive|scan|audit|assessment|pentest|review|vulnerab\w*|"
+    r"exploit|recon|red[\s-]*team|analy[sz]\w*|investigat\w*)\b",
+    re.I,
+)
+
+
+def _is_trivial_utterance(text: str) -> bool:
+    t = re.sub(r"\s+", " ", (text or "").strip())
+    if not t or len(t) > 40:
+        return False
+    return bool(TRIVIAL_UTTERANCE_RE.fullmatch(t.strip(" .!?,")))
+
+
+def _title_is_trivial(title: str) -> bool:
+    t = re.sub(r"\s+", " ", (title or "").strip())
+    if not t or t.lower() == "new chat":
+        return True
+    if MISSION_TITLE_RE.search(t):
+        return False
+    return bool(TRIVIAL_TITLE_RE.search(t)) or _is_trivial_utterance(t)
+
+
+def _is_mission_text(text: str) -> bool:
+    t = (text or "").strip()
+    if not t or _is_trivial_utterance(t):
+        return False
+    if re.search(r"https?://|\b(?:[\w-]+\.)+(?:com|net|org|io|dev|app|ai|co|gov|edu|info|biz|me|xyz|so)\b",
+                 t, re.I):
+        return True
+    return bool(MISSION_TITLE_RE.search(t))
+
+
+def _workspace_slug(text: str) -> str:
+    """Prefer the target host for a mission folder, else a short slug."""
+    m = re.search(
+        r"(?:https?://)?((?:[a-z0-9](?:[a-z0-9-]+\.)+[a-z]{2,24}))",
+        text or "", re.I,
+    )
+    if m:
+        host = m.group(1).lower()
+        if not re.search(r"\.(?:js|py|json|txt|md|html|css|php|sh|map|png|jpg|svg|xml)$", host):
+            return _slug(host.replace(".", "-"), 24)
+    return _slug(text, 24)
+
+
 def _session_workdir(thread_id: str, first_text: str) -> pathlib.Path:
     """Each chat gets its own folder under the workspace root; reuse it for the chat."""
     with _db() as c:
         row = c.execute("SELECT workdir FROM threads WHERE id=?", (thread_id,)).fetchone()
         existing = row["workdir"] if row else None
+    root = pathlib.Path(os.environ.get("AG_SCAN_ROOT", os.path.expanduser("~/scans"))).expanduser() / "workspace"
     if existing:
         p = pathlib.Path(existing)
+        # A chat that opened with "hi" used to keep a `hi-<id>` folder for the
+        # rest of its life, even after the operator gave it a real mission.
+        # Rename it once, when the first substantive order arrives.
+        try:
+            stem = p.name.rsplit("-", 1)[0]
+            if (_is_trivial_utterance(stem.replace("-", " "))
+                    and _is_mission_text(first_text)):
+                new_name = f"{_workspace_slug(first_text)}-{thread_id[:6]}"
+                if new_name != p.name:
+                    new_path = p.parent / new_name
+                    if not new_path.exists():
+                        p.rename(new_path)
+                        p = new_path
+                        with _db() as c:
+                            c.execute("UPDATE threads SET workdir=? WHERE id=?", (str(p), thread_id))
+        except Exception:
+            pass
         p.mkdir(parents=True, exist_ok=True)
         return p
-    root = pathlib.Path(os.environ.get("AG_SCAN_ROOT", os.path.expanduser("~/scans"))).expanduser() / "workspace"
-    name = f"{_slug(first_text)}-{thread_id[:6]}"
+    name = f"{_workspace_slug(first_text)}-{thread_id[:6]}"
     path = root / name
     path.mkdir(parents=True, exist_ok=True)
     with _db() as c:
@@ -2382,6 +2473,12 @@ def _summary_evidence(parts) -> str:
     return "\n".join(lines) or "(no actions)"
 
 
+def _ends_cleanly(text: str) -> bool:
+    """A report that stops mid-sentence must be continued, not shipped."""
+    t = (text or "").rstrip()
+    return bool(t) and (t[-1] in ".!?)]}" or t.endswith("…"))
+
+
 def _final_summary(objective: str, draft: str, parts, hidden: List[str]) -> str:
     """Objective-driven closing report for every task lane (offensive, scans, OSINT, code, analysis)."""
     from core.model_manager import ModelManager
@@ -2442,13 +2539,23 @@ def _final_summary(objective: str, draft: str, parts, hidden: List[str]) -> str:
         f"HIDDEN ENGINE ACTIVITY / FINDINGS:\n{hidden_txt}\n\n"
         f"DRAFT ANSWER TO IMPROVE:\n{(draft or '')[:6000]}"
     )
+    partial = ""
     for attempt in range(2):
         try:
+            messages = [{"role": "system", "content": sys_prompt},
+                        {"role": "user", "content": user}]
+            if partial:
+                messages += [
+                    {"role": "assistant", "content": partial},
+                    {"role": "user", "content":
+                        "That report was cut off mid-sentence. Continue from the exact "
+                        "last character, do not repeat anything, finish the remaining "
+                        "sections, and end with complete punctuation."},
+                ]
             resp = client.chat.completions.create(
                 model=model,
-                messages=[{"role": "system", "content": sys_prompt},
-                          {"role": "user", "content": user}],
-                max_tokens=3500 if attempt == 0 else 2500,
+                messages=messages,
+                max_tokens=6000 if attempt == 0 else 3000,
                 temperature=0.2,
             )
             try:
@@ -2456,11 +2563,16 @@ def _final_summary(objective: str, draft: str, parts, hidden: List[str]) -> str:
             except Exception:
                 pass
             txt = (resp.choices[0].message.content or "").strip()
-            if txt:
+            if not txt:
+                continue
+            if partial:
+                txt = partial + txt
+            if _ends_cleanly(txt):
                 return txt
+            partial = txt
         except Exception:
             break
-    return ""
+    return partial
 
 def _strip_code_blocks(text: str) -> str:
     if not text:
@@ -2929,7 +3041,9 @@ async def _agent_stream(body: ChatBody, request: Request):
         n = c.execute("SELECT COUNT(*) AS n FROM messages WHERE thread_id=?", (body.thread_id,)).fetchone()["n"]
         cur_title = c.execute("SELECT title FROM threads WHERE id=?", (body.thread_id,)).fetchone()["title"]
     title = None
-    needs_title = n <= 2 and cur_title == "New chat"
+    needs_title = (n <= 2 and cur_title == "New chat") or (
+        _title_is_trivial(cur_title) and _is_mission_text(text)
+    )
     if needs_title:
         title = _autotitle(text or (atts[0]["filename"] if atts else ""))
         with _db() as c:
@@ -3949,7 +4063,9 @@ async def api_chat(body: ChatBody, request: Request):
     with _db() as c:
         n = c.execute("SELECT COUNT(*) AS n FROM messages WHERE thread_id=?", (body.thread_id,)).fetchone()["n"]
         cur_title = c.execute("SELECT title FROM threads WHERE id=?", (body.thread_id,)).fetchone()["title"]
-    needs_title = n <= 2 and cur_title == "New chat"
+    needs_title = (n <= 2 and cur_title == "New chat") or (
+        _title_is_trivial(cur_title) and _is_mission_text(text)
+    )
     if needs_title:
         title = _autotitle(text or (atts[0]["filename"] if atts else ""))
         with _db() as c:

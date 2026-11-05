@@ -115,6 +115,87 @@ def _target_label(t: str) -> str:
     return t
 
 
+# Hosts that are infrastructure/tooling, or belong to the target's own
+# platform, not separate engagements. Never ask the operator to name these.
+INFRA_DOMAIN_SUFFIXES = (
+    "google.com", "googleapis.com", "gstatic.com", "googleusercontent.com",
+    "github.com", "githubusercontent.com", "githubassets.com",
+    "cloudflare.com", "cloudflareinsights.com", "cloudflareaccess.com",
+    "firebase.google.com", "firebaseio.com", "firebaseapp.com",
+    "web.app", "appspot.com", "cloudfunctions.net", "run.app",
+    "cloudinary.com", "hostinger.com", "hostinger.net",
+    "npmjs.com", "pypi.org", "python.org", "debian.org", "ubuntu.com",
+    "microsoft.com", "mozilla.org", "apple.com",
+    "jina.ai", "shodan.io", "censys.io", "crt.sh", "urlscan.io",
+    "hackertarget.com", "virustotal.com", "w3.org", "schema.org",
+    "owasp.org", "portswigger.net", "stackoverflow.com", "medium.com",
+    "dev.to", "reddit.com", "youtube.com", "readthedocs.io",
+    "nist.gov", "mitre.org", "cve.org", "exploit-db.com", "snyk.io",
+    "semgrep.dev", "gitlab.com", "bitbucket.org", "curl.se", "gnu.org",
+    "kernel.org", "apache.org", "nginx.org", "openssl.org",
+    "letsencrypt.org", "ietf.org", "rfc-editor.org", "wikipedia.org",
+    "archive.org", "json.org",
+)
+
+# Final labels that are file extensions, not TLDs.
+_FILE_EXT_LABELS = {
+    "js", "mjs", "cjs", "ts", "tsx", "jsx", "py", "json", "txt", "md",
+    "html", "htm", "css", "scss", "php", "sh", "bash", "zsh", "bin",
+    "png", "jpg", "jpeg", "gif", "webp", "svg", "ico", "wasm", "map",
+    "xml", "yaml", "yml", "toml", "ini", "cfg", "log", "gz", "zip",
+    "tar", "pdf", "csv", "db", "sqlite", "bak", "tmp",
+}
+
+_TWO_LEVEL_SUFFIXES = {
+    "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au",
+    "co.jp", "or.jp", "co.nz", "com.br", "com.mx", "com.tr", "com.sg",
+    "com.hk", "com.so", "co.ke", "co.za", "co.in", "com.pk", "com.ng",
+}
+
+_HOST_RE = re.compile(
+    r"(?<![\w.-])((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24})(?![\w.-])",
+    re.I,
+)
+
+
+def _host_from_url(value: str) -> str:
+    v = (value or "").strip()
+    v = re.sub(r"^[a-z][a-z0-9+.-]*://", "", v, flags=re.I)
+    v = v.split("/", 1)[0].split("@")[-1].split(":", 1)[0]
+    return v.strip("[]").lower()
+
+
+def _hosts_in(text: str) -> List[str]:
+    """Extract plausible hostnames from free text, skipping file names."""
+    out: List[str] = []
+    for m in _HOST_RE.finditer(text or ""):
+        host = m.group(1).lower().strip(".")
+        labels = host.split(".")
+        if len(labels) < 2 or labels[-1] in _FILE_EXT_LABELS:
+            continue
+        if host not in out:
+            out.append(host)
+    return out
+
+
+def _registrable_domain(value: str) -> str:
+    """Best-effort eTLD+1 for scope comparisons (no external dependency)."""
+    host = _host_from_url(value)
+    if not host or re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", host):
+        return ""
+    labels = host.split(".")
+    if len(labels) < 2:
+        return ""
+    last_two = ".".join(labels[-2:])
+    if last_two in _TWO_LEVEL_SUFFIXES and len(labels) >= 3:
+        return ".".join(labels[-3:])
+    return last_two
+
+
+def _is_infra_domain(domain: str) -> bool:
+    return any(domain == d or domain.endswith("." + d) for d in INFRA_DOMAIN_SUFFIXES)
+
+
 REFUSAL_TOPIC_RE = re.compile(
     r"\b(authorization|owner[- ]authorized|malformed (?:url|target|host)|"
     r"template text|third party|inject\w*|disclosure|refus\w*|consent|"
@@ -815,6 +896,7 @@ class AgentRouter:
         Allows the agent to plan, execute directives, inspect output & errors,
         adapt, troubleshoot, and keep going until the task is complete.
         """
+        self._mission_text = initial_user_text or ""
         # Automatically detect and track target domain/URL mentioned in the task
         tgt_m = re.search(
             r"(?:https?://)?(?:(?:\d{1,3}\.){3}\d{1,3}|(?:[a-zA-Z0-9_\-]+\.)+[a-zA-Z]{2,})(?::\d+)?(?:/[^\s,;]*)?",
@@ -1190,6 +1272,25 @@ class AgentRouter:
             for kind, payload in to_execute:
                 if self._is_cancelled:
                     break
+
+                # Soft scope guard: the operator owns the named target, not
+                # every app that happens to appear in its bundle.
+                if kind in ("COMMAND", "PROBE", "WALK", "APIMAP", "WAF",
+                            "STACK", "EXPLOIT"):
+                    oos = self._out_of_scope_hosts(payload)
+                    if oos:
+                        active = (self._active_scan_target or self._last_scan_target
+                                  or "the operator's target")
+                        note = (
+                            f"[SCOPE WATCH] Did not execute {kind} against "
+                            f"{', '.join(oos)} — not part of the operator's target "
+                            f"({active}). Stay on the named target; the operator can "
+                            "name an additional asset if it should be included. "
+                            "This is not a refusal: continue with the in-scope surface."
+                        )
+                        obs_lines.append(note)
+                        self.emit(AssistantMessageEvent(note))
+                        continue
 
                 if kind == "COMMAND":
                     cmd_res = self._exec_directive_command(payload)
@@ -1685,6 +1786,43 @@ class AgentRouter:
             rendered += ("\n[PLAN CAP] 8 items maximum — mark one done or cancelled "
                          "before adding another.")
         return f"[Todo updated]\n{rendered or '(empty)'}"
+
+    def _out_of_scope_hosts(self, payload: str) -> List[str]:
+        """Hosts in an executable directive that are not part of this mission.
+
+        The operator names the target; finding a second product in a bundle is
+        not authorization to test it. Infrastructure/CDN/tooling domains and
+        the target's own subdomains are always allowed. A host the operator
+        named anywhere in the mission is allowed too. Enforcement is a soft
+        skip (the directive is not executed) with an explicit observation, so
+        an unrelated app can never be probed by accident.
+        """
+        target = self._active_scan_target or self._last_scan_target or ""
+        target_domain = _registrable_domain(target)
+        allowed = set()
+        if target_domain:
+            allowed.add(target_domain)
+        for host in _hosts_in(getattr(self, "_mission_text", "") or ""):
+            domain = _registrable_domain(host)
+            if domain:
+                allowed.add(domain)
+        bad: List[str] = []
+        domains: List[str] = []
+        for host in _hosts_in(payload or ""):
+            domain = _registrable_domain(host)
+            if not domain:
+                continue
+            if domain not in domains:
+                domains.append(domain)
+            if domain in allowed or _is_infra_domain(domain):
+                continue
+            if host not in bad:
+                bad.append(host)
+        # A command that also touches the target (or its platform) is not an
+        # off-target probe; only block commands aimed solely at other apps.
+        if any(d in allowed or _is_infra_domain(d) for d in domains):
+            return []
+        return bad
 
     def _exec_directive_intel(self, kind: str, payload: str) -> str:
         """Run a hidden SEARCH/FETCH. Results feed the model, never the reply."""

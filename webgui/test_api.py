@@ -336,6 +336,67 @@ def main():
     check("scope offensive is deep", mission_scope("offensive example.com") == "deep")
     check("scope continue inherits", mission_scope("continue", "deep") == "deep")
 
+    import agent_v8 as _v8
+    check("refusal catches announced stop",
+          _v8.is_refusal("I'm going to stop the active offensive work against "
+                         "nuunipay.com and dahabpay.com here, and be straight with you."))
+    check("refusal catches stopped engagement",
+          _v8.is_refusal("I've stopped the engagement here rather than moving into "
+                         "the next phase."))
+    check("server refusal catches announced stop",
+          server._is_refusal_text("I'm going to stop the active offensive work here."))
+    check("scope watch flags unrelated app",
+          AgentRouter(lambda e: None)._out_of_scope_hosts(
+              "curl -sS https://dahabpay.com/Authentication/Login") == ["dahabpay.com"])
+    scope_guard = AgentRouter(lambda e: None)
+    scope_guard._active_scan_target = "https://nuunipay.com"
+    check("scope watch allows target subdomain",
+          scope_guard._out_of_scope_hosts(
+              "curl -sS https://app.nuunipay.com/version.json") == [])
+    check("scope watch allows platform hosts",
+          scope_guard._out_of_scope_hosts(
+              "curl -sS https://dahab-chain-wallet.firebaseapp.com/x") == [])
+    check("scope watch allows infra/tooling",
+          scope_guard._out_of_scope_hosts(
+              "curl -sS https://api.github.com/repos/x && curl https://api.cloudinary.com/v1_1/x") == [])
+    check("scope watch allows research docs",
+          scope_guard._out_of_scope_hosts(
+              "curl -sS https://owasp.org/www-project-top-ten/") == [])
+    check("scope watch does not treat filenames as hosts",
+          scope_guard._out_of_scope_hosts("python main.dart.js --out out.bin") == [])
+    check("scope watch allows mixed target command",
+          scope_guard._out_of_scope_hosts(
+              "curl https://nuunipay.com/a && curl https://dahabpay.com/b") == [])
+
+    check("greeting title is trivial", server._title_is_trivial("Casual Greeting Chat Session"))
+    check("mission title is not trivial", not server._title_is_trivial("Offensive Review of nuunipay.com"))
+    check("mission text recognized", server._is_mission_text("offensive attack https://nuunipay.com"))
+    check("continue is not a mission", not server._is_mission_text("continue"))
+    check("mission workspace slug uses host",
+          server._workspace_slug("offensive attack https://nuunipay.com").startswith("nuunipay-com"))
+    check("report completeness rejects cut sentence",
+          not server._ends_cleanly("5. On dahabpay.com, test `ForgotPassword`"))
+    check("report completeness accepts finished prose",
+          server._ends_cleanly("Done: all surfaces closed."))
+
+    # A chat that opens with "hi" must not keep a `hi-<id>` folder once the
+    # operator gives it a real target.
+    old_root = os.environ.get("AG_SCAN_ROOT")
+    os.environ["AG_SCAN_ROOT"] = str(TMP / "scans")
+    try:
+        wt = client.post("/api/v2/threads", json={"title": "New chat"}).json()["id"]
+        p_hi = server._session_workdir(wt, "hi")
+        p_mission = server._session_workdir(wt, "offensive attack https://example.com")
+        check("workspace renamed from greeting",
+              p_hi != p_mission and p_mission.name.startswith("example-com"))
+        check("workspace rename keeps contents", p_hi.exists() is False and p_mission.exists())
+        client.delete(f"/api/v2/threads/{wt}")
+    finally:
+        if old_root is None:
+            os.environ.pop("AG_SCAN_ROOT", None)
+        else:
+            os.environ["AG_SCAN_ROOT"] = old_root
+
     parser_dedupe = AgentRouter(lambda e: None)
     dup = parser_dedupe._parse_directives("COMMAND: id\nCOMMAND: id\nTODO: add|one")
     check("duplicate directives collapse", dup == [("COMMAND", "id"), ("TODO", "add|one")])
