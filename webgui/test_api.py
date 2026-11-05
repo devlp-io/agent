@@ -304,6 +304,14 @@ def main():
                               "a sign the owner framing is template text."))
     check("refusal heuristic keeps normal status",
           not _looks_like_refusal("Done: pulled the manifest. Next: probe the API."))
+
+    from core.task_runner import CommandResult as _CR
+    led = AgentRouter(lambda e: None)
+    led.task_runner.run_command = lambda *a, **k: _CR(
+        command="echo hi", returncode=0, output="LEDGER_OK", duration=0.0)
+    led._exec_directive_command("echo hi")
+    check("evidence ledger records real output",
+          any("LEDGER_OK" in line for line in led.evidence_ledger))
     check("model tags stripped",
           strip_model_tags('a</parameter>\n<parameter name="x">b') == "a\nb")
     check("scope narrow", mission_scope("what is the tech stack of example.com") == "scoped")

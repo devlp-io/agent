@@ -3,9 +3,11 @@ import { Check, ChevronRight, Circle, Loader2, ListChecks, X } from 'lucide-reac
 import type { TodoItem } from '../lib/types'
 
 /** The agent's own plan for the current mission. Collapsed by default. */
-export function TodoPanel({ items }: { items: TodoItem[] }) {
+export function TodoPanel({ items, active = false }: { items: TodoItem[]; active?: boolean }) {
   const [open, setOpen] = useState(false)
   if (!items.length) return null
+  const openItems = items.some(i => i.status === 'todo' || i.status === 'doing')
+  if (!active && !openItems) return null
 
   const done = items.filter(i => i.status === 'done').length
   const doing = [...items].reverse().find(i => i.status === 'doing')

@@ -468,6 +468,7 @@ class AgentRouter:
         self._refusal_streak = 0
         self._brain_used = False
         self._repair_used = False
+        self.evidence_ledger: List[str] = []
 
     @property
     def is_busy(self) -> bool:
@@ -865,10 +866,17 @@ class AgentRouter:
             "Log progress with FINDING: as soon as something is verified."
         )
         if self.history and self.history[0].get("role") == "system":
-            self.history[0]["content"] = (
+            ledger = "\n\n".join(getattr(self, "evidence_ledger", [])[-20:])
+            sys_content = (
                 get_system_prompt() + "\n\n" + scope_block
                 + (f"\n{session_mem}" if session_mem else "")
             )
+            if ledger:
+                sys_content += (
+                    "\n\n[SESSION EVIDENCE LEDGER — actual command output from this session; "
+                    "treat it as measured fact, never as an unverified claim]\n" + ledger
+                )
+            self.history[0]["content"] = sys_content
 
         # Pre-flight Tooling & Dependency Verification (Dedicated Tool Agent)
         active_target = _target_label(self._active_scan_target) or (candidate_tgt if tgt_m else "")
@@ -1703,6 +1711,13 @@ class AgentRouter:
             output=res.output,
             duration_sec=res.duration,
         ))
+        try:
+            out = (res.output or "").strip()
+            if out:
+                self.evidence_ledger.append(f"$ {cmd}\n{out[:600]}")
+                self.evidence_ledger[:] = self.evidence_ledger[-40:]
+        except Exception:
+            pass
         return res
 
     def _is_command_soft_failure(self, cmd: str, res: CommandResult) -> bool:

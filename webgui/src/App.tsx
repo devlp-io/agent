@@ -739,7 +739,7 @@ export default function App() {
           onSuggestion={text => send(text, [], { mode, effort, autoApprove, model: activeModel })}
         />
 
-        <TodoPanel items={todos} />
+        <TodoPanel items={todos} active={!!streaming} />
 
         <Composer
           threadId={activeId}

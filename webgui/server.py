@@ -1700,6 +1700,12 @@ def _save_agent_session(thread_id: str, router) -> None:
         if not isinstance(hist, list):
             return
         trimmed = hist[-120:]
+        ledger = getattr(router, "evidence_ledger", None)
+        if ledger:
+            trimmed = list(trimmed) + [{
+                "role": "system",
+                "content": "[SESSION EVIDENCE LEDGER]\n" + "\n\n".join(ledger[-30:]),
+            }]
         with _db() as c:
             c.execute(
                 "INSERT INTO agent_sessions(thread_id, history, updated) VALUES(?,?,?) "
@@ -1960,7 +1966,17 @@ def _router_for(thread_id: str):
         setattr(router, "_gui_holder", holder)
         restored = _load_agent_session(thread_id)
         if restored:
-            router.history = restored
+            ledger: List[str] = []
+            clean: List[Dict[str, Any]] = []
+            for m in restored:
+                c = m.get("content") or ""
+                if m.get("role") == "system" and c.startswith("[SESSION EVIDENCE LEDGER]"):
+                    ledger.append(c.split("\n", 1)[1] if "\n" in c else "")
+                else:
+                    clean.append(m)
+            router.history = clean
+            if ledger:
+                router.evidence_ledger = ledger
         else:
             _seed_router_history(router, thread_id)
         _apply_gui_style(router)
@@ -3146,7 +3162,8 @@ async def _agent_stream(body: ChatBody, request: Request):
                     f"- {t['id']} [{t['status']}]: {t['text']}" for t in open_items
                 )
                 prompt = (
-                    "[OPEN PLAN — finish these items and close each one before DONE]\n"
+                    "[OPEN PLAN — finish these items, reopen cancelled ones when the operator asks to resume, "
+                    "and close each one before DONE]\n"
                     + plan + "\n\n" + prompt
                 )
         except Exception:
