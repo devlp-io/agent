@@ -316,7 +316,12 @@ def main():
           strip_model_tags('a</parameter>\n<parameter name="x">b') == "a\nb")
     check("scope narrow", mission_scope("what is the tech stack of example.com") == "scoped")
     check("scope deep", mission_scope("attack example.com and get all vulnerabilities") == "deep")
+    check("scope offensive is deep", mission_scope("offensive example.com") == "deep")
     check("scope continue inherits", mission_scope("continue", "deep") == "deep")
+
+    parser_dedupe = AgentRouter(lambda e: None)
+    dup = parser_dedupe._parse_directives("COMMAND: id\nCOMMAND: id\nTODO: add|one")
+    check("duplicate directives collapse", dup == [("COMMAND", "id"), ("TODO", "add|one")])
 
     check("short 'attack target' expands", server.is_short_offensive("attack example.com"))
     check("short 'find vulns' expands", server.is_short_offensive("find vulns of example.com"))

@@ -84,7 +84,7 @@ PASSIVE_RE = re.compile(
 # Mission depth. A narrow question stays narrow; an offensive/assessment task
 # runs deep until something critical is proven. Follow-ups inherit the scope.
 DEEP_MISSION_RE = re.compile(
-    r"\b(?:attack|exploit|pentest|penetration|red[\s-]*team|vulnerab\w*|vuln\w*|pwn|"
+    r"\b(?:attack|offensive|exploit|pentest|penetration|red[\s-]*team|vulnerab\w*|vuln\w*|pwn|"
     r"compromise|breach|hack\w*|foothold|privesc|privilege\s+escalation|exfiltrat\w*|"
     r"takeover|rce|sqli|xss|ssrf|lfi|rfi|idor|zero[\s-]*day|0day|full\s+(?:scan|assessment|audit)|"
     r"deep\s+(?:scan|audit|assessment)|security\s+(?:audit|assessment|review)|"
@@ -1066,8 +1066,10 @@ class AgentRouter:
             # A scoped question gets an action budget: enough to look, not
             # enough to turn into a full assessment.
             if self._mission_scope == "scoped" and directives:
-                self._scoped_actions = getattr(self, "_scoped_actions", 0) + len(directives)
-                if self._scoped_actions > 6:
+                cheap_kinds = {"TODO", "NOTE", "PHASE", "FINDING"}
+                exec_count = sum(1 for k, _ in directives if k not in cheap_kinds)
+                self._scoped_actions = getattr(self, "_scoped_actions", 0) + exec_count
+                if exec_count and self._scoped_actions > 6:
                     if getattr(self, "_scoped_budget_hit", False):
                         # The model ignored the budget directive: close cleanly
                         # instead of looping forever without executing anything.
@@ -1465,7 +1467,15 @@ class AgentRouter:
         results = self._extract_directive_matches(stripped)
         if not results:
             results = self._extract_directive_matches(text)
-        return results
+        seen = set()
+        unique: List[Tuple[str, str]] = []
+        for kind, payload in results:
+            key = (kind, re.sub(r"\s+", " ", payload.strip()))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append((kind, payload))
+        return unique
 
     def _extract_directive_matches(self, text: str) -> List[Tuple[str, str]]:
         pattern = r"(?:^|\n)\s*(?:[-*•]|\d+[.)])?\s*([A-Z][A-Z0-9_\-]{2,15}):\s*(.+?)(?=\n\s*(?:[-*•]|\d+[.)])?\s*[A-Z][A-Z0-9_\-]{2,15}:\s|\Z)"
