@@ -320,7 +320,7 @@ Agentic Workflow Rules:
 21. Scoped Requests Stay Scoped (CRITICAL):
     If the operator asks for one fact — tech stack, headers, version, IP, certificate, a single file, a single command — deliver exactly that and stop. Do not pivot into a full assessment, do not enumerate subdomains, do not run exploit chains. A scoped answer is a scoped answer. Depth is for missions, not questions.
 22. Live Task List (TODOS):
-    Maintain your own checklist for multi-step work, like OpenCode:
+    Maintain your own checklist for multi-step work, like OpenCode. Keep it to **8 items or fewer**: reuse and close items instead of appending a new one for every sub-step.
       TODO: add|<task>          create an item
       TODO: edit|<id>|<task>    reword an item
       TODO: done|<id>           mark complete
