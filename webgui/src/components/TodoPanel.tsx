@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Check, ChevronRight, Circle, Loader2, ListChecks } from 'lucide-react'
+import { Check, ChevronRight, Circle, Loader2, ListChecks, X } from 'lucide-react'
 import type { TodoItem } from '../lib/types'
 
 /** The agent's own plan for the current mission. Collapsed by default. */
@@ -38,9 +38,13 @@ export function TodoPanel({ items }: { items: TodoItem[] }) {
                   ? <Check size={12} className="mt-0.5 shrink-0 text-mint" />
                   : i.status === 'doing'
                     ? <Loader2 size={12} className="mt-0.5 shrink-0 animate-spin text-accent" />
-                    : <Circle size={12} className="mt-0.5 shrink-0 text-faint" />}
+                    : i.status === 'cancelled'
+                      ? <X size={12} className="mt-0.5 shrink-0 text-faint" />
+                      : <Circle size={12} className="mt-0.5 shrink-0 text-faint" />}
                 <span className={`min-w-0 break-words text-[12px] leading-snug ${
-                  i.status === 'done' ? 'text-faint line-through' : 'text-muted'
+                  i.status === 'done'
+                    ? 'text-faint line-through'
+                    : i.status === 'cancelled' ? 'text-faint' : 'text-muted'
                 }`}>
                   {i.text}
                 </span>

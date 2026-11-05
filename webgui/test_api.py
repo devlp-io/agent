@@ -288,6 +288,9 @@ def main():
     server._todo_apply(tt, "add", "third item")
     done = server._todo_apply(tt, "done", "1")
     check("todo accepts an ordinal ref", done and done[0]["status"] == "done")
+    server._todo_close_open(tt)
+    check("closing a run cancels open items",
+          all(t["status"] == "cancelled" for t in server._todo_list(tt) if t["status"] != "done"))
     check("todo clears", server._todo_apply(tt, "clear") == [])
     check("todos endpoint", client.get(f"/api/v2/threads/{tt}/todos").status_code == 200)
     client.delete(f"/api/v2/threads/{tt}")

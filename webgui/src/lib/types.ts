@@ -21,7 +21,7 @@ export type ToolPart = {
 export type TodoItem = {
   id: string
   text: string
-  status: 'todo' | 'doing' | 'done'
+  status: 'todo' | 'doing' | 'done' | 'cancelled'
 }
 
 export type TextPart = { type: 'text'; text: string }

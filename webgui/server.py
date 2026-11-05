@@ -2058,6 +2058,19 @@ def _todo_apply(thread_id: str, action: str, a: str = "", b: str = "") -> List[D
         return _todo_list(thread_id)
 
 
+def _todo_close_open(thread_id: str) -> None:
+    """A finished/stopped run must not leave a plan showing active work."""
+    try:
+        with _db() as c:
+            c.execute(
+                "UPDATE todos SET status='cancelled', updated=? "
+                "WHERE thread_id=? AND status IN ('todo','doing')",
+                (_now(), thread_id),
+            )
+    except Exception:
+        pass
+
+
 def _attachments_context(atts: List[Dict[str, Any]]) -> str:
     if not atts:
         return ""
@@ -3126,6 +3139,18 @@ async def _agent_stream(body: ChatBody, request: Request):
             )
         prompt = (resume_block + _mission_constraints(text) + session_block + GUI_TRANSPORT
                   + _attachments_context(atts) + (text or "Please review the attached files."))
+        try:
+            open_items = [t for t in _todo_list(body.thread_id) if t["status"] != "done"]
+            if open_items and (resume or CONTINUE_RE.match((text or "").strip())):
+                plan = "\n".join(
+                    f"- {t['id']} [{t['status']}]: {t['text']}" for t in open_items
+                )
+                prompt = (
+                    "[OPEN PLAN — finish these items and close each one before DONE]\n"
+                    + plan + "\n\n" + prompt
+                )
+        except Exception:
+            pass
         if is_short_offensive(text):
             prompt = MISSION_BRIEF + prompt
         try:
@@ -3786,6 +3811,7 @@ async def _agent_stream(body: ChatBody, request: Request):
                     report_path.write_text(content.strip() + "\n", encoding="utf-8")
         except Exception:
             pass
+        _todo_close_open(body.thread_id)
         meta = {"mode": "agent", "engine": "cli", "effort": body.effort,
                 "objective": (run_objective or "")[:300],
                 "model": router.model_manager.display_name, "tools": tools,
