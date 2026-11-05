@@ -3018,7 +3018,10 @@ async def _agent_stream(body: ChatBody, request: Request):
                   + _attachments_context(atts) + (text or "Please review the attached files."))
         try:
             from core.agent_router import mission_scope as _mission_scope_of
-            router._scope_hint = _mission_scope_of(text or "")
+            # A continuation must inherit the depth of the original objective,
+            # not the word "continue" (which classifies as scoped).
+            scope_source = (run_objective if resume else text) or text
+            router._scope_hint = _mission_scope_of(scope_source)
         except Exception:
             pass
         if not gate_ok:
