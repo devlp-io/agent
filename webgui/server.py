@@ -2638,6 +2638,15 @@ def _line_is_code(s: str) -> bool:
         return True
     if re.match(r"^['\"][^'\"]{1,80}['\"]\s*:", body):
         return True
+    # prose-prefixed code calls / URL concatenation:
+    # `the helper: A.eg("https://us-central1-"+$.dWH()+"...", ...)`
+    if re.search(r"\b[A-Za-z_$][\w.$]*\.[A-Za-z_$][\w$]*\([^)]*https?://", body):
+        return True
+    if re.search(r"https?://[^\"'\s]*[\"']\s*\+", body):
+        return True
+    # list fragments ending in `]:` or `),`: "someone@example.org"]:
+    if re.match(r"^['\"].{0,120}['\"]\s*[\],)]+\s*:?$", body):
+        return True
     # bare call statement, including nested calls: log("x", json.dumps(r))
     if re.match(r"^[A-Za-z_][\w.]*\(", body):
         return True

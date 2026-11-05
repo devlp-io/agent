@@ -293,6 +293,14 @@ def main():
           "firebase_keys" not in vis13 and '"email"' not in vis13)
     check("visible answer keeps the auth status", "auth probed" in vis13)
 
+    vis14 = server._visible_answer(
+        'Mapping.\nthe helper: A.eg("https://us-central1-"+$.dWH()+".cloudfunctions.net/"+a,...)\n'
+        '"nobody-here-9z8x7@example.org"]:\nDone: map ready.'
+    )
+    check("visible answer drops prose-prefixed code calls", 'A.eg("https' not in vis14)
+    check("visible answer drops trailing list fragments", "nobody-here" not in vis14)
+    check("visible answer keeps the map status", "map ready" in vis14)
+
     # stray heredoc / markup artifacts (seen live: "PYEOF</div>")
     vis4 = server._visible_answer(
         "The FILE directive keeps corrupting with a trailing `</div>`.\n"
