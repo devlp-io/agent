@@ -249,6 +249,9 @@ def main():
           "</parameter>" not in vis6 and "end</parameter>" not in vis6)
     check("visible answer keeps the next line", "Next: verify the token" in vis6)
 
+    vis7 = server._visible_answer("Namespaces confirm the surface.\n]\nNext: probe the API.")
+    check("visible answer drops punctuation junk", "\n]" not in vis7 and "Namespaces confirm" in vis7)
+
     # stray heredoc / markup artifacts (seen live: "PYEOF</div>")
     vis4 = server._visible_answer(
         "The FILE directive keeps corrupting with a trailing `</div>`.\n"

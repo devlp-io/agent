@@ -2405,6 +2405,9 @@ def _visible_answer(text: str, limit: int = 0) -> str:
         if not s:
             kept.append("")
             continue
+        # punctuation-only junk lines: "]", "```", "---" fragments
+        if re.fullmatch(r"[\W_]+", s):
+            continue
         # markdown turns 4-space / tab indentation into a code block
         if line.startswith("\t") or line.startswith("    "):
             continue
@@ -3573,9 +3576,14 @@ async def _agent_stream(body: ChatBody, request: Request):
         ]
         _needs_report = (
             not refusal_final and (
-                len(tools) >= 2
+                (
+                    getattr(router, "_mission_scope", "") != "scoped"
+                    and (
+                        len(tools) >= 2
+                        or (len(tools) >= 1 and len((last_reply or "").strip()) > 500)
+                    )
+                )
                 or _looks_like_code_dump(last_reply)
-                or (len(tools) >= 1 and len((last_reply or "").strip()) > 500)
             )
         )
         if not stop_reason and _needs_report:
@@ -3635,6 +3643,15 @@ async def _agent_stream(body: ChatBody, request: Request):
         run_status = "cancelled" if aborted else "done"
         if not content and not aborted:
             content = "Task finished."
+        if aborted and len(content) < 400:
+            # A stopped run should still hand over what it proved.
+            parts_summary = _action_summary(parts)
+            findings = [p["text"] for p in visible if p.get("type") == "note"][-5:]
+            extra = "\n".join([parts_summary] + findings).strip()
+            if extra:
+                content = (content + "\n\n---\n" + extra).strip()
+                if answer_part is not None:
+                    answer_part["text"] = content
         meta = {"mode": "agent", "engine": "cli", "effort": body.effort,
                 "objective": (run_objective or "")[:300],
                 "model": router.model_manager.display_name, "tools": tools,

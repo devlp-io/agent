@@ -772,6 +772,7 @@ class AgentRouter:
         self._done_gate_retries = 0
         self._scoped_actions = 0
         self._scoped_budget_hit = False
+        self._empty_reply_retries = 0
 
         # Dynamically refresh root system prompt with current persona.md and active session assessment memory
         session_mem = self.get_session_memory_prompt()
@@ -913,6 +914,14 @@ class AgentRouter:
 
             full_reply = "".join(accumulated).strip()
             if not full_reply:
+                if getattr(self, "_empty_reply_retries", 0) < 2:
+                    self._empty_reply_retries = getattr(self, "_empty_reply_retries", 0) + 1
+                    self.history.append({
+                        "role": "user",
+                        "content": "Your last response was empty. Emit exactly one directive now, or answer the operator in prose."
+                    })
+                    turn += 1
+                    continue
                 self.emit(ErrorEvent("Model returned empty response. Check network or model status."))
                 self.emit(StatusChangeEvent("READY", "green"))
                 return

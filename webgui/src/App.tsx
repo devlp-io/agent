@@ -617,6 +617,15 @@ export default function App() {
   const currentModel = models.find(m => m.name === activeModel)
   const effectiveVariant = currentModel?.variants?.find(v => v.key === effort)
   const modelLabel = effectiveVariant?.label ?? currentModel?.label ?? currentModel?.model ?? 'model'
+  const lastAssistantModel = (() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i]
+      if (m.role === 'assistant' && m.meta?.model) return String(m.meta.model)
+    }
+    return ''
+  })()
+  const threadVariant = models.flatMap(m => m.variants ?? []).find(v => v.model === lastAssistantModel)
+  const headerModelLabel = threadVariant?.label ?? (lastAssistantModel || modelLabel)
   const isBusy = !!streaming
 
   return (
@@ -677,7 +686,7 @@ export default function App() {
               {online ? <Wifi size={10} className="text-mint" /> : <WifiOff size={10} className="text-rose" />}
               <span>{online ? 'connected' : 'offline'}</span>
               <span className="text-line2">·</span>
-              <span className="truncate">{modelLabel}</span>
+              <span className="truncate">{headerModelLabel}</span>
               <span className="hidden items-center gap-1 sm:flex">
                 <span className="text-line2">·</span>
                 <CircleDot size={9} className={mode === 'agent' ? 'text-accent' : 'text-muted'} />
@@ -691,7 +700,7 @@ export default function App() {
             onClick={() => setSettingsOpen(true)}
           >
             <span className={`h-1.5 w-1.5 rounded-full ${currentModel?.configured ? 'bg-mint' : 'bg-amber'}`} />
-            <span className="hidden max-w-[150px] truncate sm:inline">{modelLabel}</span>
+            <span className="hidden max-w-[150px] truncate sm:inline">{headerModelLabel}</span>
             <ChevronDown size={11} className="text-faint" />
           </button>
           <button
