@@ -93,7 +93,8 @@ MAX_UPLOAD_BYTES = int(os.environ.get("AG_GUI_MAX_UPLOAD", 64 * 1024 * 1024))
 TOOL_OUTPUT_LIMIT = 40_000
 MAX_TOOL_ITERS = 12
 MAX_AGENT_ACTIONS = int(os.environ.get("AG_GUI_MAX_ACTIONS", "0"))
-MAX_AGENT_SECONDS = int(os.environ.get("AG_GUI_MAX_SECONDS", "0"))
+# Safety net: an abandoned session must not run forever. 2h default.
+MAX_AGENT_SECONDS = int(os.environ.get("AG_GUI_MAX_SECONDS", "7200"))
 MAX_AGENT_STALL = int(os.environ.get("AG_GUI_STALL_SECONDS", "60"))
 
 
@@ -2570,6 +2571,8 @@ GUI_TRANSPORT = (
     "To run a shell command, emit it at column 0 as `COMMAND: <cmd>`. "
     "To create or modify a file, emit `FILE: <relative-path>|<full file content>` — this is the ONLY way "
     "a file gets written. Native function-call / tool-call tokens (<|DSML|>, JSON tool calls) are NOT executed. "
+    "Never emit XML/DSML tags such as <parameter name=\"x\"> or </parameter> anywhere — they corrupt files. "
+    "Directives are plain lines: `FILE: path|content`, `COMMAND: cmd`. "
     "When the operator gives an imperative build/write/edit request, actually emit FILE:/COMMAND: directives "
     "and do the work; never paste file contents or code blocks into the chat reply — the console renders actions. "
     "The working directory is the project root; real tools are available.\n\n"
