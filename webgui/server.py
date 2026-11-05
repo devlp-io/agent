@@ -2264,19 +2264,29 @@ CREATE_TASK_RE = re.compile(
 
 
 def _cleanup_temp_artifacts(changes: List[Dict[str, Any]], user_text: str, work_dir: str) -> List[str]:
-    """Delete transient artifacts created during this run unless the user asked for them."""
+    """Delete transient scratch files, never evidence or deliverables.
+
+    Assessment artifacts (recon/, evidence/, *.json, *.md, scripts and reports)
+    must survive so the operator can inspect the proof after the run.
+    """
     removed: List[str] = []
     low = (user_text or "").lower()
-    create_task = bool(CREATE_TASK_RE.search(user_text or ""))
     for ch in changes:
         if ch.get("action") != "created":
             continue
         path = pathlib.Path(str(ch.get("path", "")))
         name = path.name
-        # creation tasks keep their deliverables; modification tasks keep only the updated target
-        if create_task and not TEMP_NAME_RE.match(name):
-            continue
         if name.lower() in low:
+            continue
+        parents = {p.name.lower() for p in path.parents}
+        if parents & {"recon", "evidence", "findings", "reports"}:
+            continue
+        scratch = (
+            TEMP_NAME_RE.match(name)
+            or name.startswith("_agent_")
+            or name.endswith((".bak", ".tmp", ".bak2"))
+        )
+        if not scratch:
             continue
         try:
             path.unlink(missing_ok=True)
@@ -3754,6 +3764,14 @@ async def _agent_stream(body: ChatBody, request: Request):
                 content = (content + "\n\n---\n" + extra).strip()
                 if answer_part is not None:
                     answer_part["text"] = content
+        # Keep the report as a workspace artifact so the proof survives cleanup.
+        try:
+            if content and len(content.strip()) > 200:
+                report_path = pathlib.Path(work_dir) / "report.md"
+                if not report_path.exists():
+                    report_path.write_text(content.strip() + "\n", encoding="utf-8")
+        except Exception:
+            pass
         meta = {"mode": "agent", "engine": "cli", "effort": body.effort,
                 "objective": (run_objective or "")[:300],
                 "model": router.model_manager.display_name, "tools": tools,
