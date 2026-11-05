@@ -2038,16 +2038,21 @@ def _todo_apply(thread_id: str, action: str, a: str = "", b: str = "") -> List[D
             if act in ("add", "new", "create"):
                 text = (a or b or "").strip()
                 if text:
-                    row = c.execute(
-                        "SELECT COALESCE(MAX(ord), 0) AS m FROM todos WHERE thread_id=?",
-                        (thread_id,),
-                    ).fetchone()
-                    nxt = int(row["m"] or 0) + 1
-                    c.execute(
-                        "INSERT INTO todos(id,thread_id,text,status,ord,created,updated) "
-                        "VALUES(?,?,?,?,?,?,?)",
-                        (_todo_next_id(c), thread_id, text[:500], "todo", nxt, now, now),
-                    )
+                    rows = c.execute(
+                        "SELECT text FROM todos WHERE thread_id=?", (thread_id,)
+                    ).fetchall()
+                    existing = {(r["text"] or "").strip().lower() for r in rows}
+                    if text.lower() not in existing and len(rows) < 8:
+                        row = c.execute(
+                            "SELECT COALESCE(MAX(ord), 0) AS m FROM todos WHERE thread_id=?",
+                            (thread_id,),
+                        ).fetchone()
+                        nxt = int(row["m"] or 0) + 1
+                        c.execute(
+                            "INSERT INTO todos(id,thread_id,text,status,ord,created,updated) "
+                            "VALUES(?,?,?,?,?,?,?)",
+                            (_todo_next_id(c), thread_id, text[:500], "todo", nxt, now, now),
+                        )
             elif act in ("done", "doing", "todo", "start", "progress", "open"):
                 status = {"start": "doing", "progress": "doing", "open": "todo"}.get(act, act)
                 rid = _todo_resolve(c, thread_id, a or b)
@@ -2491,6 +2496,12 @@ def _line_is_code(s: str) -> bool:
                  r"/dev/null|--max-time\b", body):
         return True
     if body[:1] in ("'", '"') and re.search(r"[|<>?]|/wp-|https?:", body):
+        return True
+    # bare control keywords with no punctuation still count as code
+    if re.fullmatch(r"(?:break|continue|pass|else|return|try|finally|do|end|yield)", body, re.I):
+        return True
+    # quoted list fragments: "a.js", "b.js" ]
+    if body[:1] in ("'", '"') and ('", "' in body or "', '" in body or body.endswith("]")):
         return True
     # bare call statement, including nested calls: log("x", json.dumps(r))
     if re.match(r"^[A-Za-z_][\w.]*\(", body):

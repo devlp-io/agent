@@ -1657,6 +1657,9 @@ class AgentRouter:
             f"  [{str(i.get('status', 'todo'))[:5]}] {i.get('id')}: {i.get('text', '')}"
             for i in items
         )
+        if action in ("add", "new", "create") and len(items) >= 8:
+            rendered += ("\n[PLAN CAP] 8 items maximum — mark one done or cancelled "
+                         "before adding another.")
         return f"[Todo updated]\n{rendered or '(empty)'}"
 
     def _exec_directive_intel(self, kind: str, payload: str) -> str:

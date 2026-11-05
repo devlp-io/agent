@@ -262,6 +262,13 @@ def main():
     check("visible answer drops shell fragments", "2>&1" not in vis9 and "_fields" not in vis9)
     check("visible answer keeps the status", "Route dump ready" in vis9)
 
+    vis10 = server._visible_answer(
+        '"main.dart.js", "connect_main.dart.js" ]\nbreak\nDone: mapped the bundles.'
+    )
+    check("visible answer drops bare code keywords", "break" not in vis10)
+    check("visible answer drops quoted list fragments", "main.dart.js" not in vis10)
+    check("visible answer keeps the status line", "mapped the bundles" in vis10)
+
     # stray heredoc / markup artifacts (seen live: "PYEOF</div>")
     vis4 = server._visible_answer(
         "The FILE directive keeps corrupting with a trailing `</div>`.\n"
@@ -291,6 +298,11 @@ def main():
     server._todo_close_open(tt)
     check("closing a run cancels open items",
           all(t["status"] == "cancelled" for t in server._todo_list(tt) if t["status"] != "done"))
+    for i in range(10):
+        server._todo_apply(tt, "add", f"cap item {i}")
+    check("plan capped at 8", len(server._todo_list(tt)) == 8)
+    check("duplicate todo ignored",
+          len(server._todo_apply(tt, "add", "cap item 0")) == 8)
     check("todo clears", server._todo_apply(tt, "clear") == [])
     check("todos endpoint", client.get(f"/api/v2/threads/{tt}/todos").status_code == 200)
     client.delete(f"/api/v2/threads/{tt}")
