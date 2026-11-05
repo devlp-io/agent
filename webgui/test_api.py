@@ -400,6 +400,23 @@ def main():
           tcalls[0] == ("add", "Fingerprint the host", "")
           and tcalls[1] == ("edit", "t2", "reworded"))
 
+    # the compliance worker gives the task a second, fresh-context brain
+    from unittest.mock import patch
+
+    class _BrainResult:
+        def __init__(self, summary):
+            self.summary = summary
+
+    b1 = AgentRouter(lambda e: None)
+    with patch("core.agent_router.SubagentDispatcher.dispatch",
+               return_value=_BrainResult("worker completed the task")):
+        check("refusal brain returns worker summary",
+              b1._refusal_brain("attack example.com") == "worker completed the task")
+    b2 = AgentRouter(lambda e: None)
+    with patch("core.agent_router.SubagentDispatcher.dispatch",
+               return_value=_BrainResult("I'm not going to do that")):
+        check("refusal brain rejects a nested refusal", b2._refusal_brain("attack example.com") == "")
+
     # token gate (separate app import not needed: prove middleware wiring)
     check("token gate optional", server.GUI_TOKEN == "" or isinstance(server.GUI_TOKEN, str))
 

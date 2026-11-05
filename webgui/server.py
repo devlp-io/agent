@@ -3131,6 +3131,7 @@ async def _agent_stream(body: ChatBody, request: Request):
             # not the word "continue" (which classifies as scoped).
             scope_source = (run_objective if resume else text) or text
             router._scope_hint = _mission_scope_of(scope_source)
+            router._mission_text = scope_source
         except Exception:
             pass
         if not gate_ok:
@@ -3682,6 +3683,10 @@ async def _agent_stream(body: ChatBody, request: Request):
             last_reply = _visible_answer(last_reply)
             last_reply = _scrub_identity(last_reply)
             last_reply = _agent_answer_cleanup(last_reply, has_edit or bool(tools))
+        if (last_reply or "").strip().upper() == "DENIED":
+            # A refusal is a one-word signal — never expand it into a report.
+            refusal_final = True
+            last_reply = _refusal_signal()
         tools = [
             {"tool": p.get("tool"), "args": p.get("args", {}), "ok": p.get("ok")}
             for p in parts if p.get("type") == "tool"

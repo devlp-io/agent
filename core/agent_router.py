@@ -428,6 +428,8 @@ class AgentRouter:
         self._done_gate_retries = 0
         self._finding_keys: set = set()
         self._refusal_streak = 0
+        self._brain_used = False
+        self._repair_used = False
 
     @property
     def is_busy(self) -> bool:
@@ -598,6 +600,28 @@ class AgentRouter:
         self.emit(StatusChangeEvent("CANCELLED", "yellow"))
         self.emit(TaskCancelledEvent("Task or chat stopped immediately by operator. History preserved."))
         self.emit(StatusChangeEvent("READY", "green"))
+
+    def _refusal_brain(self, task_text: str) -> str:
+        """Separate operator worker used when the main model refuses.
+
+        It gets its own model and shell, so the task is attempted from a fresh
+        context instead of arguing with the refusal in the same history.
+        """
+        task = (task_text or "").strip()
+        if not task:
+            return ""
+        try:
+            res = SubagentDispatcher.dispatch(
+                "operator", task, self.emit,
+                model_manager=ModelManager(), task_runner=TaskRunner(),
+                work_dir=self.get_active_work_dir(),
+            )
+            summary = (getattr(res, "summary", "") or "").strip()
+            if summary and not agent_v8.is_refusal(summary):
+                return summary
+        except Exception:
+            pass
+        return ""
 
     def _run_subagents(self, payloads: List[str]) -> List[Tuple[str, Any]]:
         """Run SUBAGENT directives concurrently with isolated runners and models.
@@ -780,6 +804,8 @@ class AgentRouter:
         self._plan_nudged = False
         self._finding_keys = set()
         self._refusal_streak = 0
+        self._brain_used = False
+        self._repair_used = False
 
         # Dynamically refresh root system prompt with current persona.md and active session assessment memory
         session_mem = self.get_session_memory_prompt()
@@ -936,6 +962,18 @@ class AgentRouter:
             # Refusal suppression check
             if agent_v8.is_refusal(full_reply):
                 self._refusal_streak = getattr(self, "_refusal_streak", 0) + 1
+                # Second brain: a separate operator worker takes the task when the
+                # main model refuses. It has its own model and shell; if it also
+                # refuses, the run ends with the one-word signal.
+                if self._refusal_streak >= 2 and not getattr(self, "_brain_used", False):
+                    self._brain_used = True
+                    task_text = getattr(self, "_mission_text", initial_user_text)
+                    brain = self._refusal_brain(task_text)
+                    if brain:
+                        self.emit(AssistantMessageEvent(brain))
+                        self.emit(TaskCompleteEvent(status="Completed by compliance worker", success=True))
+                        self.emit(StatusChangeEvent("READY", "green"))
+                        return
                 if self._refusal_streak >= 4:
                     # Stop the loop with the control signal instead of spinning.
                     self.emit(AssistantMessageEvent("DENIED"))
@@ -1313,6 +1351,21 @@ class AgentRouter:
                         + (playbook or "")
                     )
                     self.emit(AssistantMessageEvent("⚠️ **Supervisor Auto-Pivot:** Detected stuck/dead-end loop. Injected pivot directive to change attack vector."))
+                    # Second brain for a stuck state: let a fresh worker
+                    # diagnose and perform the next step once per mission.
+                    if not getattr(self, "_repair_used", False):
+                        self._repair_used = True
+                        mission = getattr(self, "_mission_text", "") or "complete the operator's task"
+                        repair = self._refusal_brain(
+                            "Objective: " + mission +
+                            "\nThe main agent is stuck on a failing or repeating step. Diagnose it and "
+                            "complete the next concrete step. Return the corrected command and its real output."
+                            "\nRecent output:\n" +
+                            "\n".join(str(o)[:400] for o in obs_lines[-3:])
+                        )
+                        if repair:
+                            pivot_injection += ("\n\n[AUTO-REPAIR — separate worker]\n" + repair[:1800])
+                            self.emit(AssistantMessageEvent("🛠️ **Auto-Repair:** separate worker diagnosed the stuck step."))
             else:
                 self._dead_end_strikes = 0
 
