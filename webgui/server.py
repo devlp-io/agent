@@ -2407,6 +2407,10 @@ def _visible_answer(text: str, limit: int = 0) -> str:
         # markdown turns 4-space / tab indentation into a code block
         if line.startswith("\t") or line.startswith("    "):
             continue
+        # drop lines that are/contain model tool tags (e.g. "end</parameter>")
+        if re.search(r"</?\s*(?:parameter|parameters|function_calls|function_call|"
+                     r"invoke|tool_call|dsml|antml:[\w-]+)\b", s, re.I):
+            continue
         if _line_is_code(s) or THINK_LINE_RE.match(s):
             continue
         # raw output / one huge machine line, not prose

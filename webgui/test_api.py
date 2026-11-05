@@ -244,6 +244,11 @@ def main():
     check("visible answer does not limit by default",
           len(server._visible_answer(long_status)) > 500)
 
+    vis6 = server._visible_answer("Testing them all.\nend</parameter>\nNext: verify the token endpoint.")
+    check("visible answer drops tag lines",
+          "</parameter>" not in vis6 and "end</parameter>" not in vis6)
+    check("visible answer keeps the next line", "Next: verify the token" in vis6)
+
     # stray heredoc / markup artifacts (seen live: "PYEOF</div>")
     vis4 = server._visible_answer(
         "The FILE directive keeps corrupting with a trailing `</div>`.\n"
